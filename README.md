@@ -6,6 +6,12 @@
 
 > 面向普通用户，不需要 Docker、Python、命令行知识。安装即用。
 
+## 致谢
+
+Plaw 引擎基于 [ZeroClaw](https://github.com/ZeroClaw-AI/ZeroClaw) 改造而来，感谢 [OpenClaw](https://github.com/OpenClaw-AI) 和 ZeroClaw 的开源贡献。
+
+虽然改到现在代码已经面目全非（内嵌桌面端、并行子 Agent、浏览器自动化、安全防护体系、Skills 热加载……），但没有 ZeroClaw 打下的基础就没有 Plaw。开源精神万岁。
+
 ---
 
 ## 为什么做这个？
@@ -124,7 +130,7 @@ Plaw 要解决的问题：**让不懂技术的人也能用上 AI Agent**。
 
 ### 普通用户
 
-从 [Releases](https://github.com/gfisrubbish/lobster-desktop/releases) 下载安装包：
+从 [Releases](https://github.com/gfisrubbish/plaw-desktop/releases) 下载安装包：
 
 - **Windows**: `plaw-desktop_x.x.x_x64-setup.exe`
 
@@ -133,7 +139,7 @@ Plaw 要解决的问题：**让不懂技术的人也能用上 AI Agent**。
 ### 开发者
 
 ```powershell
-git clone https://github.com/gfisrubbish/lobster-desktop.git
+git clone https://github.com/gfisrubbish/plaw-desktop.git
 cd plaw-desktop
 .\setup.ps1     # 一键安装所有依赖 + 编译 Plaw 引擎
 .\dev.ps1       # 启动开发（Vite + Tauri 热重载）
