@@ -6,13 +6,13 @@
         class="glass-dialog__overlay"
         role="dialog"
         aria-modal="true"
-        @click.self="!persistent && close()"
-        @keydown.escape="close"
+        @click.self="!persistent && closable && close()"
+        @keydown.escape="closable && close()"
       >
         <div class="glass-dialog__panel" :style="{ maxWidth: width }">
           <div class="glass-dialog__header">
             <h3 class="glass-dialog__title">{{ title }}</h3>
-            <button class="glass-dialog__close" @click="close" aria-label="Close">&times;</button>
+            <button v-if="closable" class="glass-dialog__close" @click="close" aria-label="Close">&times;</button>
           </div>
           <div class="glass-dialog__body">
             <slot />
@@ -27,14 +27,15 @@
 </template>
 
 <script setup>
-defineProps({
+const props = defineProps({
   modelValue: { type: Boolean, default: false },
   title: { type: String, default: '' },
   width: { type: String, default: '480px' },
   persistent: { type: Boolean, default: false },
+  closable: { type: Boolean, default: true },
 })
 const emit = defineEmits(['update:modelValue'])
-function close() { emit('update:modelValue', false) }
+function close() { if (props.closable) emit('update:modelValue', false) }
 </script>
 
 <style scoped>

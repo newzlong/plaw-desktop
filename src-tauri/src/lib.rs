@@ -607,18 +607,63 @@ async fn install_skill(
 ) -> Result<String, String> {
     let proxy_url = detect_proxy(&state.data_dir);
 
-    if path_or_url.starts_with("http://") || path_or_url.starts_with("https://") {
+    let name = if path_or_url.starts_with("http://") || path_or_url.starts_with("https://") {
         skills::install_skill_from_url(
             &state.data_dir,
             &path_or_url,
             proxy_url.as_deref(),
-        ).await
+        ).await?
     } else {
         skills::install_skill_from_path(
             &state.data_dir,
             std::path::Path::new(&path_or_url),
-        )
+        )?
+    };
+
+    // Auto-audit the newly installed skill (fire-and-forget, don't block install)
+    let data_dir = state.data_dir.clone();
+    let skill_name = name.clone();
+    let proxy = detect_proxy(&data_dir);
+    tokio::spawn(async move {
+        if let Err(e) = auto_audit_skill(&data_dir, &skill_name, proxy.as_deref()).await {
+            eprintln!("[lobster] Auto-audit failed for {skill_name}: {e}");
+        }
+    });
+
+    Ok(name)
+}
+
+/// Auto-audit a skill: read SKILL.md, call LLM, write tags back.
+/// Skips built-in skills that are already tagged.
+async fn auto_audit_skill(
+    data_dir: &std::path::Path,
+    name: &str,
+    proxy_url: Option<&str>,
+) -> Result<(), String> {
+    const SKIP_SKILLS: &[&str] = &[
+        "find-skills", "skill-creator", "audit-skills", "fix-skills",
+        "pptx", "xlsx", "docx", "pdf",
+    ];
+    if SKIP_SKILLS.contains(&name) {
+        return Ok(());
     }
+
+    let skill_md = skills::resolve_skill_md(data_dir, name)?;
+    let content = std::fs::read_to_string(&skill_md)
+        .map_err(|e| format!("Failed to read SKILL.md: {e}"))?;
+
+    // Skip if already audited (has compatibility tag)
+    if content.contains("compatibility:") {
+        return Ok(());
+    }
+
+    eprintln!("[lobster] Auto-auditing skill: {name}");
+    let result = skills::audit_skill_content(data_dir, &content, proxy_url).await?;
+    let new_content = skills::inject_audit_tags(&content, &result.compatibility, &result.risk);
+    std::fs::write(&skill_md, new_content)
+        .map_err(|e| format!("Failed to write audit tags: {e}"))?;
+    eprintln!("[lobster] Auto-audit done for {name}: {} / {}", result.compatibility, result.risk);
+    Ok(())
 }
 
 #[tauri::command]
@@ -649,6 +694,81 @@ async fn audit_skill(
         .map_err(|e| format!("Failed to write tags to SKILL.md: {e}"))?;
 
     Ok(result)
+}
+
+/// Audit skills in the background.
+/// When `force` is true, re-audits ALL skills (user clicked "Audit All" button).
+/// When `force` is false, only audits skills without a compatibility tag (auto-trigger).
+/// Returns the number of skills queued for audit.
+#[tauri::command]
+async fn audit_all_unaudited(
+    state: tauri::State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+    force: Option<bool>,
+) -> Result<u32, String> {
+    let force = force.unwrap_or(false);
+    let skills = skills::list_local_skills(&state.data_dir);
+    let data_dir = state.data_dir.clone();
+    let proxy = detect_proxy(&data_dir);
+
+    const SKIP_BUILTIN: &[&str] = &[
+        "find-skills", "skill-creator", "audit-skills", "fix-skills",
+        "pptx", "xlsx", "docx", "pdf",
+    ];
+
+    let mut count = 0u32;
+    for skill in &skills {
+        // Always skip built-in skills
+        if SKIP_BUILTIN.contains(&skill.name.as_str()) {
+            continue;
+        }
+        // In non-force mode, skip already-audited
+        if !force && !skill.compatibility.is_empty() {
+            continue;
+        }
+        count += 1;
+        let dd = data_dir.clone();
+        // Use directory slug (from path) as identifier — matches frontend's skillSlug()
+        let slug = std::path::Path::new(&skill.path)
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| skill.name.clone());
+        let px = proxy.clone();
+        let stagger = count;
+        let ah = app_handle.clone();
+        tokio::spawn(async move {
+            // Stagger to avoid flooding the LLM
+            tokio::time::sleep(tokio::time::Duration::from_millis(stagger as u64 * 500)).await;
+            let success = force_audit_skill(&dd, &slug, px.as_deref()).await.is_ok();
+            // Emit per-skill completion event — slug matches frontend's auditingSkills Set
+            let _ = ah.emit("skill-audited", serde_json::json!({
+                "name": slug,
+                "success": success,
+            }));
+        });
+    }
+
+    eprintln!("[lobster] Queued {count} skills for audit (force={force})");
+    Ok(count)
+}
+
+/// Audit a skill unconditionally (does not skip already-tagged skills).
+async fn force_audit_skill(
+    data_dir: &std::path::Path,
+    name: &str,
+    proxy_url: Option<&str>,
+) -> Result<(), String> {
+    let skill_md = skills::resolve_skill_md(data_dir, name)?;
+    let content = std::fs::read_to_string(&skill_md)
+        .map_err(|e| format!("Failed to read SKILL.md: {e}"))?;
+
+    eprintln!("[lobster] Auditing skill: {name}");
+    let result = skills::audit_skill_content(data_dir, &content, proxy_url).await?;
+    let new_content = skills::inject_audit_tags(&content, &result.compatibility, &result.risk);
+    std::fs::write(&skill_md, new_content)
+        .map_err(|e| format!("Failed to write audit tags: {e}"))?;
+    eprintln!("[lobster] Audit done for {name}: {} / {}", result.compatibility, result.risk);
+    Ok(())
 }
 
 /// Detect proxy URL with priority: user-configured > env vars > config.toml
@@ -1090,13 +1210,76 @@ fn append_session_message(
     sessions::append_session_message(
         &state.data_dir,
         &session_id,
-        sessions::ChatMessage { role, content },
+        sessions::ChatMessage { role, content, extra: Default::default() },
     )
 }
 
 #[tauri::command]
 fn session_exists(state: tauri::State<AppState>, id: String) -> bool {
     sessions::session_exists(&state.data_dir, &id)
+}
+
+// ========================
+// File Upload Commands
+// ========================
+
+#[tauri::command]
+fn save_upload(state: tauri::State<AppState>, name: String, data: Vec<u8>) -> Result<String, String> {
+    let uploads_dir = state.data_dir.join("uploads");
+    std::fs::create_dir_all(&uploads_dir).map_err(|e| format!("Failed to create uploads dir: {e}"))?;
+    // Sanitize filename
+    let safe_name: String = name.chars().map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' }).collect();
+    // Add timestamp to avoid collisions
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+    let final_name = format!("{now}_{safe_name}");
+    let path = uploads_dir.join(&final_name);
+    std::fs::write(&path, &data).map_err(|e| format!("Failed to write upload: {e}"))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Get total size of uploads directory in bytes and file count
+#[tauri::command]
+fn get_uploads_info(state: tauri::State<AppState>) -> Result<(u64, usize), String> {
+    let uploads_dir = state.data_dir.join("uploads");
+    if !uploads_dir.exists() {
+        return Ok((0, 0));
+    }
+    let mut total: u64 = 0;
+    let mut count: usize = 0;
+    let entries = std::fs::read_dir(&uploads_dir).map_err(|e| e.to_string())?;
+    for entry in entries.flatten() {
+        if let Ok(meta) = entry.metadata() {
+            if meta.is_file() {
+                total += meta.len();
+                count += 1;
+            }
+        }
+    }
+    Ok((total, count))
+}
+
+/// Delete all files in the uploads directory
+#[tauri::command]
+fn clear_uploads(state: tauri::State<AppState>) -> Result<(u64, usize), String> {
+    let uploads_dir = state.data_dir.join("uploads");
+    if !uploads_dir.exists() {
+        return Ok((0, 0));
+    }
+    let mut freed: u64 = 0;
+    let mut removed: usize = 0;
+    let entries = std::fs::read_dir(&uploads_dir).map_err(|e| e.to_string())?;
+    for entry in entries.flatten() {
+        if let Ok(meta) = entry.metadata() {
+            if meta.is_file() {
+                let size = meta.len();
+                if std::fs::remove_file(entry.path()).is_ok() {
+                    freed += size;
+                    removed += 1;
+                }
+            }
+        }
+    }
+    Ok((freed, removed))
 }
 
 // ========================
@@ -1279,6 +1462,7 @@ pub fn run() {
             install_skill,
             uninstall_skill,
             audit_skill,
+            audit_all_unaudited,
             search_registry_skills,
             sync_skills_registry,
             get_market_proxy,
@@ -1309,6 +1493,9 @@ pub fn run() {
             stop_embedding,
             get_embedding_status,
             is_embedding_available,
+            save_upload,
+            get_uploads_info,
+            clear_uploads,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -1328,6 +1515,12 @@ fn extract_bundle_if_needed(data_dir: &std::path::Path) {
     let bundles: &[(&str, &str)] = &[
         ("agent-browser-bundle.tar.gz", "agent-browser"),
         ("browsers-bundle.tar.gz", "browsers"),
+        ("python-bundle.tar.gz", "python"),
+        ("pandoc-bundle.tar.gz", "pandoc"),
+        ("libreoffice-bundle.tar.gz", "libreoffice"),
+        ("skills-bundle.tar.gz", ".plaw"),  // extracts .plaw/workspace/skills/
+        ("node-modules-bundle.tar.gz", "node_modules_global"),
+        ("poppler-bundle.tar.gz", "poppler"),
     ];
     for (archive_name, check_dir) in bundles {
         let archive_path = data_dir.join(archive_name);

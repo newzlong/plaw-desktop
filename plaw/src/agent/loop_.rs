@@ -50,11 +50,19 @@ const STREAM_CHUNK_MIN_CHARS: usize = 80;
 /// Used as a safe fallback when `max_tool_iterations` is unset or configured as zero.
 /// Set high enough to allow full-chain autonomous work (read → edit → build → fix → repeat)
 /// while still preventing infinite runaway. Mid-loop trim keeps context manageable.
-const DEFAULT_MAX_TOOL_ITERATIONS: usize = 50;
+const DEFAULT_MAX_TOOL_ITERATIONS: usize = usize::MAX;
 
 /// Maximum times the same tool can be called in a single turn before anti-loop protection kicks in.
 /// Prevents adversarial web content from inducing the AI into fetch/search/browser loops.
 const MAX_SAME_TOOL_PER_TURN: usize = 6;
+
+/// Tools exempt from per-turn frequency limits.
+/// Browser automation naturally requires many sequential calls (open → snapshot → click → wait → ...).
+/// File operations (reading/writing multiple files) are also normal in complex tasks.
+const ANTI_LOOP_EXEMPT_TOOLS: &[&str] = &[
+    "browser",
+    "read_file", "write_file", "edit_file", "list_dir",
+];
 
 /// Tools that return external (untrusted) content which may contain prompt injection.
 const EXTERNAL_CONTENT_TOOLS: &[&str] = &[
@@ -961,10 +969,26 @@ pub(crate) async fn run_tool_call_loop(
             return Ok(display_text);
         }
 
-        // Print any text the LLM produced alongside tool calls (unless silent)
-        if !silent && !display_text.is_empty() {
-            print!("{display_text}");
-            let _ = std::io::stdout().flush();
+        // Send any text the LLM produced alongside tool calls to both
+        // stdout (CLI) and on_delta (WebSocket/gateway).
+        if !display_text.is_empty() {
+            if !silent {
+                print!("{display_text}");
+                let _ = std::io::stdout().flush();
+            }
+            // Relay intermediate text to the frontend so it's visible before tool execution
+            if let Some(ref tx) = on_delta {
+                let mut chunk = String::new();
+                for word in display_text.split_inclusive(char::is_whitespace) {
+                    chunk.push_str(word);
+                    if chunk.len() >= STREAM_CHUNK_MIN_CHARS {
+                        let _ = tx.send(std::mem::take(&mut chunk)).await;
+                    }
+                }
+                if !chunk.is_empty() {
+                    let _ = tx.send(chunk).await;
+                }
+            }
         }
 
         // Execute tool calls and build results. `individual_results` tracks per-call output so
@@ -1180,19 +1204,22 @@ pub(crate) async fn run_tool_call_loop(
                 continue;
             }
 
-            // Anti-loop: track per-tool-name call frequency across the entire turn
+            // Anti-loop: track per-tool-name call frequency across the entire turn.
+            // Browser and file tools are exempt — they naturally need many sequential calls.
             let count = tool_call_counts.entry(tool_name.clone()).or_insert(0);
             *count += 1;
-            if *count > MAX_SAME_TOOL_PER_TURN {
+            let is_exempt = ANTI_LOOP_EXEMPT_TOOLS.contains(&tool_name.as_str());
+            if !is_exempt && *count > MAX_SAME_TOOL_PER_TURN {
+                let per_tool_limit = MAX_SAME_TOOL_PER_TURN;
                 let anti_loop_msg = format!(
                     "Anti-loop protection: tool '{}' has been called {} times this turn (limit {}). \
                      Skipping further calls. Summarize what you have so far and present results to the user.",
-                    tool_name, count, MAX_SAME_TOOL_PER_TURN
+                    tool_name, count, per_tool_limit
                 );
                 tracing::warn!(
                     tool = %tool_name,
                     count = *count,
-                    limit = MAX_SAME_TOOL_PER_TURN,
+                    limit = per_tool_limit,
                     "Anti-loop: tool call frequency exceeded"
                 );
                 runtime_trace::record_event(

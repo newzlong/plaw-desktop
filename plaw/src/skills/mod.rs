@@ -510,42 +510,80 @@ fn load_skill_toml(path: &Path) -> Result<Skill> {
 /// Load a skill from a SKILL.md file (simpler format)
 fn load_skill_md(path: &Path, dir: &Path) -> Result<Skill> {
     let content = std::fs::read_to_string(path)?;
-    let name = dir
+    let dir_name = dir
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown")
         .to_string();
 
+    let (fm_name, fm_desc, body) = parse_md_frontmatter(&content);
+    let name = fm_name.unwrap_or(dir_name);
+    let description = fm_desc.unwrap_or_else(|| extract_description(&body));
+
     Ok(Skill {
         name,
-        description: extract_description(&content),
+        description,
         version: "0.1.0".to_string(),
         author: None,
         tags: Vec::new(),
         tools: Vec::new(),
-        prompts: vec![content],
+        prompts: vec![body],
         location: Some(path.to_path_buf()),
     })
 }
 
 fn load_open_skill_md(path: &Path) -> Result<Skill> {
     let content = std::fs::read_to_string(path)?;
-    let name = path
+    let file_name = path
         .file_stem()
         .and_then(|n| n.to_str())
         .unwrap_or("open-skill")
         .to_string();
 
+    let (fm_name, fm_desc, body) = parse_md_frontmatter(&content);
+    let name = fm_name.unwrap_or(file_name);
+    let description = fm_desc.unwrap_or_else(|| extract_description(&body));
+
     Ok(Skill {
         name,
-        description: extract_description(&content),
+        description,
         version: "open-skills".to_string(),
         author: Some("besoeasy/open-skills".to_string()),
         tags: vec!["open-skills".to_string()],
         tools: Vec::new(),
-        prompts: vec![content],
+        prompts: vec![body],
         location: Some(path.to_path_buf()),
     })
+}
+
+/// Parse YAML frontmatter from a SKILL.md file.
+/// Returns (name, description, body_without_frontmatter).
+fn parse_md_frontmatter(content: &str) -> (Option<String>, Option<String>, String) {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        return (None, None, content.to_string());
+    }
+    // Find closing ---
+    let after_open = &trimmed[3..];
+    let close_pos = after_open.find("\n---");
+    let Some(close_pos) = close_pos else {
+        return (None, None, content.to_string());
+    };
+    let yaml_block = &after_open[..close_pos];
+    let body_start = 3 + close_pos + 4; // "---" + yaml + "\n---"
+    let body = trimmed[body_start..].trim_start_matches(['\r', '\n']).to_string();
+
+    let mut name = None;
+    let mut description = None;
+    for line in yaml_block.lines() {
+        let line = line.trim();
+        if let Some(val) = line.strip_prefix("name:") {
+            name = Some(val.trim().trim_matches('"').to_string());
+        } else if let Some(val) = line.strip_prefix("description:") {
+            description = Some(val.trim().trim_matches('"').to_string());
+        }
+    }
+    (name, description, body)
 }
 
 fn extract_description(content: &str) -> String {
@@ -628,14 +666,16 @@ pub fn skills_to_prompt_with_mode(
         crate::config::SkillsPromptInjectionMode::Full => format!(
             "## Available Skills ({skill_count} total)\n\n\
              Skill instructions and tool metadata are preloaded below.\n\
-             Follow these instructions directly; do not read skill files at runtime unless the user asks.\n\n\
+             Follow these instructions directly; do not read skill files at runtime unless the user asks.\n\
+             IMPORTANT: When a skill references scripts or files with relative paths, resolve them relative to the skill's `skill_dir` directory.\n\n\
              <available_skills count=\"{skill_count}\">\n",
         ),
         crate::config::SkillsPromptInjectionMode::Compact => format!(
             "## Available Skills ({skill_count} total)\n\n\
              Skill summaries (name, description, tags, tools) are preloaded below.\n\
              When a user request matches a skill's capabilities, FIRST read the full SKILL.md at the `location` path to learn usage details, THEN execute.\n\
-             You MUST proactively match user requests against your skill list — do not say \"I don't have that capability\" without checking.\n\n\
+             You MUST proactively match user requests against your skill list — do not say \"I don't have that capability\" without checking.\n\
+             IMPORTANT: When a skill references scripts or files with relative paths, resolve them relative to the skill's `skill_dir` directory.\n\n\
              <available_skills count=\"{skill_count}\">\n",
         ),
     };
@@ -650,6 +690,17 @@ pub fn skills_to_prompt_with_mode(
             matches!(mode, crate::config::SkillsPromptInjectionMode::Compact),
         );
         write_xml_text_element(&mut prompt, 4, "location", &location);
+        // skill_dir: directory containing the skill (for resolving relative script paths)
+        if let Some(loc) = &skill.location {
+            if let Some(parent) = loc.parent() {
+                let skill_dir = if matches!(mode, crate::config::SkillsPromptInjectionMode::Compact) {
+                    parent.strip_prefix(workspace_dir).map(|p| p.display().to_string()).unwrap_or_else(|_| parent.display().to_string())
+                } else {
+                    parent.display().to_string()
+                };
+                write_xml_text_element(&mut prompt, 4, "skill_dir", &skill_dir);
+            }
+        }
 
         // Compact mode: inject tags + tool names (lightweight) so AI can match capabilities.
         // Full mode: inject complete instructions + tool details.

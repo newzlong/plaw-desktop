@@ -208,6 +208,53 @@ impl PlawManager {
             .stderr(std::process::Stdio::piped())
             ;
 
+        // Prepend bundled tools to PATH so Plaw's shell can find them
+        {
+            let mut extra_paths = Vec::new();
+            let python_dir = self.data_dir.join("python");
+            if python_dir.is_dir() {
+                extra_paths.push(python_dir.clone());
+                // Also add Scripts/ for pip-installed executables
+                extra_paths.push(python_dir.join("Scripts"));
+            }
+            let pandoc_dir = self.data_dir.join("pandoc");
+            if pandoc_dir.is_dir() {
+                extra_paths.push(pandoc_dir);
+            }
+            let lo_program = self.data_dir.join("libreoffice").join("libreoffice").join("program");
+            if lo_program.is_dir() {
+                extra_paths.push(lo_program);
+            }
+            let poppler_dir = self.data_dir.join("poppler");
+            if poppler_dir.is_dir() {
+                extra_paths.push(poppler_dir);
+            }
+            let node_dir = self.data_dir.join("node");
+            if node_dir.is_dir() {
+                extra_paths.push(node_dir);
+            }
+            let bin_dir = self.data_dir.join("bin");
+            if bin_dir.is_dir() {
+                extra_paths.push(bin_dir);
+            }
+            if !extra_paths.is_empty() {
+                let sys_path = std::env::var("PATH").unwrap_or_default();
+                let new_path = extra_paths
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .chain(std::iter::once(sys_path))
+                    .collect::<Vec<_>>()
+                    .join(";");
+                cmd.env("PATH", new_path);
+            }
+        }
+
+        // Set NODE_PATH so Node.js scripts can find bundled npm packages
+        let node_modules_dir = self.data_dir.join("node_modules_global").join("node_modules");
+        if node_modules_dir.is_dir() {
+            cmd.env("NODE_PATH", node_modules_dir.display().to_string());
+        }
+
         // Prevent console window on Windows
         #[cfg(windows)]
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW

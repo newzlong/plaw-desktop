@@ -9,8 +9,12 @@
       "../plaw-data/embedding/*.gguf": "plaw-data/embedding/",
       "../plaw-data/agent-browser-bundle.tar.gz": "plaw-data/agent-browser-bundle.tar.gz",
       "../plaw-data/browsers-bundle.tar.gz": "plaw-data/browsers-bundle.tar.gz",
-      "../plaw-data/.plaw/workspace/skills/find-skills/SKILL.md": "plaw-data/.plaw/workspace/skills/find-skills/SKILL.md",
-      "../plaw-data/.plaw/workspace/skills/skill-creator/SKILL.md": "plaw-data/.plaw/workspace/skills/skill-creator/SKILL.md"
+      "../plaw-data/python-bundle.tar.gz": "plaw-data/python-bundle.tar.gz",
+      "../plaw-data/pandoc-bundle.tar.gz": "plaw-data/pandoc-bundle.tar.gz",
+      "../plaw-data/libreoffice-bundle.tar.gz": "plaw-data/libreoffice-bundle.tar.gz",
+      "../plaw-data/skills-bundle.tar.gz": "plaw-data/skills-bundle.tar.gz",
+      "../plaw-data/node-modules-bundle.tar.gz": "plaw-data/node-modules-bundle.tar.gz",
+      "../plaw-data/poppler-bundle.tar.gz": "plaw-data/poppler-bundle.tar.gz"
     }
   }
 }

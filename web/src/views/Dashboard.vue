@@ -99,6 +99,17 @@
       </div>
     </div>
 
+    <!-- Storage management -->
+    <div class="storage-row mt-4">
+      <div class="storage-row__info">
+        <span class="storage-row__label">{{ isZh ? '上传文件缓存' : 'Upload cache' }}</span>
+        <span class="storage-row__detail">{{ uploadsFileCount }} {{ isZh ? '个文件' : 'files' }}, {{ formatSize(uploadsSize) }}</span>
+      </div>
+      <GlassButton size="sm" variant="ghost" :disabled="!uploadsFileCount || clearing" @click="doClearUploads">
+        {{ clearing ? (isZh ? '清理中...' : 'Clearing...') : (isZh ? '清理' : 'Clear') }}
+      </GlassButton>
+    </div>
+
     <!-- Lobster activity -->
     <LobsterActivity :running="isRunning" :healthy="isHealthy" class="mt-6" />
 
@@ -129,12 +140,12 @@ import {
   Puzzle as PuzzleIcon,
   Users as UsersIcon,
 } from 'lucide-vue-next'
-import { readConfig, startPlaw, stopPlaw, restartPlaw } from '../api/tauri'
+import { readConfig, startPlaw, stopPlaw, restartPlaw, getUploadsInfo, clearUploads } from '../api/tauri'
 import { getSkills, resetPort } from '../api/gateway'
 import { usePlawState } from '../composables/usePlawState'
 import { useI18n } from '../composables/useI18n'
 
-const { t } = useI18n()
+const { t, isZh } = useI18n()
 const openSettings = inject('openSettings', () => {})
 const { state: zcState, port: zcPort, startedAt, isRunning, isHealthy, isBusy, canStart, canStop } = usePlawState()
 
@@ -143,6 +154,9 @@ const model = ref('')
 const errorMsg = ref('')
 const channelCount = ref(0)
 const skillCount = ref(0)
+const uploadsSize = ref(0)
+const uploadsFileCount = ref(0)
+const clearing = ref(false)
 const agentCount = ref(0)
 const nowSec = ref(Math.floor(Date.now() / 1000))
 let uptimeTimer = null
@@ -196,6 +210,31 @@ async function loadSkills() {
   } catch { skillCount.value = 0 }
 }
 
+function formatSize(bytes) {
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+  return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB'
+}
+
+async function loadUploadsInfo() {
+  try {
+    const [size, count] = await getUploadsInfo()
+    uploadsSize.value = size
+    uploadsFileCount.value = count
+  } catch { /* ignore */ }
+}
+
+async function doClearUploads() {
+  clearing.value = true
+  try {
+    await clearUploads()
+    uploadsSize.value = 0
+    uploadsFileCount.value = 0
+  } catch { /* ignore */ }
+  clearing.value = false
+}
+
 // React to state changes from the global state machine
 watch(zcState, (newState) => {
   if (newState === 'crashed') {
@@ -247,6 +286,7 @@ async function doRestart() {
 onMounted(async () => {
   await loadConfigData()
   await loadSkills()
+  await loadUploadsInfo()
   uptimeTimer = setInterval(() => { nowSec.value = Math.floor(Date.now() / 1000) }, 1000)
 })
 onUnmounted(() => {
@@ -401,5 +441,31 @@ onUnmounted(() => {
 .quick-start__desc {
   font-size: 0.85rem;
   color: var(--text-secondary);
+}
+
+/* --- Storage row --- */
+.storage-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+}
+.storage-row__info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.storage-row__label {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+.storage-row__detail {
+  font-size: 0.78rem;
+  color: var(--text-muted);
 }
 </style>

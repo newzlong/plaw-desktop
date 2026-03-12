@@ -109,6 +109,10 @@
                 </div>
               </div>
             </div>
+            <!-- User attached images -->
+            <div v-if="msg.images && msg.images.length" class="chat-msg__images">
+              <img v-for="(img, imgIdx) in msg.images" :key="imgIdx" :src="img" alt="user image" class="chat-msg__image" />
+            </div>
             <!-- Text content -->
             <div v-if="msg.content" class="chat-msg__text">
               <span v-html="renderMarkdown(msg.content)" /><span v-if="streaming && i === messages.length - 1 && msg.role === 'assistant'" class="streaming-cursor" />
@@ -130,6 +134,17 @@
         <div v-if="connStatus !== 'connected'" class="chat-disconnected" :class="`chat-disconnected--${connStatus}`">
           {{ connStatusText }}
         </div>
+        <!-- File attachment previews -->
+        <div v-if="attachedFiles.length" class="attached-files">
+          <div v-for="(f, idx) in attachedFiles" :key="idx" class="attached-file" :class="{ 'attached-file--img': f.preview }">
+            <img v-if="f.preview" :src="f.preview" alt="preview" />
+            <div v-else class="attached-file__info">
+              <span class="attached-file__name">{{ f.name }}</span>
+              <span class="attached-file__size">{{ formatFileSize(f.size) }}</span>
+            </div>
+            <button class="attached-file__remove" @click="removeFile(idx)">&times;</button>
+          </div>
+        </div>
         <textarea
           ref="inputRef"
           v-model="inputText"
@@ -138,11 +153,20 @@
           :disabled="connStatus !== 'connected'"
           @keydown.enter.exact.prevent="sendMessage"
           @input="autoGrow"
+          @paste="onPaste"
+          @drop="onDrop"
+          @dragover="onDragOver"
         />
+        <input ref="fileInputRef" type="file" multiple hidden @change="onFileSelect" />
         <div class="chat-input-footer">
-          <div class="context-indicator" :title="contextTooltip">
-            <span class="context-dot" :class="contextDotClass" />
-            <span class="context-text">{{ Math.round(contextPercent) }}% used</span>
+          <div class="chat-input-footer__left">
+            <button class="attach-btn" :disabled="connStatus !== 'connected'" @click="fileInputRef?.click()" :title="isZh ? '添加文件' : 'Attach file'">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M14 10l-4.5-4.5a2.12 2.12 0 0 0-3 3L11 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M11 13l1.5-1.5a3.18 3.18 0 0 0-4.5-4.5L2 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            </button>
+            <div class="context-indicator" :title="contextTooltip">
+              <span class="context-dot" :class="contextDotClass" />
+              <span class="context-text">{{ Math.round(contextPercent) }}% used</span>
+            </div>
           </div>
           <button
             v-if="streaming && !inputText.trim()"
@@ -155,7 +179,7 @@
             v-else
             class="chat-send"
             :class="{ 'chat-send--interrupt': streaming && inputText.trim() }"
-            :disabled="!inputText.trim() || connStatus !== 'connected'"
+            :disabled="(!inputText.trim() && !attachedFiles.length) || connStatus !== 'connected'"
             @click="sendMessage"
           >
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
@@ -196,13 +220,20 @@ import { Settings, Sun, Moon, Play, Square, Loader2, RotateCcw } from 'lucide-vu
 
 defineOptions({ name: 'ChatView' })
 import { getGatewayPort } from '../api/tauri'
-import { listSessions, readSession, saveSession, deleteSession, getSessionNotifications, consumeNotifications, cancelActiveChat, startPlaw, stopPlaw } from '../api/tauri'
+import { listSessions, readSession, saveSession, deleteSession, getSessionNotifications, consumeNotifications, cancelActiveChat, startPlaw, stopPlaw, auditAllUnaudited, saveUpload } from '../api/tauri'
 import { usePlawState } from '../composables/usePlawState'
 import { useI18n } from '../composables/useI18n'
 import { listen } from '@tauri-apps/api/event'
 import { useNotifications } from '../composables/useNotifications'
+import { marked } from 'marked'
 import GlassDialog from '../components/glass/GlassDialog.vue'
 import GlassButton from '../components/glass/GlassButton.vue'
+
+// Configure marked for safe, clean output
+marked.setOptions({
+  breaks: true,
+  gfm: true,
+})
 
 const { addToast } = useNotifications()
 let unlistenCronResult = null
@@ -233,6 +264,12 @@ const streaming = ref(false)
 const wsConnected = ref(false)
 const messagesRef = ref(null)
 const inputRef = ref(null)
+const fileInputRef = ref(null)
+
+// File attachments: { name, type, size, file (File object), preview (data URI for images) }
+const attachedFiles = ref([])
+const MAX_FILE_SIZE = 50 * 1024 * 1024 // 50MB
+const MAX_FILES = 10
 
 const sessions = ref([])
 const currentSessionId = ref(null)
@@ -531,13 +568,84 @@ function autoGrow() {
   el.style.overflowY = sh > maxH ? 'auto' : 'hidden'
 }
 
+// ── File attachment helpers ──
+function readFileAsDataURI(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result)
+    reader.onerror = reject
+    reader.readAsDataURL(file)
+  })
+}
+
+function readFileAsArrayBuffer(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(new Uint8Array(reader.result))
+    reader.onerror = reject
+    reader.readAsArrayBuffer(file)
+  })
+}
+
+async function addFiles(files) {
+  for (const file of files) {
+    if (attachedFiles.value.length >= MAX_FILES) break
+    if (file.size > MAX_FILE_SIZE) continue
+    const entry = { name: file.name, type: file.type, size: file.size, file }
+    if (file.type.startsWith('image/')) {
+      entry.preview = await readFileAsDataURI(file)
+    }
+    attachedFiles.value.push(entry)
+  }
+}
+
+function removeFile(index) {
+  attachedFiles.value.splice(index, 1)
+}
+
+function onFileSelect(e) {
+  if (e.target.files) addFiles(Array.from(e.target.files))
+  e.target.value = ''
+}
+
+function onPaste(e) {
+  const items = e.clipboardData?.items
+  if (!items) return
+  const pasteFiles = []
+  for (const item of items) {
+    if (item.kind === 'file') {
+      const file = item.getAsFile()
+      if (file) pasteFiles.push(file)
+    }
+  }
+  if (pasteFiles.length) {
+    e.preventDefault()
+    addFiles(pasteFiles)
+  }
+}
+
+function onDrop(e) {
+  e.preventDefault()
+  if (e.dataTransfer?.files) addFiles(Array.from(e.dataTransfer.files))
+}
+
+function onDragOver(e) {
+  e.preventDefault()
+}
+
+function formatFileSize(bytes) {
+  if (bytes < 1024) return bytes + 'B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + 'KB'
+  return (bytes / (1024 * 1024)).toFixed(1) + 'MB'
+}
+
 function renderMarkdown(text) {
-  return text
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>')
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\n/g, '<br>')
+  try {
+    return marked.parse(text)
+  } catch {
+    // Fallback to escaped plain text
+    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>')
+  }
 }
 
 function formatArgs(args) {
@@ -598,8 +706,8 @@ function closeWebSocket() {
 }
 
 async function connectWebSocket() {
-  // Don't reconnect if already connected
-  if (ws && ws.readyState === WebSocket.OPEN) return
+  // Don't reconnect if already connected or still connecting
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
 
   // Close stale socket if any
   if (ws) {
@@ -666,25 +774,12 @@ async function connectWebSocket() {
 function handleWsMessage(data) {
   const type = data.type || ''
 
-  // Handle stale done/error from a cancelled request (interrupt-and-send).
-  // Must be checked BEFORE the streaming guard because streaming is false
-  // while we wait for the stale done before sending the follow-up message.
+  // Handle stale done/error from a cancelled request (user follow-up interrupt).
+  // The cancelled done arrives from the interrupted agent loop; the new loop is
+  // already starting server-side. Just consume it and keep streaming.
   if (ignoreNextDone && (type === 'done' || type === 'error')) {
     ignoreNextDone = false
     clearTimeout(interruptTimer)
-    if (type === 'done') {
-      if (data.usage?.context_used) {
-        contextUsed.value = data.usage.context_used
-        lastConfirmedTokens = contextUsed.value
-      }
-      if (data.context_window) contextMax.value = data.context_window
-    }
-    // Now it's safe to send the queued follow-up message
-    if (pendingSendText) {
-      const text = pendingSendText
-      pendingSendText = null
-      doSendAfterInterrupt(text)
-    }
     return
   }
 
@@ -788,6 +883,10 @@ function handleWsMessage(data) {
       : `${count} new skill(s) detected and loaded: ${names} (${data.total_skills} total)`
     messages.value.push({ role: 'system', content: notice })
     scrollToBottom()
+    // Auto-audit newly installed skills
+    if (count > 0) {
+      auditAllUnaudited().catch(() => {})
+    }
   }
 }
 
@@ -837,56 +936,88 @@ async function confirmRollback() {
   })
 }
 
+/** Save file entries via Tauri, return array of { name, path, isImage } */
+async function saveFilesToDisk(entries) {
+  const results = []
+  for (const entry of entries) {
+    try {
+      const bytes = await readFileAsArrayBuffer(entry.file)
+      const savedPath = await saveUpload(entry.name, bytes)
+      results.push({ name: entry.name, path: savedPath, isImage: entry.type.startsWith('image/') })
+    } catch (e) {
+      console.warn('Failed to save upload:', entry.name, e)
+    }
+  }
+  return results
+}
+
+function buildContentWithFiles(text, savedFiles) {
+  if (!savedFiles.length) return text
+  let content = text
+  for (const f of savedFiles) {
+    if (f.isImage) {
+      content += `\n[IMAGE:${f.path}]`
+    } else {
+      content += `\n[用户附件: ${f.name}, 路径: ${f.path}]`
+    }
+  }
+  return content
+}
+
 function sendMessage() {
   const text = inputText.value.trim()
-  if (!text || connStatus.value !== 'connected') return
+  if ((!text && !attachedFiles.value.length) || connStatus.value !== 'connected') return
 
   if (streaming.value) {
-    // Interrupt current stream immediately, then send new message
-    // 1. Prevent UI flash during WS reconnection after cancel
-    silentReconnect.value = true
-    // 2. Send cancel to Plaw
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      try { ws.send(JSON.stringify({ type: 'cancel' })) } catch {}
-    }
-    // 3. Force-finalize locally: flush partial content, mark interrupted
+    // User sent a follow-up message while AI is working.
+    // Send the message directly to Plaw — the server will automatically
+    // cancel the current agent loop and process the new message.
+    // 1. Finalize current assistant response locally
     flushTypewriter()
     updateLastAssistant()
     const last = messages.value[messages.value.length - 1]
     if (last && last.role === 'assistant' && !last.content) {
       last.content = '*[AI 回复被中断]*'
     }
-    streaming.value = false
     cancelled = false
     pendingAutoContinue = false
     resetTypewriter()
     currentAssistant.value = { content: '', steps: [] }
-    scheduleSave()
-    // 4. Queue the follow-up message — it will be sent when the stale done/error
-    //    arrives from Plaw, ensuring the server is back in the outer loop
-    //    and ready to accept a new message. See handleWsMessage ignoreNextDone.
-    ignoreNextDone = true
-    pendingSendText = text
-    // Show user message immediately while we wait
-    messages.value.push({ role: 'user', content: text })
+    // 2. Push user message + new empty assistant for the follow-up
+    const interruptFiles = [...attachedFiles.value]
+    const interruptPreviews = interruptFiles.filter(f => f.preview).map(f => f.preview)
+    const interruptDisplay = text + (interruptFiles.length ? `\n📎 ${interruptFiles.map(f => f.name).join(', ')}` : '')
+    messages.value.push({ role: 'user', content: interruptDisplay, images: interruptPreviews })
+    messages.value.push({ role: 'assistant', content: '', steps: [] })
+    attachedFiles.value = []
     inputText.value = ''
+    scheduleSave()
     scrollToBottom()
+    // 3. Ignore the cancelled done event from the interrupted loop
+    ignoreNextDone = true
+    clearTimeout(interruptTimer)
+    interruptTimer = setTimeout(() => { ignoreNextDone = false }, 5000)
+    // 4. Send the message to Plaw — server handles cancel + immediate reprocessing
+    saveFilesToDisk(interruptFiles).then(savedFiles => {
+      const fullContent = buildContentWithFiles(text, savedFiles)
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        actuallySendWs(fullContent)
+      } else {
+        pendingSendText = fullContent
+      }
+    }).catch(() => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        actuallySendWs(text)
+      } else {
+        pendingSendText = text
+      }
+    })
     nextTick(() => {
       if (inputRef.value) {
         inputRef.value.style.height = BASE_H + 'px'
         inputRef.value.style.overflowY = 'hidden'
       }
     })
-    // Timeout fallback: if stale done never arrives (e.g. WS issue), send anyway
-    clearTimeout(interruptTimer)
-    interruptTimer = setTimeout(() => {
-      if (pendingSendText) {
-        ignoreNextDone = false
-        const t = pendingSendText
-        pendingSendText = null
-        doSendAfterInterrupt(t)
-      }
-    }, 3000)
     return
   }
 
@@ -894,12 +1025,20 @@ function sendMessage() {
 }
 
 /** Core send logic — assumes not currently streaming */
-function doSendMessage(text) {
+async function doSendMessage(text) {
   cancelled = false
   resetTypewriter()
-  messages.value.push({ role: 'user', content: text })
+
+  // Save files and build content
+  const filesToSave = [...attachedFiles.value]
+  const fileNames = filesToSave.map(f => f.name)
+  const filePreviews = filesToSave.filter(f => f.preview).map(f => f.preview)
+  // Show user message immediately with file names
+  const displayContent = text + (fileNames.length ? `\n📎 ${fileNames.join(', ')}` : '')
+  messages.value.push({ role: 'user', content: displayContent, images: filePreviews })
   messages.value.push({ role: 'assistant', content: '', steps: [] })
   currentAssistant.value = { content: '', steps: [] }
+  attachedFiles.value = []
 
   // Context bar: keep last server-confirmed value (updated on 'done' events).
   // Only use rough estimate for the very first message when no server data exists.
@@ -920,13 +1059,17 @@ function doSendMessage(text) {
     }
   })
 
+  // Save files to disk and build the full content with file paths
+  const savedFiles = filesToSave.length ? await saveFilesToDisk(filesToSave) : []
+  const fullContent = buildContentWithFiles(text, savedFiles)
+
   // If WS is not open (e.g. Plaw closed it after cancel), queue for after reconnect
   if (!ws || ws.readyState !== WebSocket.OPEN) {
-    pendingSendText = text
+    pendingSendText = fullContent
     return
   }
 
-  actuallySendWs(text)
+  actuallySendWs(fullContent)
 }
 
 /** Send follow-up after interrupt — user message was already pushed by sendMessage */
@@ -1443,6 +1586,76 @@ onUnmounted(() => {
   border-radius: 3px;
 }
 
+/* Markdown rich content */
+.chat-msg__text :deep(h1),
+.chat-msg__text :deep(h2),
+.chat-msg__text :deep(h3),
+.chat-msg__text :deep(h4) {
+  margin: 12px 0 6px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.chat-msg__text :deep(h1) { font-size: 1.3em; }
+.chat-msg__text :deep(h2) { font-size: 1.15em; }
+.chat-msg__text :deep(h3) { font-size: 1.05em; }
+.chat-msg__text :deep(ul),
+.chat-msg__text :deep(ol) {
+  margin: 6px 0;
+  padding-left: 1.5em;
+}
+.chat-msg__text :deep(li) {
+  margin: 2px 0;
+}
+.chat-msg__text :deep(blockquote) {
+  border-left: 3px solid var(--border-subtle);
+  margin: 8px 0;
+  padding: 4px 12px;
+  opacity: 0.85;
+}
+.chat-msg__text :deep(table) {
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 0.85em;
+  width: 100%;
+}
+.chat-msg__text :deep(th),
+.chat-msg__text :deep(td) {
+  border: 1px solid var(--border-subtle);
+  padding: 5px 10px;
+  text-align: left;
+}
+.chat-msg__text :deep(th) {
+  background: var(--bg-raised);
+  font-weight: 600;
+}
+.chat-msg__text :deep(a) {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+}
+.chat-msg__text :deep(a:hover) {
+  text-decoration-style: solid;
+}
+.chat-msg__text :deep(hr) {
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  margin: 10px 0;
+}
+.chat-msg__text :deep(img) {
+  max-width: 100%;
+  border-radius: var(--radius-sm);
+  margin: 6px 0;
+}
+.chat-msg__text :deep(p) {
+  margin: 4px 0;
+}
+.chat-msg__text :deep(> p:first-child) {
+  margin-top: 0;
+}
+.chat-msg__text :deep(> p:last-child) {
+  margin-bottom: 0;
+}
+
 /* Steps timeline */
 .chat-steps {
   display: flex;
@@ -1666,6 +1879,97 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   padding: 4px 8px 8px 14px;
+}
+.chat-input-footer__left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Attach button */
+.attach-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px;
+  opacity: 0.6;
+  transition: opacity 0.2s, color 0.2s;
+}
+.attach-btn:hover { opacity: 1; color: var(--text-primary); }
+.attach-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+/* Attached file previews */
+.attached-files {
+  display: flex;
+  gap: 6px;
+  padding: 6px 12px 2px;
+  flex-wrap: wrap;
+}
+.attached-file {
+  position: relative;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+}
+.attached-file--img {
+  width: 60px;
+  height: 60px;
+}
+.attached-file--img img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.attached-file__info {
+  display: flex;
+  flex-direction: column;
+  padding: 6px 24px 6px 8px;
+  gap: 2px;
+  min-width: 80px;
+  max-width: 160px;
+}
+.attached-file__name {
+  font-size: 0.72rem;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.attached-file__size {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+}
+.attached-file__remove {
+  position: absolute;
+  top: -1px;
+  right: -1px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(0,0,0,0.65);
+  color: #fff;
+  border: none;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* User message images */
+.chat-msg__images {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.chat-msg__image {
+  max-width: 200px;
+  max-height: 200px;
+  border-radius: 6px;
+  object-fit: cover;
 }
 
 /* Context indicator: dot + text */

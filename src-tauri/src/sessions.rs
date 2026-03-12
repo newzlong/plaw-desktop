@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    /// Extra fields from frontend (steps, thinking, etc.) – pass through transparently
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]

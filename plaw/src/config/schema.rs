@@ -652,7 +652,7 @@ pub struct AgentConfig {
 }
 
 fn default_agent_max_tool_iterations() -> usize {
-    20
+    usize::MAX
 }
 
 fn default_agent_max_history_messages() -> usize {

@@ -95,6 +95,12 @@ export async function auditSkill(name) {
   return inv('audit_skill', { name })
 }
 
+export async function auditAllUnaudited(force = false) {
+  const inv = await getInvoke()
+  if (!inv) throw new Error('Not in Tauri environment')
+  return inv('audit_all_unaudited', { force })
+}
+
 export async function searchRegistrySkills(query = '') {
   const inv = await getInvoke()
   return inv ? await inv('search_registry_skills', { query }) : []
@@ -254,4 +260,24 @@ export async function getAllUnconsumedNotifications() {
 export async function cancelActiveChat() {
   const inv = await getInvoke()
   if (inv) await inv('cancel_active_chat')
+}
+
+/** Get uploads directory info: [totalBytes, fileCount] */
+export async function getUploadsInfo() {
+  const inv = await getInvoke()
+  return inv ? await inv('get_uploads_info') : [0, 0]
+}
+
+/** Delete all files in uploads directory, returns [freedBytes, removedCount] */
+export async function clearUploads() {
+  const inv = await getInvoke()
+  if (!inv) throw new Error('Not in Tauri environment')
+  return inv('clear_uploads')
+}
+
+/** Save an uploaded file to plaw-data/uploads/, returns the full path */
+export async function saveUpload(name, data) {
+  const inv = await getInvoke()
+  if (!inv) throw new Error('Not in Tauri environment')
+  return inv('save_upload', { name, data: Array.from(data) })
 }

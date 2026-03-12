@@ -157,12 +157,16 @@ const SAFE_ENV_VARS: &[&str] = &[
     "ProgramFiles", "ProgramFiles(x86)", "CommonProgramFiles",
     "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "OS",
     "CHCP",
+    // PATHEXT is critical: without it, Windows/PowerShell cannot resolve
+    // `python` → `python.exe` (or any extension-less command name).
+    "PATHEXT",
     // Development tools — paths, not secrets
     "JAVA_HOME", "JRE_HOME",
     "GOPATH", "GOROOT",
     "CARGO_HOME", "RUSTUP_HOME",
     "NVM_DIR", "NODE_PATH", "NPM_CONFIG_PREFIX",
     "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "CONDA_DEFAULT_ENV",
+    "PYTHONIOENCODING", "PYTHONUTF8",
     "ANDROID_HOME", "ANDROID_SDK_ROOT",
     "DOTNET_ROOT",
     "GRADLE_HOME", "MAVEN_HOME",
@@ -385,18 +389,105 @@ impl Tool for ShellTool {
             }
         }
 
-        // Inject the plaw binary directory into PATH
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(exe_dir) = exe.parent() {
-                let current_path = login_env
-                    .get("PATH")
-                    .or_else(|| login_env.get("Path"))
-                    .cloned()
-                    .unwrap_or_default();
-                let exe_dir_str = exe_dir.to_string_lossy();
-                if !current_path.contains(&*exe_dir_str) {
-                    let sep = if cfg!(windows) { ";" } else { ":" };
-                    cmd.env("PATH", format!("{exe_dir_str}{sep}{current_path}"));
+        // Force UTF-8 encoding for child processes on Windows.
+        // Python in pipe mode defaults to the system codepage (GBK on Chinese Windows),
+        // causing garbled output when decoded with from_utf8_lossy.
+        #[cfg(target_os = "windows")]
+        {
+            cmd.env("PYTHONUTF8", "1");
+            cmd.env("PYTHONIOENCODING", "utf-8");
+        }
+
+        // Inject the plaw binary directory AND bundled tool directories into PATH.
+        // Plaw binary lives at <data_root>/bin/plaw.exe, so data_root = exe_dir.parent().
+        // Bundled tools: python/, python/Scripts/, node/, pandoc/, poppler/, bin/,
+        // libreoffice/libreoffice/program/.
+        {
+            let current_path = login_env
+                .get("PATH")
+                .or_else(|| login_env.get("Path"))
+                .cloned()
+                .unwrap_or_default();
+            let sep = if cfg!(windows) { ";" } else { ":" };
+            let mut extra_dirs: Vec<String> = Vec::new();
+
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(exe_dir) = exe.parent() {
+                    let exe_dir_str = exe_dir.to_string_lossy().to_string();
+                    if !current_path.contains(&exe_dir_str) {
+                        extra_dirs.push(exe_dir_str);
+                    }
+
+                    // data_root is the parent of bin/ (exe_dir)
+                    if let Some(data_root) = exe_dir.parent() {
+                        let candidates = [
+                            "python",
+                            "python/Scripts",
+                            "pandoc",
+                            "poppler",
+                            "node",
+                        ];
+                        for c in &candidates {
+                            let p = data_root.join(c);
+                            if p.is_dir() {
+                                let s = p.to_string_lossy().to_string();
+                                if !current_path.contains(&s) {
+                                    extra_dirs.push(s);
+                                }
+                            }
+                        }
+                        // LibreOffice has a nested path
+                        let lo = data_root.join("libreoffice").join("libreoffice").join("program");
+                        if lo.is_dir() {
+                            let s = lo.to_string_lossy().to_string();
+                            if !current_path.contains(&s) {
+                                extra_dirs.push(s);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Also try $HOME as data_root fallback (Lobster sets HOME=plaw-data/)
+            if let Ok(home) = std::env::var("HOME") {
+                let home_path = std::path::Path::new(&home);
+                let candidates = [
+                    "python",
+                    "python/Scripts",
+                    "pandoc",
+                    "poppler",
+                    "node",
+                    "bin",
+                ];
+                for c in &candidates {
+                    let p = home_path.join(c);
+                    if p.is_dir() {
+                        let s = p.to_string_lossy().to_string();
+                        if !current_path.contains(&s) && !extra_dirs.contains(&s) {
+                            extra_dirs.push(s);
+                        }
+                    }
+                }
+                let lo = home_path.join("libreoffice").join("libreoffice").join("program");
+                if lo.is_dir() {
+                    let s = lo.to_string_lossy().to_string();
+                    if !current_path.contains(&s) && !extra_dirs.contains(&s) {
+                        extra_dirs.push(s);
+                    }
+                }
+            }
+
+            if !extra_dirs.is_empty() {
+                cmd.env("PATH", format!("{}{sep}{current_path}", extra_dirs.join(sep)));
+            }
+
+            // Also set NODE_PATH for bundled node_modules if available
+            if let Ok(home) = std::env::var("HOME") {
+                let nm = std::path::Path::new(&home)
+                    .join("node_modules_global")
+                    .join("node_modules");
+                if nm.is_dir() {
+                    cmd.env("NODE_PATH", nm.to_string_lossy().to_string());
                 }
             }
         }

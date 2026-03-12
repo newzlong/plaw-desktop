@@ -250,24 +250,32 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     };
 
     let mut cron_rx = state.event_tx.subscribe();
+    // When a user sends a follow-up message while the agent loop is running,
+    // we cancel the current loop and stash the new message here so the outer
+    // loop picks it up immediately without waiting for another WS read.
+    let mut pending_user_msg: Option<String> = None;
 
     loop {
-        let msg = tokio::select! {
-            ws_msg = ws_rx.next() => {
-                match ws_msg {
-                    Some(Ok(Message::Text(text))) => text,
-                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
-                    _ => continue,
-                }
-            }
-            event = cron_rx.recv() => {
-                // Forward cron_result events to the WebSocket client
-                if let Ok(ev) = event {
-                    if ev.get("type").and_then(|t| t.as_str()) == Some("cron_result") {
-                        let _ = ws_tx.send(Message::Text(ev.to_string().into())).await;
+        let msg: String = if let Some(stashed) = pending_user_msg.take() {
+            stashed
+        } else {
+            tokio::select! {
+                ws_msg = ws_rx.next() => {
+                    match ws_msg {
+                        Some(Ok(Message::Text(text))) => text.to_string(),
+                        Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                        _ => continue,
                     }
                 }
-                continue;
+                event = cron_rx.recv() => {
+                    // Forward cron_result events to the WebSocket client
+                    if let Ok(ev) = event {
+                        if ev.get("type").and_then(|t| t.as_str()) == Some("cron_result") {
+                            let _ = ws_tx.send(Message::Text(ev.to_string().into())).await;
+                        }
+                    }
+                    continue;
+                }
             }
         };
 
@@ -410,15 +418,25 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             }
                         }
                     }
-                    // Monitor WebSocket for close/cancel during agent execution
+                    // Monitor WebSocket for close/cancel/follow-up during agent execution
                     ws_msg = ws_rx.next() => {
                         match ws_msg {
                             Some(Ok(Message::Text(text))) => {
-                                // Check for cancel message from frontend
                                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&*text) {
-                                    if v["type"].as_str() == Some("cancel") {
-                                        tracing::info!("ws_chat: received cancel message from client");
-                                        cancel_token.cancel();
+                                    match v["type"].as_str() {
+                                        Some("cancel") => {
+                                            tracing::info!("ws_chat: received cancel message from client");
+                                            cancel_token.cancel();
+                                        }
+                                        Some("message") => {
+                                            // User sent a follow-up message — interrupt current
+                                            // agent loop and stash the raw JSON so the outer loop
+                                            // processes it as a normal message (with history injection, etc.).
+                                            tracing::info!("ws_chat: user follow-up message received, interrupting agent loop");
+                                            pending_user_msg = Some(text.to_string());
+                                            cancel_token.cancel();
+                                        }
+                                        _ => {}
                                     }
                                 }
                             }
@@ -568,7 +586,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             }
             Err(e) => {
                 if is_tool_loop_cancelled(&e) {
-                    tracing::info!("ws_chat: agent loop cancelled by client");
+                    let has_followup = pending_user_msg.is_some();
+                    tracing::info!(
+                        has_followup,
+                        "ws_chat: agent loop cancelled by client"
+                    );
                     let cancelled = serde_json::json!({
                         "type": "done",
                         "full_response": "",
@@ -583,8 +605,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     }));
                     // Clean up browser processes on cancel
                     crate::tools::cleanup_browser_processes().await;
-                    // Stay in the session loop — client may send a follow-up message
-                    // (interrupt-and-send). Only break if client actually disconnected.
+                    // Stay in the session loop — if there's a pending follow-up message,
+                    // the outer loop will pick it up immediately. Otherwise, we wait
+                    // for the next client message.
                     continue;
                 }
 

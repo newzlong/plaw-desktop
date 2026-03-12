@@ -55,6 +55,16 @@
             @click="riskToggles[f] = !riskToggles[f]"
           ><span class="risk-diamond" :class="'risk-diamond--' + f" /></button>
         </div>
+        <span class="filter-sep" />
+        <GlassButton
+          size="sm" variant="ghost"
+          :disabled="auditingAll"
+          @click="doAuditAll"
+        >
+          <Loader2 v-if="auditingAll" :size="13" class="spin" />
+          <ShieldCheck v-else :size="13" />
+          {{ auditingAll ? t('skills.auditingAll') : t('skills.auditAll') }}
+        </GlassButton>
       </div>
 
       <GlassCard v-if="!localSkills.length" :hoverable="false">
@@ -83,14 +93,22 @@
                 />
               </div>
               <div class="skill-desc">{{ skill.description || t('skills.noDesc') }}</div>
-              <div class="skill-source">{{ skill.source }}</div>
+              <div class="skill-source">
+                <span v-if="skill.source === 'builtin'" class="badge-builtin">{{ t('skills.builtin') }}</span>
+                <span v-else>{{ skill.source }}</span>
+              </div>
             </div>
             <div class="skill-actions">
               <button
                 class="audit-btn"
+                :class="{ 'audit-btn--active': auditingSkills.has(skillSlug(skill)) }"
                 :title="t('skills.auditTitle')"
+                :disabled="auditingSkills.has(skillSlug(skill))"
                 @click="runAudit(skillSlug(skill))"
-              ><ShieldCheck :size="15" /></button>
+              >
+                <Loader2 v-if="auditingSkills.has(skillSlug(skill))" :size="15" class="spin" />
+                <ShieldCheck v-else :size="15" />
+              </button>
               <GlassButton
                 v-if="skill.source === 'managed'"
                 size="sm" variant="ghost" class="uninstall-btn"
@@ -279,12 +297,12 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { Plus, Puzzle, Loader2, Search, AlertTriangle, RefreshCw, Globe, Settings, ShieldCheck } from 'lucide-vue-next'
 import { GlassCard, GlassButton, GlassInput, GlassDialog } from '../components/glass'
 import { useI18n } from '../composables/useI18n'
 import {
-  listLocalSkills, installSkill, uninstallSkill, auditSkill, searchRegistrySkills,
+  listLocalSkills, installSkill, uninstallSkill, auditSkill, auditAllUnaudited, searchRegistrySkills,
   syncSkillsRegistry, getMarketProxy, setMarketProxy,
 } from '../api/tauri'
 
@@ -297,6 +315,31 @@ const showInstall = ref(false)
 const installPath = ref('')
 const installing = ref(false)
 const installingSet = reactive(new Set())
+
+// Batch audit state
+const auditingAll = ref(false)
+const auditingSkills = reactive(new Set())
+let unlistenAudit = null
+
+async function doAuditAll() {
+  auditingAll.value = true
+  try {
+    // Mark all eligible skills as auditing
+    const BUILTIN = new Set(['find-skills', 'skill-creator', 'audit-skills', 'fix-skills', 'pptx', 'xlsx', 'docx', 'pdf'])
+    for (const s of localSkills.value) {
+      if (!BUILTIN.has(s.name)) auditingSkills.add(skillSlug(s))
+    }
+    const count = await auditAllUnaudited(true)
+    if (count === 0) {
+      auditingSkills.clear()
+      auditingAll.value = false
+    }
+    // Completion is handled by the skill-audited event listener
+  } catch {
+    auditingSkills.clear()
+    auditingAll.value = false
+  }
+}
 
 // Audit state
 const showAudit = ref(false)
@@ -538,6 +581,25 @@ onMounted(async () => {
   refreshLocal()
   savedProxy.value = await getMarketProxy()
   proxyInput.value = savedProxy.value
+  // Listen for per-skill audit completion events
+  try {
+    const { listen } = await import('@tauri-apps/api/event')
+    unlistenAudit = await listen('skill-audited', (event) => {
+      const { name, success } = event.payload || {}
+      if (name) {
+        auditingSkills.delete(name)
+        refreshLocal()
+      }
+      // All done
+      if (auditingSkills.size === 0) {
+        auditingAll.value = false
+      }
+    })
+  } catch {}
+})
+
+onUnmounted(() => {
+  if (unlistenAudit) unlistenAudit()
 })
 </script>
 
@@ -600,6 +662,16 @@ onMounted(async () => {
   font-size: 0.7rem; color: var(--text-muted); margin-top: 4px;
   text-transform: uppercase; letter-spacing: 0.05em;
 }
+.badge-builtin {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(59, 130, 246, 0.15);
+  color: #60a5fa;
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
 
 .filter-bar {
   display: flex; align-items: center; gap: 8px;
@@ -648,9 +720,13 @@ onMounted(async () => {
   display: flex; align-items: center; justify-content: center;
   transition: color var(--duration-fast), background var(--duration-fast);
 }
-.audit-btn:hover {
+.audit-btn:hover:not(:disabled) {
   color: var(--text-primary);
   background: rgba(255, 255, 255, 0.08);
+}
+.audit-btn--active {
+  color: var(--lobster-accent);
+  cursor: default;
 }
 
 .risk-diamond {

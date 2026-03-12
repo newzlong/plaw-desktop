@@ -209,7 +209,16 @@ pub fn scan_skills_dir(dir: &Path, source: &str) -> Vec<SkillEntry> {
 
 /// Protected skills that cannot be uninstalled by the user.
 /// These skills are expected to exist in the skills directory (user-managed, not embedded in binary).
-const PROTECTED_SKILL_NAMES: &[&str] = &["find-skills", "skill-creator"];
+const PROTECTED_SKILL_NAMES: &[&str] = &[
+    "find-skills",
+    "skill-creator",
+    "audit-skills",
+    "fix-skills",
+    "pptx",
+    "xlsx",
+    "docx",
+    "pdf",
+];
 
 /// List all installed skills from Plaw's skills directory
 pub fn list_local_skills(data_dir: &Path) -> Vec<SkillEntry> {
@@ -217,7 +226,7 @@ pub fn list_local_skills(data_dir: &Path) -> Vec<SkillEntry> {
     let mut skills = scan_skills_dir(&dir, "managed");
     for skill in &mut skills {
         if PROTECTED_SKILL_NAMES.contains(&skill.name.as_str()) {
-            skill.source = "protected".to_string();
+            skill.source = "builtin".to_string();
         }
     }
     skills
@@ -411,11 +420,16 @@ fn provider_base_url(provider: &str) -> String {
 
 /// Detect commonly needed tools on the system.
 /// Uses platform-appropriate shell to resolve script wrappers (.cmd/.ps1 on Windows).
-pub fn detect_system_tools() -> Vec<String> {
+pub fn detect_system_tools_with_data_dir(data_dir: Option<&std::path::Path>) -> Vec<String> {
     // Mobile platforms have no CLI tools
     if cfg!(target_os = "android") || cfg!(target_os = "ios") {
         return vec!["platform: mobile (no CLI tools)".to_string()];
     }
+
+    let path = match data_dir {
+        Some(d) => get_bundled_path(d),
+        None => get_full_path().to_string(),
+    };
 
     let checks: &[(&str, &str)] = &[
         ("node", "node --version"),
@@ -429,6 +443,9 @@ pub fn detect_system_tools() -> Vec<String> {
         ("curl", "curl --version"),
         ("cargo", "cargo --version"),
         ("pnpm", "pnpm --version"),
+        ("pandoc", "pandoc --version"),
+        ("soffice", "soffice --version"),
+        ("pdftoppm", "pdftoppm -v"),
     ];
 
     let mut results = Vec::new();
@@ -436,7 +453,7 @@ pub fn detect_system_tools() -> Vec<String> {
 
     for (name, version_cmd) in checks {
         let mut c = shell_command(version_cmd);
-        c.env("PATH", get_full_path());
+        c.env("PATH", &path);
         c.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .stdin(std::process::Stdio::null());
@@ -452,7 +469,29 @@ pub fn detect_system_tools() -> Vec<String> {
                 results.push(format!("{name}: {first_line}"));
             }
             _ => {
-                results.push(format!("{name}: NOT INSTALLED"));
+                // pdftoppm/soffice print version to stderr
+                let mut c2 = shell_command(version_cmd);
+                c2.env("PATH", &path);
+                c2.stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .stdin(std::process::Stdio::null());
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    c2.creation_flags(0x08000000);
+                }
+                match c2.output() {
+                    Ok(output) => {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        if !stderr.trim().is_empty() {
+                            let first = stderr.lines().next().unwrap_or("installed").trim().to_string();
+                            results.push(format!("{name}: {first}"));
+                        } else {
+                            results.push(format!("{name}: NOT INSTALLED"));
+                        }
+                    }
+                    _ => results.push(format!("{name}: NOT INSTALLED")),
+                }
             }
         }
     }
@@ -470,6 +509,60 @@ pub fn detect_system_tools() -> Vec<String> {
             .iter().any(|p| std::path::Path::new(p).exists())
     };
     results.push(format!("chrome: {}", if has_chrome { "installed" } else { "NOT INSTALLED" }));
+
+    // Bundled Python packages
+    //   Use shell_command() so child shell inherits PATH → finds bundled python.
+    if let Some(d) = data_dir {
+        let py_pkgs = ["markitdown", "openpyxl", "pptx", "docx", "pypdf",
+                        "pdfplumber", "reportlab", "pandas", "defusedxml", "PIL"];
+        let mut py_installed = Vec::new();
+        for pkg in &py_pkgs {
+            let mut cmd = shell_command(&format!("python -c \"import {pkg}\""));
+            cmd.env("PATH", &path);
+            cmd.stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .stdin(std::process::Stdio::null());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x08000000);
+            }
+            if cmd.status().map(|s| s.success()).unwrap_or(false) {
+                py_installed.push(*pkg);
+            }
+        }
+        if !py_installed.is_empty() {
+            results.push(format!("python-packages: {}", py_installed.join(", ")));
+        }
+
+        // Bundled Node.js packages
+        //   Use shell_command() so child shell inherits PATH → finds bundled node.
+        let node_modules = d.join("node_modules_global").join("node_modules");
+        if node_modules.is_dir() {
+            let npm_pkgs = ["pptxgenjs", "playwright", "sharp", "react-icons", "docx"];
+            let mut npm_installed = Vec::new();
+            let node_path_str = node_modules.display().to_string();
+            for pkg in &npm_pkgs {
+                let mut cmd = shell_command(&format!("node -e \"require('{pkg}')\""));
+                cmd.env("PATH", &path);
+                cmd.env("NODE_PATH", &node_path_str);
+                cmd.stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .stdin(std::process::Stdio::null());
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    cmd.creation_flags(0x08000000);
+                }
+                if cmd.status().map(|s| s.success()).unwrap_or(false) {
+                    npm_installed.push(*pkg);
+                }
+            }
+            if !npm_installed.is_empty() {
+                results.push(format!("node-packages: {}", npm_installed.join(", ")));
+            }
+        }
+    }
 
     results
 }
@@ -567,9 +660,33 @@ fn get_full_path() -> &'static str {
     FULL_PATH.get_or_init(resolve_full_path)
 }
 
+/// Build PATH that includes bundled tool directories from plaw-data.
+fn get_bundled_path(data_dir: &std::path::Path) -> String {
+    let mut extra = Vec::new();
+    let candidates = [
+        "python", "python/Scripts", "pandoc", "poppler", "node", "bin",
+    ];
+    for c in &candidates {
+        let p = data_dir.join(c);
+        if p.is_dir() {
+            extra.push(p.display().to_string());
+        }
+    }
+    let lo = data_dir.join("libreoffice").join("libreoffice").join("program");
+    if lo.is_dir() {
+        extra.push(lo.display().to_string());
+    }
+    let sys = get_full_path();
+    if extra.is_empty() {
+        sys.to_string()
+    } else {
+        format!("{};{sys}", extra.join(";"))
+    }
+}
+
 /// Check if a CLI tool exists on the system using `where` (Windows) / `which` (Unix).
-/// Uses the full PATH from registry, not the incomplete GUI process PATH.
-fn check_tool_exists(tool_name: &str) -> bool {
+/// Uses the full PATH from registry + bundled tool directories.
+fn check_tool_exists(tool_name: &str, data_dir: &std::path::Path) -> bool {
     // Reject anything that doesn't look like a simple tool name (security)
     if tool_name.is_empty()
         || tool_name.len() > 64
@@ -578,26 +695,81 @@ fn check_tool_exists(tool_name: &str) -> bool {
         return false;
     }
 
-    let mut cmd = if cfg!(windows) {
-        let mut c = std::process::Command::new("cmd");
-        c.args(["/c", &format!("where {tool_name}")]);
-        c
-    } else {
-        let mut c = std::process::Command::new("sh");
-        c.args(["-c", &format!("which {tool_name}")]);
-        c
+    let path = get_bundled_path(data_dir);
+
+    // 1) Try as CLI tool via `where`/`which`
+    let found_cli = {
+        let mut cmd = if cfg!(windows) {
+            let mut c = std::process::Command::new("cmd");
+            c.args(["/c", &format!("where {tool_name}")]);
+            c
+        } else {
+            let mut c = std::process::Command::new("sh");
+            c.args(["-c", &format!("which {tool_name}")]);
+            c
+        };
+        cmd.env("PATH", &path);
+        cmd.stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .stdin(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000);
+        }
+        cmd.status().map(|s| s.success()).unwrap_or(false)
     };
-    // Use full PATH so we can find tools installed via pnpm/npm/yarn/cargo/pip
-    cmd.env("PATH", get_full_path());
-    cmd.stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .stdin(std::process::Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000);
+    if found_cli {
+        return true;
     }
-    cmd.status().map(|s| s.success()).unwrap_or(false)
+
+    // 2) Try as Python package: python -c "import <name>"
+    //    Use shell_command() so the child shell inherits PATH and finds bundled python.
+    let py_name = tool_name.replace('-', "_"); // pip names use hyphens, import names use underscores
+    {
+        let mut cmd = shell_command(&format!("python -c \"import {py_name}\""));
+        cmd.env("PATH", &path);
+        cmd.stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .stdin(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000);
+        }
+        if cmd.status().map(|s| s.success()).unwrap_or(false) {
+            return true;
+        }
+    }
+
+    // 3) Try as Node.js package: node -e "require('<name>')"
+    //    Use shell_command() so the child shell inherits PATH and finds bundled node.
+    {
+        let node_modules = data_dir.join("node_modules_global").join("node_modules");
+        let node_path_env = if node_modules.is_dir() {
+            node_modules.display().to_string()
+        } else {
+            String::new()
+        };
+        let mut cmd = shell_command(&format!("node -e \"require('{tool_name}')\""));
+        cmd.env("PATH", &path);
+        if !node_path_env.is_empty() {
+            cmd.env("NODE_PATH", &node_path_env);
+        }
+        cmd.stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .stdin(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000);
+        }
+        if cmd.status().map(|s| s.success()).unwrap_or(false) {
+            return true;
+        }
+    }
+
+    false
 }
 
 
@@ -792,7 +964,7 @@ pub async fn audit_skill_content(
     let client = builder.build().map_err(|e| format!("HTTP client error: {e}"))?;
 
     // Detect system environment and build context-aware prompt
-    let sys_tools = detect_system_tools();
+    let sys_tools = detect_system_tools_with_data_dir(Some(data_dir));
     let sys_info = sys_tools.join("\n");
     let prompt = format!(
         "{AUDIT_PROMPT}## System Environment (tools currently installed on this machine):\n\n{sys_info}\n\n## SKILL.md Content to Audit:\n\n{skill_content}"
@@ -858,12 +1030,12 @@ pub async fn audit_skill_content(
     // LLM lists ALL required dependencies; we verify which are actually missing.
     let missing_deps: Vec<String> = audit.dependencies
         .iter()
-        .filter(|dep| !dep.is_empty() && !check_tool_exists(dep))
+        .filter(|dep| !dep.is_empty() && !check_tool_exists(dep, data_dir))
         .cloned()
         .collect();
     let installed_deps: Vec<String> = audit.dependencies
         .iter()
-        .filter(|dep| !dep.is_empty() && check_tool_exists(dep))
+        .filter(|dep| !dep.is_empty() && check_tool_exists(dep, data_dir))
         .cloned()
         .collect();
 

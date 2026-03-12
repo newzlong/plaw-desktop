@@ -142,7 +142,10 @@ export default {
     retryWithProxy: 'Save & Retry',
     source: 'Source',
     noDesc: 'No description',
+    builtin: 'Built-in',
     unauditedHint: 'Unaudited — click to audit',
+    auditAll: 'Audit All',
+    auditingAll: 'Auditing...',
     // Audit
     auditTitle: 'AI Audit',
     auditStep1: 'Scanning for security risks...',

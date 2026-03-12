@@ -128,6 +128,7 @@ fn handle_sse_message(app: &AppHandle, data_dir: &PathBuf, raw: &str) {
                 sessions::ChatMessage {
                     role: "system".to_string(),
                     content: content.clone(),
+                    extra: Default::default(),
                 },
             ) {
                 eprintln!("[cron_watcher] append_session_message error: {e}");
