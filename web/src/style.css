@@ -1,0 +1,28 @@
+@import "tailwindcss";
+@import "./design-tokens.css";
+
+/* --- Reset & Base --- */
+body {
+  margin: 0;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  min-height: 100vh;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* --- Scrollbar --- */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border-default);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+
+/* --- Focus ring --- */
+.focus-ring:focus-visible {
+  outline: none;
+  box-shadow: var(--input-focus-shadow);
+  border-color: var(--lobster-primary);
+}

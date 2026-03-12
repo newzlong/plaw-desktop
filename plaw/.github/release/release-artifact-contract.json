@@ -1,0 +1,30 @@
+{
+  "schema_version": "plaw.release-artifact-contract.v1",
+  "release_archive_patterns": [
+    "plaw-x86_64-unknown-linux-gnu.tar.gz",
+    "plaw-x86_64-unknown-linux-musl.tar.gz",
+    "plaw-aarch64-unknown-linux-gnu.tar.gz",
+    "plaw-aarch64-unknown-linux-musl.tar.gz",
+    "plaw-armv7-unknown-linux-gnueabihf.tar.gz",
+    "plaw-armv7-linux-androideabi.tar.gz",
+    "plaw-aarch64-linux-android.tar.gz",
+    "plaw-x86_64-unknown-freebsd.tar.gz",
+    "plaw-x86_64-apple-darwin.tar.gz",
+    "plaw-aarch64-apple-darwin.tar.gz",
+    "plaw-x86_64-pc-windows-msvc.zip"
+  ],
+  "required_manifest_files": [
+    "release-manifest.json",
+    "release-manifest.md",
+    "SHA256SUMS"
+  ],
+  "required_sbom_files": [
+    "plaw.cdx.json",
+    "plaw.spdx.json"
+  ],
+  "required_notice_files": [
+    "LICENSE-APACHE",
+    "LICENSE-MIT",
+    "NOTICE"
+  ]
+}

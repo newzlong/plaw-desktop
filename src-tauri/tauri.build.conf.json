@@ -1,0 +1,16 @@
+{
+  "bundle": {
+    "resources": {
+      "../plaw-data/bin/plaw.exe": "plaw-data/bin/plaw.exe",
+      "../plaw-data/bin/agent-browser.exe": "plaw-data/bin/agent-browser.exe",
+      "../plaw-data/node/node.exe": "plaw-data/node/node.exe",
+      "../plaw-data/embedding/llama-server.exe": "plaw-data/embedding/llama-server.exe",
+      "../plaw-data/embedding/*.dll": "plaw-data/embedding/",
+      "../plaw-data/embedding/*.gguf": "plaw-data/embedding/",
+      "../plaw-data/agent-browser/node_modules/**/*": "plaw-data/agent-browser/node_modules/",
+      "../plaw-data/browsers/chromium_headless_shell-1208/**/*": "plaw-data/browsers/chromium_headless_shell-1208/",
+      "../plaw-data/.plaw/workspace/skills/find-skills/SKILL.md": "plaw-data/.plaw/workspace/skills/find-skills/SKILL.md",
+      "../plaw-data/.plaw/workspace/skills/skill-creator/SKILL.md": "plaw-data/.plaw/workspace/skills/skill-creator/SKILL.md"
+    }
+  }
+}

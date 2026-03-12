@@ -1,0 +1,26 @@
+# Rust
+src-tauri/target/
+plaw/target/
+
+# Node
+web/node_modules/
+web/dist/
+openclaw-ref/
+
+# IDE
+.vscode/
+.idea/
+.kiro
+.claude
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Runtime data
+plaw-data/
+
+# Env
+.env
+packages/

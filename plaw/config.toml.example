@@ -1,0 +1,28 @@
+# ZeroClaw Configuration
+# Uses ECS LLM Proxy (same as OpenClaw)
+
+# Provider: anthropic-custom points to ECS LLM Proxy
+# The proxy accepts Anthropic Messages format and forwards to Kimi API
+# Endpoint: /api/llm/v1/messages (Anthropic format)
+default_provider = "anthropic-custom:http://123.56.135.164/api/llm/v1"
+default_model = "k2p5"
+default_temperature = 0.7
+
+# API key is the JWT token from the user system
+# Get your token by logging into the web app and checking localStorage
+# Or set via environment variable: ZEROCLAW_API_KEY or API_KEY
+# api_key = "<your-jwt-token>"
+
+[agent]
+max_tool_iterations = 20
+max_history_messages = 50
+
+[autonomy]
+level = "supervised"
+workspace_only = false
+
+# Memory search (optional, requires embedding provider)
+# [memory]
+# backend = "sqlite"
+# auto_save = true
+# embedding_provider = "none"

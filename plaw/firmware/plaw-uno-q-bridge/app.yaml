@@ -1,0 +1,9 @@
+name: Plaw Bridge
+description: "GPIO bridge for Plaw — exposes digitalWrite/digitalRead via socket for agent control"
+icon: 🦀
+version: "1.0.0"
+
+ports:
+  - 9999
+
+bricks: []

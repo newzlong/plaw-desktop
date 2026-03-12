@@ -1,0 +1,98 @@
+/* ============================================
+   Lobster Design Tokens
+   品牌色：龙虾红橙 + 深海蓝黑
+   ============================================ */
+
+:root {
+  /* --- Brand --- */
+  --lobster-primary: #FF4D2A;
+  --lobster-primary-soft: rgba(255, 77, 42, 0.15);
+  --lobster-primary-hover: #E8401F;
+  --lobster-accent: #F59E0B;
+  --lobster-accent-soft: rgba(245, 158, 11, 0.15);
+
+  /* --- Radius --- */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+
+  /* --- Transitions --- */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --duration-fast: 0.15s;
+  --duration-normal: 0.25s;
+}
+
+/* ====== DARK THEME ====== */
+.app-dark {
+  --bg-base: #0A1628;
+  --bg-raised: #111D33;
+  --bg-surface: #162240;
+  --bg-surface-hover: #1C2B4F;
+  --bg-overlay: rgba(10, 22, 40, 0.92);
+
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-default: rgba(255, 255, 255, 0.12);
+  --border-strong: rgba(255, 255, 255, 0.2);
+
+  --text-primary: #F1F5F9;
+  --text-secondary: #94A3B8;
+  --text-muted: #64748B;
+  --text-inverse: #0A1628;
+
+  --shadow-card: 0 2px 8px rgba(0, 0, 0, 0.3);
+  --shadow-card-hover: 0 8px 24px rgba(0, 0, 0, 0.4);
+  --shadow-glow: 0 0 20px rgba(255, 77, 42, 0.2);
+
+  --input-bg: #0B1220;
+  --input-border: rgba(255, 255, 255, 0.15);
+  --input-focus-border: var(--lobster-primary);
+  --input-focus-shadow: 0 0 0 3px rgba(255, 77, 42, 0.2);
+
+  --sidebar-bg: rgba(17, 29, 51, 0.85);
+  --sidebar-border: rgba(255, 255, 255, 0.06);
+
+  --card-bg: #111D33;
+
+  --status-ok: #22C55E;
+  --status-err: #EF4444;
+  --status-warn: #F59E0B;
+  --status-info: #3B82F6;
+}
+
+/* ====== LIGHT THEME ====== */
+.app-light {
+  --bg-base: #F5F0EB;
+  --bg-raised: #FFFFFF;
+  --bg-surface: #FFFFFF;
+  --bg-surface-hover: #FFF7F5;
+  --bg-overlay: rgba(255, 255, 255, 0.95);
+
+  --border-subtle: rgba(0, 0, 0, 0.06);
+  --border-default: rgba(0, 0, 0, 0.1);
+  --border-strong: rgba(0, 0, 0, 0.18);
+
+  --text-primary: #1A1A2E;
+  --text-secondary: #64748B;
+  --text-muted: #94A3B8;
+  --text-inverse: #FFFFFF;
+
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.06), 0 2px 8px rgba(0, 0, 0, 0.04);
+  --shadow-card-hover: 0 4px 16px rgba(255, 77, 42, 0.08), 0 2px 6px rgba(0, 0, 0, 0.06);
+  --shadow-glow: 0 0 20px rgba(255, 77, 42, 0.12);
+
+  --input-bg: #EFF1F5;
+  --input-border: #C8CDD5;
+  --input-focus-border: var(--lobster-primary);
+  --input-focus-shadow: 0 0 0 3px rgba(255, 77, 42, 0.12);
+
+  --sidebar-bg: rgba(255, 255, 255, 0.8);
+  --sidebar-border: rgba(0, 0, 0, 0.06);
+
+  --card-bg: #FFFFFF;
+
+  --status-ok: #16A34A;
+  --status-err: #DC2626;
+  --status-warn: #D97706;
+  --status-info: #2563EB;
+}

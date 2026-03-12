@@ -1,0 +1,64 @@
+# Plaw Docker Compose Example
+# 
+# Quick start:
+#   1. Copy this file and set your API key
+#   2. Run: docker compose up -d
+#   3. Access gateway at http://localhost:42617
+#
+# For more info: https://github.com/plaw-labs/plaw
+
+services:
+  plaw:
+    image: ghcr.io/plaw-labs/plaw:latest
+    # Or build locally:
+    # build: .
+    container_name: plaw
+    restart: unless-stopped
+    
+    environment:
+      # Required: Your LLM provider API key
+      - API_KEY=${API_KEY:-}
+      # Or use the prefixed version:
+      # - PLAW_API_KEY=${PLAW_API_KEY:-}
+      
+      # Optional: LLM provider (default: openrouter)
+      # Options: openrouter, openai, anthropic, ollama
+      - PROVIDER=${PROVIDER:-openrouter}
+      
+      # Allow public bind inside Docker (required for container networking)
+      - PLAW_ALLOW_PUBLIC_BIND=true
+      # Default gateway port inside container
+      - PLAW_GATEWAY_PORT=${PLAW_GATEWAY_PORT:-42617}
+      
+      # Optional: Model override
+      # - PLAW_MODEL=anthropic/claude-sonnet-4-20250514
+      
+    volumes:
+      # Persist workspace and config (must match WORKDIR/HOME in Dockerfile)
+      - plaw-data:/plaw-data
+      
+    ports:
+      # Gateway API port (override HOST_PORT if 42617 is taken)
+      - "${HOST_PORT:-42617}:${PLAW_GATEWAY_PORT:-42617}"
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+    # Health check — uses lightweight status instead of full diagnostics.
+    # For images with curl, prefer: curl -f http://localhost:42617/health
+    healthcheck:
+      test: ["CMD", "plaw", "status"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  plaw-data:
