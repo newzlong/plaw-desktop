@@ -1177,6 +1177,9 @@ pub fn run() {
     let data_dir = get_data_dir();
     let _ = std::fs::create_dir_all(&data_dir);
 
+    // Extract bundled tar.gz archives on first run (preserves directory structure)
+    extract_bundle_if_needed(&data_dir);
+
     let manager = Arc::new(Mutex::new(PlawManager::new(data_dir.clone())));
     let embedding = Arc::new(Mutex::new(EmbeddingManager::new(data_dir.clone())));
     let health_stop = Arc::new(AtomicBool::new(false));
@@ -1316,6 +1319,60 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Extract bundled tar.gz archives on first run.
+/// Tauri's resource glob flattens directory structure, so we ship
+/// agent-browser/node_modules and browsers as tar.gz and extract here.
+fn extract_bundle_if_needed(data_dir: &std::path::Path) {
+    let bundles: &[(&str, &str)] = &[
+        ("agent-browser-bundle.tar.gz", "agent-browser"),
+        ("browsers-bundle.tar.gz", "browsers"),
+    ];
+    for (archive_name, check_dir) in bundles {
+        let archive_path = data_dir.join(archive_name);
+        let target_dir = data_dir.join(check_dir);
+        // Skip if archive doesn't exist (dev mode) or already extracted
+        if !archive_path.exists() {
+            continue;
+        }
+        // Check if the target directory has meaningful content
+        // (agent-browser/node_modules/agent-browser/dist/ or browsers/chromium_*/chrome-headless-shell-win64/)
+        if target_dir.is_dir() && dir_has_subdirs(&target_dir) {
+            continue;
+        }
+        eprintln!("[lobster] Extracting {} ...", archive_name);
+        if let Err(e) = extract_tar_gz(&archive_path, data_dir) {
+            eprintln!("[lobster] Failed to extract {}: {}", archive_name, e);
+        } else {
+            eprintln!("[lobster] Extracted {} successfully", archive_name);
+            // Remove the archive to save disk space
+            let _ = std::fs::remove_file(&archive_path);
+        }
+    }
+}
+
+/// Check if a directory has at least one subdirectory (indicates proper structure)
+fn dir_has_subdirs(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries.filter_map(|e| e.ok()).any(|e| {
+                e.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Extract a .tar.gz archive into target_dir
+fn extract_tar_gz(
+    archive_path: &std::path::Path,
+    target_dir: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let file = std::fs::File::open(archive_path)?;
+    let gz = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(gz);
+    archive.unpack(target_dir)?;
+    Ok(())
 }
 
 /// Kill orphaned browser daemon (node.exe daemon.js) and chrome-headless-shell processes.

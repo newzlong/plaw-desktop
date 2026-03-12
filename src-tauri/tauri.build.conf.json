@@ -7,8 +7,8 @@
       "../plaw-data/embedding/llama-server.exe": "plaw-data/embedding/llama-server.exe",
       "../plaw-data/embedding/*.dll": "plaw-data/embedding/",
       "../plaw-data/embedding/*.gguf": "plaw-data/embedding/",
-      "../plaw-data/agent-browser/node_modules/**/*": "plaw-data/agent-browser/node_modules/",
-      "../plaw-data/browsers/chromium_headless_shell-1208/**/*": "plaw-data/browsers/chromium_headless_shell-1208/",
+      "../plaw-data/agent-browser-bundle.tar.gz": "plaw-data/agent-browser-bundle.tar.gz",
+      "../plaw-data/browsers-bundle.tar.gz": "plaw-data/browsers-bundle.tar.gz",
       "../plaw-data/.plaw/workspace/skills/find-skills/SKILL.md": "plaw-data/.plaw/workspace/skills/find-skills/SKILL.md",
       "../plaw-data/.plaw/workspace/skills/skill-creator/SKILL.md": "plaw-data/.plaw/workspace/skills/skill-creator/SKILL.md"
     }
