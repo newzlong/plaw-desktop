@@ -124,7 +124,7 @@ Lobster 要解决的问题：**让不懂技术的人也能用上 AI Agent**。
 
 ### 普通用户
 
-从 [Releases](https://github.com/user/lobster-desktop/releases) 下载安装包：
+从 [Releases](https://github.com/gfisrubbish/lobster-desktop/releases) 下载安装包：
 
 - **Windows**: `lobster-desktop_x.x.x_x64-setup.exe`
 
@@ -133,7 +133,7 @@ Lobster 要解决的问题：**让不懂技术的人也能用上 AI Agent**。
 ### 开发者
 
 ```powershell
-git clone https://github.com/user/lobster-desktop.git
+git clone https://github.com/gfisrubbish/lobster-desktop.git
 cd lobster-desktop
 .\setup.ps1     # 一键安装所有依赖 + 编译 Plaw 引擎
 .\dev.ps1       # 启动开发（Vite + Tauri 热重载）
