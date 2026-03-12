@@ -1,5 +1,7 @@
 <template>
   <div class="app-root" :class="isDark ? 'app-dark' : 'app-light'">
+    <TitleBar />
+
     <!-- Setup Wizard: full screen -->
     <router-view v-if="$route.path === '/setup'" />
 
@@ -24,6 +26,7 @@ import { useI18n } from './composables/useI18n'
 import { useNotifications } from './composables/useNotifications'
 import NotificationToast from './components/NotificationToast.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
+import TitleBar from './components/TitleBar.vue'
 import { configExists, getAllUnconsumedNotifications, startPlaw } from './api/tauri'
 import { usePlawState } from './composables/usePlawState'
 import { listen } from '@tauri-apps/api/event'
@@ -81,7 +84,7 @@ onMounted(async () => {
     const status = data.status || 'unknown'
     const ok = status === 'ok'
     const icon = ok ? '\u2705' : '\u274C'
-    const sessionId = data.lobster_session || null
+    const sessionId = data.plaw_session || null
 
     addToast({
       title: `${icon} ${jobName}`,
@@ -104,7 +107,7 @@ async function onVisibilityChange() {
     for (const n of pending) {
       const ok = n.content.startsWith('\u2705')
       addToast({
-        title: n.job_name || n.source || 'Lobster',
+        title: n.job_name || n.source || 'Plaw',
         body: n.content.split('\n').slice(0, 2).join(' '),
         type: ok ? 'success' : 'error',
         sessionId: n.session_id || null,
@@ -124,10 +127,18 @@ onUnmounted(() => {
 <style scoped>
 .app-root {
   display: flex;
+  flex-direction: column;
   height: 100vh;
+  overflow: hidden;
   background: var(--bg-base);
   color: var(--text-primary);
   transition: background var(--duration-normal) var(--ease-out),
               color var(--duration-normal) var(--ease-out);
+}
+
+/* Content below titlebar fills remaining space */
+.app-root > :deep(:nth-child(2)) {
+  flex: 1;
+  min-height: 0;
 }
 </style>

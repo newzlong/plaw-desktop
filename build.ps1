@@ -1,7 +1,7 @@
-# Lobster Desktop - Production build
+# Plaw Desktop - Production build
 # Usage: .\build.ps1
 
-Write-Host "=== Lobster Desktop Build ===" -ForegroundColor Cyan
+Write-Host "=== Plaw Desktop Build ===" -ForegroundColor Cyan
 
 # Ensure proxy is set for NSIS/WiX downloads
 if (-not $env:HTTPS_PROXY) {

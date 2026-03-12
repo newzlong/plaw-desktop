@@ -116,10 +116,10 @@ onBeforeUnmount(() => document.removeEventListener('click', onClickOutside))
   cursor: pointer; text-align: left;
   transition: background var(--duration-fast);
 }
-.glass-select__option:hover { background: var(--lobster-primary-soft); }
+.glass-select__option:hover { background: var(--plaw-primary-soft); }
 .glass-select__option--active {
-  background: var(--lobster-primary-soft);
-  color: var(--lobster-primary);
+  background: var(--plaw-primary-soft);
+  color: var(--plaw-primary);
   font-weight: 600;
 }
 .dropdown-enter-active, .dropdown-leave-active {

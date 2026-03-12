@@ -79,7 +79,7 @@
         </div>
         <!-- Session binding -->
         <div class="task-session">
-          <template v-if="isSessionMissing(job.lobster_session)">
+          <template v-if="isSessionMissing(job.plaw_session)">
             <span class="session-warning">
               <AlertTriangle class="w-3.5 h-3.5" />
               {{ t('cron.sessionDeleted') || '关联会话已删除' }}
@@ -90,8 +90,8 @@
             </select>
           </template>
           <template v-else>
-            <span class="session-label">{{ sessionName(job.lobster_session) }}</span>
-            <select class="session-select session-select--inline" :value="job.lobster_session || ''" @change="rebindSession(job.id, $event.target.value)">
+            <span class="session-label">{{ sessionName(job.plaw_session) }}</span>
+            <select class="session-select session-select--inline" :value="job.plaw_session || ''" @change="rebindSession(job.id, $event.target.value)">
               <option v-for="opt in sessionOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
             </select>
           </template>
@@ -196,7 +196,7 @@ const sessionOptions = computed(() => {
 
 async function rebindSession(jobId, newSessionId) {
   try {
-    await patchCronJob(jobId, { lobster_session: newSessionId || null })
+    await patchCronJob(jobId, { plaw_session: newSessionId || null })
     await loadJobs()
   } catch (e) {
     error.value = String(e.message || e)

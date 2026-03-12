@@ -286,7 +286,7 @@ async function finish() {
 .setup-brand__logo {
   width: 44px; height: 44px;
   display: flex; align-items: center; justify-content: center;
-  background: var(--lobster-primary);
+  background: var(--plaw-primary);
   color: white;
   font-size: 1.4rem; font-weight: 800;
   border-radius: var(--radius-md);
@@ -324,8 +324,8 @@ async function finish() {
 }
 .preset-card:hover { border-color: var(--border-strong); }
 .preset-card--active {
-  border-color: var(--lobster-primary);
-  background: var(--lobster-primary-soft);
+  border-color: var(--plaw-primary);
+  background: var(--plaw-primary-soft);
   box-shadow: var(--shadow-glow);
 }
 .preset-card__title {

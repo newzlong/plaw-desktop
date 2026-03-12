@@ -110,7 +110,7 @@ fn handle_sse_message(app: &AppHandle, data_dir: &PathBuf, raw: &str) {
     let job_id = value.get("job_id").and_then(|v| v.as_str());
     let status = value.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
     let output = value.get("output").and_then(|v| v.as_str()).unwrap_or("");
-    let session_id = value.get("lobster_session").and_then(|v| v.as_str());
+    let session_id = value.get("plaw_session").and_then(|v| v.as_str());
     let ok = status == "ok";
     let icon = if ok { "\u{2705}" } else { "\u{274C}" };
 

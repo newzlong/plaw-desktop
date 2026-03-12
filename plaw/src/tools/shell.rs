@@ -448,7 +448,7 @@ impl Tool for ShellTool {
                 }
             }
 
-            // Also try $HOME as data_root fallback (Lobster sets HOME=plaw-data/)
+            // Also try $HOME as data_root fallback (Plaw sets HOME=plaw-data/)
             if let Ok(home) = std::env::var("HOME") {
                 let home_path = std::path::Path::new(&home);
                 let candidates = [

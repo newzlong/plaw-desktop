@@ -89,7 +89,7 @@ impl Tool for CronAddTool {
                 },
                 "session_target": { "type": "string", "enum": ["isolated", "main"] },
                 "model": { "type": "string" },
-                "lobster_session": { "type": "string", "description": "Lobster Desktop session ID to deliver results to" },
+                "plaw_session": { "type": "string", "description": "Plaw Desktop session ID to deliver results to" },
                 "delivery": {
                     "type": "object",
                     "description": "Delivery config to send job output to a channel. Example: {\"mode\":\"announce\",\"channel\":\"discord\",\"to\":\"<channel_id>\"}",
@@ -209,12 +209,12 @@ impl Tool for CronAddTool {
                     return Ok(blocked);
                 }
 
-                let lobster_session = args
-                    .get("lobster_session")
+                let plaw_session = args
+                    .get("plaw_session")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string);
 
-                cron::add_shell_job(&self.config, name, schedule, command, lobster_session)
+                cron::add_shell_job(&self.config, name, schedule, command, plaw_session)
             }
             JobType::Agent => {
                 let prompt = match args.get("prompt").and_then(serde_json::Value::as_str) {
@@ -265,8 +265,8 @@ impl Tool for CronAddTool {
                     return Ok(blocked);
                 }
 
-                let lobster_session = args
-                    .get("lobster_session")
+                let plaw_session = args
+                    .get("plaw_session")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string);
 
@@ -284,7 +284,7 @@ impl Tool for CronAddTool {
                     model,
                     delivery,
                     delete_after_run,
-                    lobster_session,
+                    plaw_session,
                     context_summary,
                 )
             }
@@ -304,8 +304,8 @@ impl Tool for CronAddTool {
                     return Ok(blocked);
                 }
 
-                let lobster_session = args
-                    .get("lobster_session")
+                let plaw_session = args
+                    .get("plaw_session")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string);
 
@@ -315,7 +315,7 @@ impl Tool for CronAddTool {
                     schedule,
                     prompt,
                     delete_after_run,
-                    lobster_session,
+                    plaw_session,
                 )
             }
         };

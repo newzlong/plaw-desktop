@@ -152,7 +152,7 @@ export default {
     auditCompatibility: '兼容性',
     auditRisk: '风险',
     auditDeps: '依赖项：',
-    auditIncompatWarn: '该技能与 Lobster 不兼容，可能无法正常使用。',
+    auditIncompatWarn: '该技能与 Plaw 不兼容，可能无法正常使用。',
     auditUninstall: '卸载',
     auditKeep: '仍然保留',
     compatVerified: '已验证',
@@ -246,7 +246,7 @@ export default {
 
   // Setup Wizard
   setup: {
-    welcome: '欢迎使用 Lobster',
+    welcome: '欢迎使用 Plaw',
     subtitle: "让我们来配置你的 AI Agent",
     stepProvider: '模型',
     stepChannel: '渠道',
@@ -304,17 +304,17 @@ export default {
     },
   },
 
-  // Lobster activity
-  lobster: {
-    sleeping: '你的龙虾正在睡觉...',
-    idle: '你的龙虾正在发呆',
-    thinking: '你的龙虾正在思考...',
-    searching: '你的龙虾正在上网搜索',
-    browsing: '你的龙虾正在浏览网页',
-    coding: '你的龙虾正在写代码',
-    reading: '你的龙虾正在阅读文件',
-    usingTool: '你的龙虾正在使用工具',
-    error: '你的龙虾遇到了问题',
+  // Plaw activity
+  plaw: {
+    sleeping: 'Plaw正在睡觉...',
+    idle: 'Plaw正在发呆',
+    thinking: 'Plaw正在思考...',
+    searching: 'Plaw正在上网搜索',
+    browsing: 'Plaw正在浏览网页',
+    coding: 'Plaw正在写代码',
+    reading: 'Plaw正在阅读文件',
+    usingTool: 'Plaw正在使用工具',
+    error: 'Plaw遇到了问题',
     moodBusy: '忙碌中 — 请勿打扰',
     moodConfused: '有点懵 — 需要帮助',
     moodSleeping: 'zzZ',

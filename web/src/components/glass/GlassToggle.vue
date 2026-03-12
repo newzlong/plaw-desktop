@@ -43,7 +43,7 @@ defineEmits(['update:modelValue'])
   box-shadow: var(--input-focus-shadow);
 }
 .glass-toggle__track--on {
-  background: var(--lobster-primary);
+  background: var(--plaw-primary);
 }
 .glass-toggle__thumb {
   position: absolute;

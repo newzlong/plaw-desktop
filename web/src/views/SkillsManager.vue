@@ -725,7 +725,7 @@ onUnmounted(() => {
   background: rgba(255, 255, 255, 0.08);
 }
 .audit-btn--active {
-  color: var(--lobster-accent);
+  color: var(--plaw-accent);
   cursor: default;
 }
 
@@ -749,7 +749,7 @@ onUnmounted(() => {
   width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
 }
 .audit-dot--running {
-  background: var(--lobster-accent);
+  background: var(--plaw-accent);
   animation: shimmer 1.2s ease-in-out infinite;
 }
 @keyframes shimmer { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
@@ -804,9 +804,9 @@ onUnmounted(() => {
   font-size: 0.8rem;
 }
 .source-hint--warn {
-  background: var(--lobster-accent-soft);
+  background: var(--plaw-accent-soft);
   border: 1px solid rgba(245, 158, 11, 0.2);
-  color: var(--lobster-accent);
+  color: var(--plaw-accent);
 }
 .source-hint--ok {
   display: flex; align-items: center; gap: 8px;
@@ -837,7 +837,7 @@ onUnmounted(() => {
   transition: border-color var(--duration-fast) var(--ease-out);
 }
 .proxy-input:focus {
-  border-color: var(--lobster-accent);
+  border-color: var(--plaw-accent);
 }
 .proxy-input::placeholder {
   color: var(--text-muted);

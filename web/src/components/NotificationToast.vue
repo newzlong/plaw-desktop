@@ -64,7 +64,7 @@ function iconFor(type) {
 
 .toast-item--success { border-left: 3px solid var(--status-ok); }
 .toast-item--error { border-left: 3px solid var(--status-err); }
-.toast-item--info { border-left: 3px solid var(--lobster-primary); }
+.toast-item--info { border-left: 3px solid var(--plaw-primary); }
 
 .toast-item__header {
   display: flex;
@@ -95,7 +95,7 @@ function iconFor(type) {
 }
 .toast-item__close:hover {
   color: var(--text-primary);
-  background: var(--lobster-primary-soft);
+  background: var(--plaw-primary-soft);
 }
 
 .toast-item__body {

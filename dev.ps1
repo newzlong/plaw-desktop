@@ -1,7 +1,7 @@
-# Lobster Desktop - Development launcher
+# Plaw Desktop - Development launcher
 # Usage: .\dev.ps1
 
-Write-Host "=== Lobster Desktop Dev ===" -ForegroundColor Cyan
+Write-Host "=== Plaw Desktop Dev ===" -ForegroundColor Cyan
 
 # Hint: if you need proxy for external API access, set before running:
 #   $env:HTTPS_PROXY = "http://127.0.0.1:8118"

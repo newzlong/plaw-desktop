@@ -72,6 +72,6 @@ const showPassword = ref(false)
   padding: 0.25rem 0.5rem;
   transition: color var(--duration-fast);
 }
-.glass-input__toggle:hover { color: var(--lobster-primary); }
+.glass-input__toggle:hover { color: var(--plaw-primary); }
 .glass-input__hint { font-size: 0.75rem; color: var(--text-muted); }
 </style>

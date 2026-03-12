@@ -1,12 +1,12 @@
 <template>
-  <div class="lobster-activity" :class="`lobster-activity--${mood}`">
-    <div class="lobster-avatar" :class="{ 'lobster-avatar--bounce': isActive }">
-      <span class="lobster-emoji">{{ emoji }}</span>
+  <div class="plaw-activity" :class="`plaw-activity--${mood}`">
+    <div class="plaw-avatar" :class="{ 'plaw-avatar--bounce': isActive }">
+      <span class="plaw-emoji">{{ emoji }}</span>
     </div>
-    <div class="lobster-status">
-      <div class="lobster-status__text">{{ statusText }}</div>
-      <div v-if="detail" class="lobster-status__detail">{{ detail }}</div>
-      <div class="lobster-status__mood">{{ moodLabel }}</div>
+    <div class="plaw-status">
+      <div class="plaw-status__text">{{ statusText }}</div>
+      <div v-if="detail" class="plaw-status__detail">{{ detail }}</div>
+      <div class="plaw-status__mood">{{ moodLabel }}</div>
     </div>
   </div>
 </template>
@@ -31,7 +31,7 @@ let idleTimer = null
 let unlistenActivity = null
 let unlistenStatus = null
 
-// Map SSE events to lobster states
+// Map SSE events to plaw states
 function onActivityEvent(ev) {
   lastActiveTime.value = Date.now()
   const type = ev.type || ''
@@ -89,8 +89,8 @@ function checkIdle() {
 
 const emoji = computed(() => {
   const map = {
-    sleeping: '\uD83E\uDD7A',  // pleading face (sleepy lobster)
-    idle: '\uD83E\uDD9E',      // lobster
+    sleeping: '\uD83E\uDD7A',  // pleading face (sleepy plaw)
+    idle: '\uD83E\uDD9E',      // plaw
     thinking: '\uD83E\uDD14',  // thinking face
     searching: '\uD83D\uDD0D', // magnifying glass
     browsing: '\uD83C\uDF10',  // globe
@@ -113,17 +113,17 @@ const isActive = computed(() => mood.value === 'active')
 
 const statusText = computed(() => {
   const map = {
-    sleeping: t('lobster.sleeping'),
-    idle: t('lobster.idle'),
-    thinking: t('lobster.thinking'),
-    searching: t('lobster.searching'),
-    browsing: t('lobster.browsing'),
-    coding: t('lobster.coding'),
-    reading: t('lobster.reading'),
-    tool: t('lobster.usingTool'),
-    error: t('lobster.error'),
+    sleeping: t('plaw.sleeping'),
+    idle: t('plaw.idle'),
+    thinking: t('plaw.thinking'),
+    searching: t('plaw.searching'),
+    browsing: t('plaw.browsing'),
+    coding: t('plaw.coding'),
+    reading: t('plaw.reading'),
+    tool: t('plaw.usingTool'),
+    error: t('plaw.error'),
   }
-  return map[activity.value] || t('lobster.idle')
+  return map[activity.value] || t('plaw.idle')
 })
 
 const detail = computed(() => {
@@ -138,10 +138,10 @@ const detail = computed(() => {
 
 const moodLabel = computed(() => {
   const map = {
-    active: t('lobster.moodBusy'),
-    error: t('lobster.moodConfused'),
-    sleeping: t('lobster.moodSleeping'),
-    idle: t('lobster.moodRelaxed'),
+    active: t('plaw.moodBusy'),
+    error: t('plaw.moodConfused'),
+    sleeping: t('plaw.moodSleeping'),
+    idle: t('plaw.moodRelaxed'),
   }
   return map[mood.value] || ''
 })
@@ -160,7 +160,7 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.lobster-activity {
+.plaw-activity {
   display: flex;
   align-items: center;
   gap: 16px;
@@ -171,18 +171,18 @@ onUnmounted(() => {
   box-shadow: var(--shadow-card);
   transition: all var(--duration-normal) var(--ease-out);
 }
-.lobster-activity--active {
+.plaw-activity--active {
   border-color: rgba(59, 130, 246, 0.3);
   box-shadow: 0 0 20px rgba(59, 130, 246, 0.08);
 }
-.lobster-activity--error {
+.plaw-activity--error {
   border-color: rgba(239, 68, 68, 0.3);
 }
-.lobster-activity--sleeping {
+.plaw-activity--sleeping {
   opacity: 0.7;
 }
 
-.lobster-avatar {
+.plaw-avatar {
   width: 56px;
   height: 56px;
   display: flex;
@@ -194,21 +194,21 @@ onUnmounted(() => {
   flex-shrink: 0;
   transition: transform var(--duration-normal) var(--ease-out);
 }
-.lobster-avatar--bounce {
-  animation: lobster-bounce 2s ease-in-out infinite;
+.plaw-avatar--bounce {
+  animation: plaw-bounce 2s ease-in-out infinite;
 }
 
-.lobster-status {
+.plaw-status {
   flex: 1;
   min-width: 0;
 }
-.lobster-status__text {
+.plaw-status__text {
   font-size: 1rem;
   font-weight: 600;
   color: var(--text-primary);
   letter-spacing: -0.01em;
 }
-.lobster-status__detail {
+.plaw-status__detail {
   font-size: 0.8rem;
   color: var(--text-secondary);
   margin-top: 2px;
@@ -217,13 +217,13 @@ onUnmounted(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.lobster-status__mood {
+.plaw-status__mood {
   font-size: 0.72rem;
   color: var(--text-muted);
   margin-top: 4px;
 }
 
-@keyframes lobster-bounce {
+@keyframes plaw-bounce {
   0%, 100% { transform: translateY(0); }
   50% { transform: translateY(-4px); }
 }

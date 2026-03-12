@@ -110,8 +110,8 @@
       </GlassButton>
     </div>
 
-    <!-- Lobster activity -->
-    <LobsterActivity :running="isRunning" :healthy="isHealthy" class="mt-6" />
+    <!-- Plaw activity -->
+    <PlawActivity :running="isRunning" :healthy="isHealthy" class="mt-6" />
 
     <!-- Quick start (only when not configured) -->
     <GlassCard v-if="!provider || provider === '--'" :hoverable="false" class="mt-4">
@@ -133,7 +133,7 @@
 <script setup>
 import { ref, computed, inject, onMounted, onUnmounted, watch } from 'vue'
 import { GlassCard, GlassButton } from '../components/glass'
-import LobsterActivity from '../components/LobsterActivity.vue'
+import PlawActivity from '../components/PlawActivity.vue'
 import {
   Bot as BotIcon,
   Radio as RadioIcon,
@@ -355,7 +355,7 @@ onUnmounted(() => {
   margin-left: 8px;
 }
 .hero-status__health--ok { color: var(--status-ok); }
-.hero-status__health--wait { color: var(--lobster-accent); }
+.hero-status__health--wait { color: var(--plaw-accent); }
 .hero-status__uptime {
   color: var(--text-muted);
   font-size: 0.75rem;
@@ -390,13 +390,13 @@ onUnmounted(() => {
   width: 40px; height: 40px;
   display: flex; align-items: center; justify-content: center;
   border-radius: var(--radius-sm);
-  background: var(--lobster-primary-soft);
-  color: var(--lobster-primary);
+  background: var(--plaw-primary-soft);
+  color: var(--plaw-primary);
   flex-shrink: 0;
 }
 .stat-item__icon--amber {
-  background: var(--lobster-accent-soft);
-  color: var(--lobster-accent);
+  background: var(--plaw-accent-soft);
+  color: var(--plaw-accent);
 }
 .stat-item__icon--blue {
   background: rgba(59, 130, 246, 0.12);

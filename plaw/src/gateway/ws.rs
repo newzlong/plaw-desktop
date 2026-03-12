@@ -326,17 +326,17 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             }
         }
 
-        // Extract Lobster Desktop session ID for cron job binding.
-        // When creating cron jobs, the AI should pass this as lobster_session so results
+        // Extract Plaw Desktop session ID for cron job binding.
+        // When creating cron jobs, the AI should pass this as plaw_session so results
         // are delivered back to the originating chat session.
-        let lobster_session_id = parsed["session_id"].as_str().map(str::to_string);
-        if let Some(ref sid) = lobster_session_id {
+        let plaw_session_id = parsed["session_id"].as_str().map(str::to_string);
+        if let Some(ref sid) = plaw_session_id {
             // Update system prompt with session context (only if not already present)
             if let Some(sys_msg) = history.first_mut() {
-                if sys_msg.role == "system" && !sys_msg.content.contains("lobster_session") {
+                if sys_msg.role == "system" && !sys_msg.content.contains("plaw_session") {
                     sys_msg.content.push_str(&format!(
-                        "\n\n## Lobster Desktop Context\nCurrent chat session ID: `{sid}`. \
-                         When creating cron jobs (cron_add), pass `lobster_session: \"{sid}\"` \
+                        "\n\n## Plaw Desktop Context\nCurrent chat session ID: `{sid}`. \
+                         When creating cron jobs (cron_add), pass `plaw_session: \"{sid}\"` \
                          so results are delivered back to this conversation."
                     ));
                 }

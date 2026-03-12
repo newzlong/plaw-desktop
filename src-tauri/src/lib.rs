@@ -27,7 +27,7 @@ pub struct AppState {
 
 /// Get the portable data directory.
 /// Priority: exe 旁边的 plaw-data/ (portable mode)
-/// Fallback: %LOCALAPPDATA%/lobster-desktop/ (当 exe 目录不可写时，如 Program Files)
+/// Fallback: %LOCALAPPDATA%/plaw-desktop/ (当 exe 目录不可写时，如 Program Files)
 fn get_data_dir() -> PathBuf {
     if cfg!(debug_assertions) {
         // Dev mode: use project root / plaw-data
@@ -53,10 +53,10 @@ fn get_data_dir() -> PathBuf {
         let _ = std::fs::remove_dir(&portable_dir);
     }
 
-    // Fallback: %LOCALAPPDATA%/lobster-desktop/
+    // Fallback: %LOCALAPPDATA%/plaw-desktop/
     let fallback = dirs_next::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("lobster-desktop");
+        .join("plaw-desktop");
     let _ = std::fs::create_dir_all(&fallback);
     fallback
 }
@@ -106,7 +106,7 @@ fn allocate_port(data_dir: &std::path::Path) -> u16 {
     listener.local_addr().unwrap().port()
 }
 
-/// Patch config.toml on startup to ensure required defaults for Lobster.
+/// Patch config.toml on startup to ensure required defaults for Plaw.
 /// - gateway.require_pairing = false (local-only, no auth)
 /// - web_search/web_fetch/http_request enabled if missing
 fn ensure_config_defaults(data_dir: &std::path::Path) {
@@ -329,7 +329,7 @@ async fn start_plaw(
     }
 
     if !became_healthy {
-        eprintln!("[lobster] Plaw started but health check not passing after 15s");
+        eprintln!("[plaw] Plaw started but health check not passing after 15s");
     }
 
     // Start health watcher (reset stop flag)
@@ -356,9 +356,9 @@ async fn start_plaw(
         let mut emb = state.embedding.lock().await;
         if emb.is_available() && !emb.running {
             if let Err(e) = emb.start().await {
-                eprintln!("[lobster] Embedding server auto-start failed: {e}");
+                eprintln!("[plaw] Embedding server auto-start failed: {e}");
             } else {
-                eprintln!("[lobster] Embedding server auto-started on port {}", emb.port);
+                eprintln!("[plaw] Embedding server auto-started on port {}", emb.port);
             }
         }
     }
@@ -447,8 +447,8 @@ fn get_data_dir_path(state: tauri::State<AppState>) -> String {
 #[tauri::command]
 fn write_config(state: tauri::State<AppState>, config: serde_json::Value) -> Result<(), String> {
     let config_path = state.data_dir.join(".plaw").join("config.toml");
-    eprintln!("[lobster] write_config to: {}", config_path.display());
-    eprintln!("[lobster] data_dir: {}", state.data_dir.display());
+    eprintln!("[plaw] write_config to: {}", config_path.display());
+    eprintln!("[plaw] data_dir: {}", state.data_dir.display());
     std::fs::create_dir_all(config_path.parent().unwrap())
         .map_err(|e| format!("Failed to create config dir: {e}"))?;
 
@@ -502,7 +502,7 @@ async fn test_provider_connection(
     let proxy_url = proxy_url.or_else(|| detect_proxy(&state.data_dir));
 
     if let Some(ref url) = proxy_url {
-        eprintln!("[lobster] using proxy: {url}");
+        eprintln!("[plaw] using proxy: {url}");
         if let Ok(proxy) = reqwest::Proxy::all(url) {
             builder = builder.proxy(proxy);
         }
@@ -580,11 +580,11 @@ async fn test_provider_connection(
             }
         }
         Err(e) => {
-            eprintln!("[lobster] test_provider_connection network error: {e}");
+            eprintln!("[plaw] test_provider_connection network error: {e}");
             if let Some(ref url) = proxy_url {
-                eprintln!("[lobster] proxy detected: {url}");
+                eprintln!("[plaw] proxy detected: {url}");
             } else {
-                eprintln!("[lobster] no proxy env var detected");
+                eprintln!("[plaw] no proxy env var detected");
             }
             Err(format!("network_error:{e}"))
         }
@@ -626,7 +626,7 @@ async fn install_skill(
     let proxy = detect_proxy(&data_dir);
     tokio::spawn(async move {
         if let Err(e) = auto_audit_skill(&data_dir, &skill_name, proxy.as_deref()).await {
-            eprintln!("[lobster] Auto-audit failed for {skill_name}: {e}");
+            eprintln!("[plaw] Auto-audit failed for {skill_name}: {e}");
         }
     });
 
@@ -657,12 +657,12 @@ async fn auto_audit_skill(
         return Ok(());
     }
 
-    eprintln!("[lobster] Auto-auditing skill: {name}");
+    eprintln!("[plaw] Auto-auditing skill: {name}");
     let result = skills::audit_skill_content(data_dir, &content, proxy_url).await?;
     let new_content = skills::inject_audit_tags(&content, &result.compatibility, &result.risk);
     std::fs::write(&skill_md, new_content)
         .map_err(|e| format!("Failed to write audit tags: {e}"))?;
-    eprintln!("[lobster] Auto-audit done for {name}: {} / {}", result.compatibility, result.risk);
+    eprintln!("[plaw] Auto-audit done for {name}: {} / {}", result.compatibility, result.risk);
     Ok(())
 }
 
@@ -748,7 +748,7 @@ async fn audit_all_unaudited(
         });
     }
 
-    eprintln!("[lobster] Queued {count} skills for audit (force={force})");
+    eprintln!("[plaw] Queued {count} skills for audit (force={force})");
     Ok(count)
 }
 
@@ -762,12 +762,12 @@ async fn force_audit_skill(
     let content = std::fs::read_to_string(&skill_md)
         .map_err(|e| format!("Failed to read SKILL.md: {e}"))?;
 
-    eprintln!("[lobster] Auditing skill: {name}");
+    eprintln!("[plaw] Auditing skill: {name}");
     let result = skills::audit_skill_content(data_dir, &content, proxy_url).await?;
     let new_content = skills::inject_audit_tags(&content, &result.compatibility, &result.risk);
     std::fs::write(&skill_md, new_content)
         .map_err(|e| format!("Failed to write audit tags: {e}"))?;
-    eprintln!("[lobster] Audit done for {name}: {} / {}", result.compatibility, result.risk);
+    eprintln!("[plaw] Audit done for {name}: {} / {}", result.compatibility, result.risk);
     Ok(())
 }
 
@@ -880,7 +880,7 @@ async fn search_registry_skills(
             })
         }
         Err(e) => {
-            eprintln!("[lobster] GitHub API failed, falling back to local: {e}");
+            eprintln!("[plaw] GitHub API failed, falling back to local: {e}");
             let results = skills::search_local_skills(&state.data_dir, &query);
             Ok(RegistrySearchResult {
                 skills: results,
@@ -1385,7 +1385,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .manage(state)
         .setup(|app| {
-            let show = MenuItemBuilder::with_id("show", "Show Lobster").build(app)?;
+            let show = MenuItemBuilder::with_id("show", "Show Plaw").build(app)?;
             let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
             let menu = MenuBuilder::new(app)
                 .item(&show)
@@ -1395,8 +1395,9 @@ pub fn run() {
 
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().cloned().unwrap())
-                .tooltip("Lobster Desktop")
+                .tooltip("Plaw Desktop")
                 .menu(&menu)
+                .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| {
                     match event.id().as_ref() {
                         "show" => {
@@ -1418,7 +1419,6 @@ pub fn run() {
                                     drop(emb_guard);
                                     let mut mgr_guard = mgr.lock().await;
                                     let _ = mgr_guard.stop().await;
-                                    // Kill orphaned browser daemon + chrome processes
                                     kill_browser_orphans().await;
                                 });
                             }
@@ -1534,11 +1534,11 @@ fn extract_bundle_if_needed(data_dir: &std::path::Path) {
         if target_dir.is_dir() && dir_has_subdirs(&target_dir) {
             continue;
         }
-        eprintln!("[lobster] Extracting {} ...", archive_name);
+        eprintln!("[plaw] Extracting {} ...", archive_name);
         if let Err(e) = extract_tar_gz(&archive_path, data_dir) {
-            eprintln!("[lobster] Failed to extract {}: {}", archive_name, e);
+            eprintln!("[plaw] Failed to extract {}: {}", archive_name, e);
         } else {
-            eprintln!("[lobster] Extracted {} successfully", archive_name);
+            eprintln!("[plaw] Extracted {} successfully", archive_name);
             // Remove the archive to save disk space
             let _ = std::fs::remove_file(&archive_path);
         }

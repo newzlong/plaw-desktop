@@ -241,7 +241,7 @@ pub async fn handle_api_cron_list(
                         "last_run": job.last_run.map(|t| t.to_rfc3339()),
                         "last_status": job.last_status,
                         "enabled": job.enabled,
-                        "lobster_session": job.lobster_session,
+                        "plaw_session": job.plaw_session,
                     })
                 })
                 .collect();
@@ -313,7 +313,7 @@ pub async fn handle_api_cron_delete(
 
 #[derive(Deserialize)]
 pub struct CronPatchBody {
-    pub lobster_session: Option<String>,
+    pub plaw_session: Option<String>,
     pub prompt: Option<String>,
     pub command: Option<String>,
     pub name: Option<String>,
@@ -334,7 +334,7 @@ pub async fn handle_api_cron_patch(
 
     let config = state.config.lock().clone();
     let patch = crate::cron::CronJobPatch {
-        lobster_session: body.lobster_session,
+        plaw_session: body.plaw_session,
         prompt: body.prompt,
         command: body.command,
         name: body.name,
@@ -352,7 +352,7 @@ pub async fn handle_api_cron_patch(
                 "prompt": job.prompt,
                 "command": job.command,
                 "enabled": job.enabled,
-                "lobster_session": job.lobster_session,
+                "plaw_session": job.plaw_session,
             }
         }))
         .into_response(),

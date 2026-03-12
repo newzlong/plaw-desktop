@@ -3,11 +3,11 @@ import zh from '../i18n/zh'
 import en from '../i18n/en'
 
 const locales = { zh, en }
-const locale = ref(localStorage.getItem('lobster-lang') || 'zh')
+const locale = ref(localStorage.getItem('plaw-lang') || 'zh')
 
 function setLocale(lang) {
   locale.value = lang
-  localStorage.setItem('lobster-lang', lang)
+  localStorage.setItem('plaw-lang', lang)
 }
 
 function t(key) {

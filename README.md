@@ -1,6 +1,6 @@
-# Lobster Desktop
+# Plaw Desktop
 
-**Lobster**（龙虾）— 开箱即用的桌面 AI Agent，内嵌 [Plaw](plaw/) 自主智能体引擎。
+**Plaw** — 开箱即用的桌面 AI Agent，内嵌 [Plaw](plaw/) 自主智能体引擎。
 
 一键安装，填入 API Key，即可拥有一个能操作电脑、浏览网页、读写文件、执行代码的 AI 助手。
 
@@ -12,7 +12,7 @@
 
 市面上的 AI Agent 工具（Claude Code、Cursor、Cline 等）都面向开发者，普通用户根本用不了。
 
-Lobster 要解决的问题：**让不懂技术的人也能用上 AI Agent**。
+Plaw 要解决的问题：**让不懂技术的人也能用上 AI Agent**。
 
 - 不需要装 Python / Docker / WSL
 - 不需要配环境变量、改配置文件
@@ -88,7 +88,7 @@ Lobster 要解决的问题：**让不懂技术的人也能用上 AI Agent**。
 
 ```
 +---------------------------------------------+
-|              Lobster Desktop                 |
+|              Plaw Desktop                    |
 |  +---------------------------------------+  |
 |  |         Vue 3 + Glassmorphism         |  |
 |  |     Chat / Settings / Dashboard       |  |
@@ -126,7 +126,7 @@ Lobster 要解决的问题：**让不懂技术的人也能用上 AI Agent**。
 
 从 [Releases](https://github.com/gfisrubbish/lobster-desktop/releases) 下载安装包：
 
-- **Windows**: `lobster-desktop_x.x.x_x64-setup.exe`
+- **Windows**: `plaw-desktop_x.x.x_x64-setup.exe`
 
 安装后启动 → Setup Wizard 引导你选择模型、填入 API Key → 完成，开始对话。
 
@@ -134,7 +134,7 @@ Lobster 要解决的问题：**让不懂技术的人也能用上 AI Agent**。
 
 ```powershell
 git clone https://github.com/gfisrubbish/lobster-desktop.git
-cd lobster-desktop
+cd plaw-desktop
 .\setup.ps1     # 一键安装所有依赖 + 编译 Plaw 引擎
 .\dev.ps1       # 启动开发（Vite + Tauri 热重载）
 ```
@@ -158,7 +158,7 @@ cd lobster-desktop
 ## 项目结构
 
 ```
-lobster-desktop/
+plaw-desktop/
 ├── src-tauri/              # Tauri Rust 后端
 │   └── src/
 │       ├── lib.rs          # Portable 数据目录、端口分配、config 读写
@@ -195,7 +195,7 @@ cp plaw/target/release/plaw.exe plaw-data/bin/
 .\build.ps1
 ```
 
-输出：`src-tauri/target/release/bundle/nsis/lobster-desktop_x.x.x_x64-setup.exe`
+输出：`src-tauri/target/release/bundle/nsis/plaw-desktop_x.x.x_x64-setup.exe`
 
 ## 配置
 

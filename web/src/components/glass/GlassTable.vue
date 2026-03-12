@@ -54,7 +54,7 @@ defineProps({
 .glass-table__row {
   transition: background var(--duration-fast);
 }
-.glass-table__row:hover { background: var(--lobster-primary-soft); }
+.glass-table__row:hover { background: var(--plaw-primary-soft); }
 .glass-table__td {
   padding: 0.6rem 0.85rem;
   font-size: 0.85rem;

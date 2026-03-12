@@ -63,7 +63,7 @@ defineExpose({
 .glass-toast--success { border-left: 3px solid var(--status-ok); }
 .glass-toast--error { border-left: 3px solid var(--status-err); }
 .glass-toast--warning { border-left: 3px solid var(--status-warn); }
-.glass-toast--info { border-left: 3px solid var(--lobster-primary); }
+.glass-toast--info { border-left: 3px solid var(--plaw-primary); }
 .glass-toast__msg { flex: 1; }
 .glass-toast__close {
   background: none; border: none;
@@ -72,7 +72,7 @@ defineExpose({
   padding: 0; line-height: 1;
   transition: color var(--duration-fast);
 }
-.glass-toast__close:hover { color: var(--lobster-primary); }
+.glass-toast__close:hover { color: var(--plaw-primary); }
 .toast-enter-active, .toast-leave-active {
   transition: all var(--duration-normal) var(--ease-out);
 }

@@ -1,7 +1,7 @@
 <template>
   <div class="glass-card" :class="{ 'glass-card--hoverable': hoverable }">
     <div v-if="title" class="glass-card__header">
-      <component v-if="icon" :is="icon" class="w-4 h-4" style="color: var(--lobster-primary)" />
+      <component v-if="icon" :is="icon" class="w-4 h-4" style="color: var(--plaw-primary)" />
       <h3 class="glass-card__title">{{ title }}</h3>
     </div>
     <slot />

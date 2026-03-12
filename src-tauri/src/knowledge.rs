@@ -355,7 +355,7 @@ mod tests {
     use std::fs;
 
     fn test_data_dir(name: &str) -> PathBuf {
-        let tmp = std::env::temp_dir().join(format!("lobster-kb-test-{name}"));
+        let tmp = std::env::temp_dir().join(format!("plaw-kb-test-{name}"));
         let _ = fs::remove_dir_all(&tmp);
         let kb_dir = tmp.join(".plaw").join("knowledge");
         fs::create_dir_all(&kb_dir).unwrap();

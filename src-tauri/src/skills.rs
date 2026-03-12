@@ -786,14 +786,14 @@ fn shell_command(cmd_str: &str) -> std::process::Command {
     }
 }
 
-const AUDIT_PROMPT: &str = r#"You are a skill compatibility auditor for Lobster Desktop (a desktop AI agent app).
+const AUDIT_PROMPT: &str = r#"You are a skill compatibility auditor for Plaw Desktop (a desktop AI agent app).
 
 Analyze the following SKILL.md content and classify it. Return ONLY a JSON object (no markdown, no explanation outside JSON).
 
 ## Classification Rules
 
 1. **verified** = Works out of the box:
-   - Only uses Lobster's built-in tools (shell, file_read, write_file, edit_file, list_dir, memory_store, memory_recall, web_fetch, web_search_tool)
+   - Only uses Plaw's built-in tools (shell, file_read, write_file, edit_file, list_dir, memory_store, memory_recall, web_fetch, web_search_tool)
    - No external API keys needed
    - All required external software is ALREADY INSTALLED on this system (check "System Environment" section below)
 
@@ -803,7 +803,7 @@ Analyze the following SKILL.md content and classify it. Return ONLY a JSON objec
    - External services (SMTP, cloud APIs, database servers)
    - IMPORTANT: If a skill needs e.g. Node.js, and Node.js IS installed, that dependency is satisfied — do NOT mark as needs-setup just because the skill mentions Node.js
 
-3. **incompatible** = Cannot work in Lobster environment:
+3. **incompatible** = Cannot work in Plaw environment:
    - Requires infrastructure most users won't have (cloud-specific services)
    - Fundamentally incompatible with the desktop agent model
    - Depends on features that don't exist in Plaw (MCP servers, VS Code extensions, etc.)
@@ -1143,7 +1143,7 @@ const GITHUB_RAW_BASE: &str = "https://raw.githubusercontent.com/besoeasy/open-s
 pub async fn fetch_github_skills(proxy_url: Option<&str>) -> Result<Vec<RegistrySkill>, String> {
     let mut builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
-        .user_agent("lobster-desktop/0.1");
+        .user_agent("plaw-desktop/0.1");
     if let Some(proxy) = proxy_url {
         if !proxy.is_empty() {
             if let Ok(p) = reqwest::Proxy::all(proxy) {

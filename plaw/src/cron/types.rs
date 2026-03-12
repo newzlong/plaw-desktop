@@ -118,9 +118,9 @@ pub struct CronJob {
     pub enabled: bool,
     pub delivery: DeliveryConfig,
     pub delete_after_run: bool,
-    /// Lobster Desktop session ID to deliver results to (None = auto/active session)
+    /// Plaw Desktop session ID to deliver results to (None = auto/active session)
     #[serde(default)]
-    pub lobster_session: Option<String>,
+    pub plaw_session: Option<String>,
     /// AI-generated summary of creation context, injected into agent prompt at execution time
     #[serde(default)]
     pub context_summary: Option<String>,
@@ -153,7 +153,7 @@ pub struct CronJobPatch {
     pub model: Option<String>,
     pub session_target: Option<SessionTarget>,
     pub delete_after_run: Option<bool>,
-    pub lobster_session: Option<String>,
+    pub plaw_session: Option<String>,
     pub context_summary: Option<String>,
 }
 

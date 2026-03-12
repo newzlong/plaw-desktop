@@ -51,13 +51,13 @@ defineProps({
 
 /* Primary */
 .glass-btn--primary {
-  background: var(--lobster-primary);
-  border-color: var(--lobster-primary);
+  background: var(--plaw-primary);
+  border-color: var(--plaw-primary);
   color: white;
 }
 .glass-btn--primary:hover:not(:disabled) {
-  background: var(--lobster-primary-hover);
-  border-color: var(--lobster-primary-hover);
+  background: var(--plaw-primary-hover);
+  border-color: var(--plaw-primary-hover);
   box-shadow: var(--shadow-glow);
 }
 
@@ -78,8 +78,8 @@ defineProps({
   color: var(--text-secondary);
 }
 .glass-btn--ghost:hover:not(:disabled) {
-  background: var(--lobster-primary-soft);
-  color: var(--lobster-primary);
+  background: var(--plaw-primary-soft);
+  color: var(--plaw-primary);
 }
 
 /* Sizes */

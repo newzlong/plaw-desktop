@@ -39,15 +39,6 @@
           <Square v-else-if="canStop" class="w-3.5 h-3.5" />
           <Play v-else class="w-4 h-4" />
         </button>
-        <button class="sidebar-footer__btn" @click="showSettings = true" :title="t('settings.title')">
-          <Settings class="w-4 h-4" />
-        </button>
-        <button class="sidebar-footer__btn" @click="toggleTheme" :title="appIsDark ? 'Light' : 'Dark'">
-          <component :is="appIsDark ? Sun : Moon" class="w-4 h-4" />
-        </button>
-        <button class="sidebar-footer__btn sidebar-footer__lang" @click="appToggleLocale">
-          {{ appIsZh ? 'EN' : '中' }}
-        </button>
       </div>
     </div>
 
@@ -447,7 +438,7 @@ async function loadSession(id) {
   try {
     const session = await readSession(id)
     currentSessionId.value = session.id
-    sessionStorage.setItem('lobster-chat-session', session.id)
+    sessionStorage.setItem('plaw-chat-session', session.id)
     messages.value = session.messages.map(m => ({
       role: m.role,
       content: m.content,
@@ -478,7 +469,7 @@ async function newSession() {
   pendingSendText = null
   ignoreNextDone = false
   clearTimeout(interruptTimer)
-  sessionStorage.removeItem('lobster-chat-session')
+  sessionStorage.removeItem('plaw-chat-session')
 }
 
 async function removeSession(id) {
@@ -503,7 +494,7 @@ async function confirmDelete() {
     pendingSendText = null
     ignoreNextDone = false
     clearTimeout(interruptTimer)
-    sessionStorage.removeItem('lobster-chat-session')
+    sessionStorage.removeItem('plaw-chat-session')
   }
   await refreshSessions()
 }
@@ -533,7 +524,7 @@ async function autoSave(quiet = false) {
   try {
     const saved = await saveSession(currentSessionId.value, title, saveMsgs, contextUsed.value, contextMax.value)
     currentSessionId.value = saved.id
-    sessionStorage.setItem('lobster-chat-session', saved.id)
+    sessionStorage.setItem('plaw-chat-session', saved.id)
     if (!quiet) await refreshSessions()
   } catch {}
 }
@@ -922,7 +913,7 @@ async function confirmRollback() {
   if (!hasContent && currentSessionId.value) {
     await deleteSession(currentSessionId.value)
     currentSessionId.value = null
-    sessionStorage.removeItem('lobster-chat-session')
+    sessionStorage.removeItem('plaw-chat-session')
     await refreshSessions()
   } else {
     await autoSave()
@@ -1131,7 +1122,7 @@ watch(zcState, (newState) => {
 onMounted(async () => {
   await refreshSessions()
   // Restore last active session
-  const lastId = sessionStorage.getItem('lobster-chat-session')
+  const lastId = sessionStorage.getItem('plaw-chat-session')
   if (lastId) {
     try {
       const session = await readSession(lastId)
@@ -1180,7 +1171,7 @@ onMounted(async () => {
   unlistenCronResult = await listen('cron-result', (event) => {
     const data = event.payload
     if (!data || data.type !== 'cron_result') return
-    const targetSession = data.lobster_session || null
+    const targetSession = data.plaw_session || null
     if (targetSession && targetSession === currentSessionId.value) {
       const name = data.job_name || 'cron'
       const ok = data.status === 'ok'
@@ -1296,10 +1287,10 @@ onUnmounted(() => {
   gap: 8px;
   margin: 8px 8px 0;
   padding: 10px 14px;
-  background: var(--lobster-primary-soft);
+  background: var(--plaw-primary-soft);
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
-  color: var(--lobster-primary);
+  color: var(--plaw-primary);
   font-size: 0.84rem;
   font-weight: 600;
   cursor: pointer;
@@ -1310,9 +1301,9 @@ onUnmounted(() => {
   cursor: not-allowed;
 }
 .sidebar-new:not(:disabled):hover {
-  background: var(--lobster-primary);
+  background: var(--plaw-primary);
   color: white;
-  border-color: var(--lobster-primary);
+  border-color: var(--plaw-primary);
 }
 .sidebar-new span {
   font-size: 1.1rem;
@@ -1349,8 +1340,8 @@ onUnmounted(() => {
   cursor: not-allowed;
 }
 .sidebar-item--active {
-  background: var(--lobster-primary-soft);
-  border-left-color: var(--lobster-primary);
+  background: var(--plaw-primary-soft);
+  border-left-color: var(--plaw-primary);
 }
 
 .sidebar-item__title {
@@ -1363,7 +1354,7 @@ onUnmounted(() => {
   transition: color var(--duration-fast) var(--ease-out);
 }
 .sidebar-item--active .sidebar-item__title {
-  color: var(--lobster-primary);
+  color: var(--plaw-primary);
   font-weight: 600;
 }
 .sidebar-item__meta {
@@ -1395,7 +1386,7 @@ onUnmounted(() => {
 }
 .sidebar-item__delete:hover {
   color: var(--status-err);
-  background: var(--lobster-primary-soft);
+  background: var(--plaw-primary-soft);
 }
 
 /* ---- Sidebar footer ---- */
@@ -1421,9 +1412,9 @@ onUnmounted(() => {
   transition: all var(--duration-fast) var(--ease-out);
 }
 .sidebar-footer__btn:hover {
-  background: var(--lobster-primary-soft);
-  color: var(--lobster-primary);
-  border-color: var(--lobster-primary-soft);
+  background: var(--plaw-primary-soft);
+  color: var(--plaw-primary);
+  border-color: var(--plaw-primary-soft);
 }
 .sidebar-footer__lang {
   font-size: 0.72rem;
@@ -1517,7 +1508,7 @@ onUnmounted(() => {
   word-break: break-word;
 }
 .chat-msg--user .chat-msg__bubble {
-  background: var(--lobster-primary);
+  background: var(--plaw-primary);
   color: white;
   border-bottom-right-radius: 4px;
 }
@@ -1551,7 +1542,7 @@ onUnmounted(() => {
   border-bottom-left-radius: 4px;
 }
 .chat-msg--system .chat-msg__bubble {
-  background: var(--lobster-accent-soft);
+  background: var(--plaw-accent-soft);
   border: 1px solid var(--border-default);
   color: var(--text-secondary);
   font-size: 0.82rem;
@@ -1739,7 +1730,7 @@ onUnmounted(() => {
   transition: background 0.3s var(--ease-out);
 }
 .step-tool__dot--done {
-  background: var(--lobster-success, #22c55e);
+  background: var(--plaw-success, #22c55e);
 }
 .step-tool__dot--error {
   background: #ef4444;
@@ -1847,12 +1838,12 @@ onUnmounted(() => {
 
 .chat-disconnected {
   font-size: 0.78rem;
-  color: var(--lobster-accent);
+  color: var(--plaw-accent);
   padding: 6px 14px 0;
   text-align: center;
 }
 .chat-disconnected--connecting { color: var(--text-muted); }
-.chat-disconnected--disconnecting { color: var(--lobster-accent); }
+.chat-disconnected--disconnecting { color: var(--plaw-accent); }
 
 .chat-input {
   width: 100%;
@@ -1985,8 +1976,8 @@ onUnmounted(() => {
   flex-shrink: 0;
   transition: background 0.4s var(--ease-out);
 }
-.context-dot--ok { background: var(--lobster-success, #22c55e); }
-.context-dot--moderate { background: var(--lobster-primary, #f97316); }
+.context-dot--ok { background: var(--plaw-success, #22c55e); }
+.context-dot--moderate { background: var(--plaw-primary, #f97316); }
 .context-dot--warning { background: #eab308; }
 .context-dot--critical { background: #ef4444; }
 .context-text {
@@ -1999,7 +1990,7 @@ onUnmounted(() => {
   width: 30px; height: 30px;
   border-radius: var(--radius-sm);
   border: none;
-  background: var(--lobster-primary);
+  background: var(--plaw-primary);
   color: white;
   cursor: pointer;
   display: flex;
@@ -2013,7 +2004,7 @@ onUnmounted(() => {
   cursor: not-allowed;
 }
 .chat-send:not(:disabled):hover {
-  background: var(--lobster-primary-hover);
+  background: var(--plaw-primary-hover);
   transform: scale(1.05);
 }
 .chat-send--stop {
@@ -2024,10 +2015,10 @@ onUnmounted(() => {
   transform: scale(1.05);
 }
 .chat-send--interrupt {
-  background: var(--lobster-accent);
+  background: var(--plaw-accent);
 }
 .chat-send--interrupt:not(:disabled):hover {
-  background: var(--lobster-accent);
+  background: var(--plaw-accent);
   transform: scale(1.05);
 }
 .stop-icon {
@@ -2041,7 +2032,7 @@ onUnmounted(() => {
   display: inline-block;
   width: 2px;
   height: 1em;
-  background: var(--lobster-primary);
+  background: var(--plaw-primary);
   margin-left: 2px;
   vertical-align: text-bottom;
   animation: cursor-blink 0.8s steps(2) infinite;

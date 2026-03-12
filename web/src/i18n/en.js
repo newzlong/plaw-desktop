@@ -153,7 +153,7 @@ export default {
     auditCompatibility: 'Compatibility',
     auditRisk: 'Risk',
     auditDeps: 'Dependencies:',
-    auditIncompatWarn: 'This skill is incompatible with Lobster. It may not work correctly.',
+    auditIncompatWarn: 'This skill is incompatible with Plaw. It may not work correctly.',
     auditUninstall: 'Uninstall',
     auditKeep: 'Keep Anyway',
     // Compat labels
@@ -249,7 +249,7 @@ export default {
 
   // Setup Wizard
   setup: {
-    welcome: 'Welcome to Lobster',
+    welcome: 'Welcome to Plaw',
     subtitle: "Let's set up your AI Agent",
     stepProvider: 'Provider',
     stepChannel: 'Channel',
@@ -307,17 +307,17 @@ export default {
     },
   },
 
-  // Lobster activity
-  lobster: {
-    sleeping: 'Your lobster is sleeping...',
-    idle: 'Your lobster is daydreaming',
-    thinking: 'Your lobster is thinking...',
-    searching: 'Your lobster is searching the web',
-    browsing: 'Your lobster is browsing',
-    coding: 'Your lobster is writing code',
-    reading: 'Your lobster is reading files',
-    usingTool: 'Your lobster is using a tool',
-    error: 'Your lobster hit a problem',
+  // Plaw activity
+  plaw: {
+    sleeping: 'Your plaw is sleeping...',
+    idle: 'Your plaw is daydreaming',
+    thinking: 'Your plaw is thinking...',
+    searching: 'Your plaw is searching the web',
+    browsing: 'Your plaw is browsing',
+    coding: 'Your plaw is writing code',
+    reading: 'Your plaw is reading files',
+    usingTool: 'Your plaw is using a tool',
+    error: 'Your plaw hit a problem',
     moodBusy: 'Busy — do not disturb',
     moodConfused: 'Confused — needs help',
     moodSleeping: 'zzZ',

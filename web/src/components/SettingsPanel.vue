@@ -1,7 +1,7 @@
 <template>
   <Teleport to="body">
     <transition name="settings-fade">
-      <div v-if="modelValue" class="settings-overlay" @click.self="$emit('update:modelValue', false)">
+      <div v-if="modelValue" class="settings-overlay">
         <div class="settings-panel">
           <div class="settings-panel__header">
             <h2>{{ t('settings.title') }}</h2>
@@ -150,9 +150,9 @@ const activeComponent = computed(() => componentMap[activeTab.value])
   transition: all var(--duration-fast) var(--ease-out);
 }
 .settings-panel__close:hover {
-  background: var(--lobster-primary-soft);
-  color: var(--lobster-primary);
-  border-color: var(--lobster-primary-soft);
+  background: var(--plaw-primary-soft);
+  color: var(--plaw-primary);
+  border-color: var(--plaw-primary-soft);
 }
 
 .settings-panel__body {
@@ -189,12 +189,12 @@ const activeComponent = computed(() => componentMap[activeTab.value])
   transition: all var(--duration-fast) var(--ease-out);
 }
 .settings-tab:hover {
-  background: var(--lobster-primary-soft);
-  color: var(--lobster-primary);
+  background: var(--plaw-primary-soft);
+  color: var(--plaw-primary);
 }
 .settings-tab--active {
-  background: var(--lobster-primary-soft) !important;
-  color: var(--lobster-primary) !important;
+  background: var(--plaw-primary-soft) !important;
+  color: var(--plaw-primary) !important;
   font-weight: 600;
 }
 

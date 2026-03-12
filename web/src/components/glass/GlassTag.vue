@@ -71,15 +71,15 @@ function onBackspace() {
 }
 .glass-tag__item {
   display: inline-flex; align-items: center; gap: 4px;
-  background: var(--lobster-primary-soft);
-  color: var(--lobster-primary);
+  background: var(--plaw-primary-soft);
+  color: var(--plaw-primary);
   border-radius: 6px;
   padding: 0.15rem 0.5rem;
   font-size: 0.8rem; font-weight: 500;
 }
 .glass-tag__remove {
   background: none; border: none;
-  color: var(--lobster-primary);
+  color: var(--plaw-primary);
   cursor: pointer; font-size: 0.9rem;
   padding: 0 2px; line-height: 1;
   opacity: 0.6;

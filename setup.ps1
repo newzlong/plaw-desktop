@@ -1,4 +1,4 @@
-# Lobster Desktop - Development Environment Setup
+# Plaw Desktop - Development Environment Setup
 # Usage: .\setup.ps1
 # Checks and installs: Rust, Node.js, pnpm, Tauri CLI, frontend deps, plaw-data dirs
 
@@ -6,7 +6,7 @@ $ErrorActionPreference = "Stop"
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  Lobster Desktop - Environment Setup"  -ForegroundColor Cyan
+Write-Host "  Plaw Desktop - Environment Setup"  -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 

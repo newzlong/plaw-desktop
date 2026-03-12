@@ -320,7 +320,7 @@ onMounted(async () => {
 }
 .stat-value {
   font-size: 1.5rem; font-weight: 700;
-  color: var(--lobster-primary);
+  color: var(--plaw-primary);
 }
 .stat-label {
   font-size: 0.8rem; color: var(--text-muted);
@@ -339,13 +339,13 @@ onMounted(async () => {
   transition: all var(--duration-fast) var(--ease-out);
 }
 .tag-chip:hover {
-  border-color: var(--lobster-primary);
-  color: var(--lobster-primary);
+  border-color: var(--plaw-primary);
+  color: var(--plaw-primary);
 }
 .tag-chip--active {
-  background: var(--lobster-primary-soft);
-  border-color: var(--lobster-primary);
-  color: var(--lobster-primary);
+  background: var(--plaw-primary-soft);
+  border-color: var(--plaw-primary);
+  color: var(--plaw-primary);
 }
 
 .empty-hint {
@@ -376,8 +376,8 @@ onMounted(async () => {
 }
 .entry-tag {
   padding: 1px 6px; border-radius: 999px;
-  background: var(--lobster-primary-soft);
-  color: var(--lobster-primary);
+  background: var(--plaw-primary-soft);
+  color: var(--plaw-primary);
   font-size: 0.7rem;
 }
 

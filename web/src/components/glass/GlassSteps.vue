@@ -44,8 +44,8 @@ defineProps({
   flex-shrink: 0;
 }
 .glass-steps__item--active .glass-steps__circle {
-  background: var(--lobster-primary);
-  border-color: var(--lobster-primary);
+  background: var(--plaw-primary);
+  border-color: var(--plaw-primary);
   color: white;
   box-shadow: var(--shadow-glow);
 }

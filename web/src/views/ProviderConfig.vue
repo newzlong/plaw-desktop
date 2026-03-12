@@ -271,8 +271,8 @@ async function doRestart() {
 .proxy-toggle__arrow--open { transform: rotate(90deg); }
 .restart-bar {
   display: flex; align-items: center; justify-content: space-between;
-  background: var(--lobster-primary-soft);
-  border: 1px solid var(--lobster-primary);
+  background: var(--plaw-primary-soft);
+  border: 1px solid var(--plaw-primary);
   border-radius: var(--radius-md);
   padding: 10px 16px;
   font-size: 0.85rem;

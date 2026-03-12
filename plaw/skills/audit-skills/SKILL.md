@@ -1,7 +1,7 @@
 ---
 
 name: audit-skills
-description: "Audit and tag installed skills for compatibility with Lobster Desktop. Use when the user asks to check skills, audit skills, tag skills, review skill compatibility, or says things like 'check my skills', 'audit skills', 'tag skills', 'review skills compatibility', 'which skills work', 'which skills are broken'."
+description: "Audit and tag installed skills for compatibility with Plaw Desktop. Use when the user asks to check skills, audit skills, tag skills, review skill compatibility, or says things like 'check my skills', 'audit skills', 'tag skills', 'review skills compatibility', 'which skills work', 'which skills are broken'."
 compatibility: verified
 risk: warning
 ---
@@ -14,7 +14,7 @@ Audit installed skills and tag them with compatibility and risk labels.
 
 1. Scan all installed skills
 2. Read each SKILL.md
-3. Check against Lobster/Plaw compatibility rules
+3. Check against Plaw compatibility rules
 4. Write `compatibility` and `risk` tags into each SKILL.md frontmatter
 
 ## Compatibility Tags
@@ -25,7 +25,7 @@ Assign ONE of these to every skill:
 |-----|---------|----------|
 | `verified` | Works out of the box | Only uses built-in tools, no external deps |
 | `needs-setup` | Works after user config | Needs API keys, external software (Docker, ffmpeg, etc.) |
-| `incompatible` | Cannot work in Lobster | Requires MCP, VS Code, nonexistent tools, or fundamentally broken |
+| `incompatible` | Cannot work in Plaw | Requires MCP, VS Code, nonexistent tools, or fundamentally broken |
 
 ## Risk Tags
 
@@ -71,7 +71,7 @@ For each skill, check these rules:
 
 ## Plaw Built-in Tools (Reference)
 
-These are the tools available in Lobster Desktop:
+These are the tools available in Plaw Desktop:
 
 - `shell` - execute commands (PowerShell on Windows)
 - `read_file`, `write_file`, `edit_file`, `list_dir` - file operations
@@ -148,4 +148,4 @@ risk: warning
 - If unsure about compatibility, default to `needs-setup`
 - If unsure about risk, default to `warning`
 - Skip `find-skills` and `skill-creator` (protected skills, already tagged)
-- After tagging, tell user to refresh the Skills page in Lobster UI to see updates
+- After tagging, tell user to refresh the Skills page in Plaw UI to see updates

@@ -5409,7 +5409,46 @@ fn read_codex_openai_api_key() -> Option<String> {
         .map(ToString::to_string)
 }
 
+/// Name of the built-in template agent (always injected, cannot be removed by user config).
+const BUILTIN_AGENT_NAME: &str = "browser-agent";
+
 impl Config {
+    /// Inject built-in template agents that ship with Plaw.
+    /// These are always present regardless of user config.
+    /// If the user has already defined an agent with the same name, we do NOT overwrite it
+    /// (they may have customized the system_prompt or allowed_tools).
+    fn inject_builtin_agents(&mut self) {
+        use std::collections::hash_map::Entry;
+        if let Entry::Vacant(e) = self.agents.entry(BUILTIN_AGENT_NAME.to_string()) {
+            e.insert(DelegateAgentConfig {
+                provider: String::new(), // inherit from main config
+                model: String::new(),    // inherit from main config
+                system_prompt: Some(
+                    "You are a browser automation agent. Use the browser tool to complete web tasks. \
+                     Workflow: 1) open URL, 2) snapshot (interactive_only: true) to see elements, \
+                     3) interact via @e refs (click/fill), 4) snapshot again after navigation (refs change), \
+                     5) close when done. Return structured results. \
+                     If a page requires login or has anti-bot protection, report it clearly."
+                        .to_string(),
+                ),
+                api_key: None, // inherit from main config
+                temperature: None,
+                max_depth: 3,
+                agentic: true,
+                allowed_tools: vec![
+                    "browser".into(),
+                    "file_read".into(),
+                    "write_file".into(),
+                    "shell".into(),
+                    "web_fetch".into(),
+                    "memory_store".into(),
+                ],
+                max_iterations: 20,
+            });
+            tracing::debug!("Injected built-in agent: {BUILTIN_AGENT_NAME}");
+        }
+    }
+
     pub async fn load_or_init() -> Result<Self> {
         let (default_plaw_dir, default_workspace_dir) = default_config_and_workspace_dirs()?;
 
@@ -5525,6 +5564,7 @@ impl Config {
 
             decrypt_channel_secrets(&store, &mut config.channels_config)?;
 
+            config.inject_builtin_agents();
             config.apply_env_overrides();
             config.validate()?;
             tracing::info!(
@@ -5539,6 +5579,7 @@ impl Config {
             let mut config = Config::default();
             config.config_path = config_path.clone();
             config.workspace_dir = workspace_dir;
+            config.inject_builtin_agents();
             config.save().await?;
 
             // Restrict permissions on newly created config file (may contain API keys)

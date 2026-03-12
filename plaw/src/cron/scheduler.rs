@@ -115,7 +115,7 @@ async fn process_due_jobs(
         .collect();
     let job_sessions: std::collections::HashMap<String, Option<String>> = jobs
         .iter()
-        .map(|j| (j.id.clone(), j.lobster_session.clone()))
+        .map(|j| (j.id.clone(), j.plaw_session.clone()))
         .collect();
     let mut in_flight =
         stream::iter(
@@ -137,12 +137,12 @@ async fn process_due_jobs(
         // Notify connected WebSocket clients about cron results
         if let Some(tx) = notifier {
             let job_name = job_names.get(&job_id).cloned().unwrap_or_default();
-            let lobster_session = job_sessions.get(&job_id).cloned().flatten();
+            let plaw_session = job_sessions.get(&job_id).cloned().flatten();
             let _ = tx.send(serde_json::json!({
                 "type": "cron_result",
                 "job_id": job_id,
                 "job_name": job_name,
-                "lobster_session": lobster_session,
+                "plaw_session": plaw_session,
                 "status": if success { "ok" } else { "error" },
                 "output": output,
                 "finished_at": Utc::now().to_rfc3339(),
@@ -603,7 +603,7 @@ mod tests {
             enabled: true,
             delivery: DeliveryConfig::default(),
             delete_after_run: false,
-            lobster_session: None,
+            plaw_session: None,
             context_summary: None,
             created_at: Utc::now(),
             next_run: Utc::now(),

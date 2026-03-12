@@ -2071,33 +2071,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6373607a59f0be73a39b6fe456b8192fcc3585f602af20751600e974dd455e77"
 
 [[package]]
-name = "lobster-desktop"
-version = "0.1.0"
-dependencies = [
- "chacha20poly1305",
- "dirs-next",
- "flate2",
- "futures-util",
- "hex",
- "log",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tar",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-fs",
- "tauri-plugin-notification",
- "tauri-plugin-opener",
- "tauri-plugin-process",
- "tauri-plugin-shell",
- "tokio",
- "tokio-tungstenite",
- "toml 0.8.2",
-]
-
-[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2786,6 +2759,33 @@ name = "plain"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
+
+[[package]]
+name = "plaw-desktop"
+version = "0.1.0"
+dependencies = [
+ "chacha20poly1305",
+ "dirs-next",
+ "flate2",
+ "futures-util",
+ "hex",
+ "log",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tar",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-fs",
+ "tauri-plugin-notification",
+ "tauri-plugin-opener",
+ "tauri-plugin-process",
+ "tauri-plugin-shell",
+ "tokio",
+ "tokio-tungstenite",
+ "toml 0.8.2",
+]
 
 [[package]]
 name = "plist"

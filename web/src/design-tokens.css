@@ -1,15 +1,15 @@
 /* ============================================
-   Lobster Design Tokens
-   品牌色：龙虾红橙 + 深海蓝黑
+   Plaw Design Tokens
+   品牌色：Plaw 红橙 + 深海蓝黑
    ============================================ */
 
 :root {
   /* --- Brand --- */
-  --lobster-primary: #FF4D2A;
-  --lobster-primary-soft: rgba(255, 77, 42, 0.15);
-  --lobster-primary-hover: #E8401F;
-  --lobster-accent: #F59E0B;
-  --lobster-accent-soft: rgba(245, 158, 11, 0.15);
+  --plaw-primary: #FF4D2A;
+  --plaw-primary-soft: rgba(255, 77, 42, 0.15);
+  --plaw-primary-hover: #E8401F;
+  --plaw-accent: #F59E0B;
+  --plaw-accent-soft: rgba(245, 158, 11, 0.15);
 
   /* --- Radius --- */
   --radius-sm: 8px;
@@ -46,7 +46,7 @@
 
   --input-bg: #0B1220;
   --input-border: rgba(255, 255, 255, 0.15);
-  --input-focus-border: var(--lobster-primary);
+  --input-focus-border: var(--plaw-primary);
   --input-focus-shadow: 0 0 0 3px rgba(255, 77, 42, 0.2);
 
   --sidebar-bg: rgba(17, 29, 51, 0.85);
@@ -83,7 +83,7 @@
 
   --input-bg: #EFF1F5;
   --input-border: #C8CDD5;
-  --input-focus-border: var(--lobster-primary);
+  --input-focus-border: var(--plaw-primary);
   --input-focus-shadow: 0 0 0 3px rgba(255, 77, 42, 0.12);
 
   --sidebar-bg: rgba(255, 255, 255, 0.8);

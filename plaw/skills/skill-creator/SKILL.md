@@ -6,7 +6,7 @@ compatibility: verified
 
 # Skill Creator
 
-A skill for creating new skills and iteratively improving them in Lobster Desktop.
+A skill for creating new skills and iteratively improving them in Plaw Desktop.
 
 ## Core Workflow
 
@@ -22,7 +22,7 @@ Be flexible. If the user says "just vibe with me", skip the formal process and i
 
 ## Communicating with the User
 
-Lobster targets a wide range of users — from developers to people who just installed their first app. Pay attention to context cues:
+Plaw targets a wide range of users — from developers to people who just installed their first app. Pay attention to context cues:
 
 - Use plain language by default
 - "evaluation" and "test" are fine; "assertion" and "JSON schema" need context cues that the user is technical
@@ -109,7 +109,7 @@ After writing the SKILL.md, evaluate and add a `compatibility:` tag:
 
 - **verified** — Only uses built-in tools (shell, read_file, write_file, edit_file, list_dir, search, web_fetch, http_request, memory_read, memory_write). No external API keys, no extra software. Safe to run immediately.
 - **needs-setup** — Requires external API keys (GitHub token, etc.), specific software (Docker, ffmpeg, Chrome), or external services. Works after user configures dependencies.
-- **incompatible** — Fundamentally conflicts with Lobster/Plaw architecture: requires MCP servers, assumes VS Code/Electron host, depends on nonexistent tools, or modifies system config.
+- **incompatible** — Fundamentally conflicts with Plaw architecture: requires MCP servers, assumes VS Code/Electron host, depends on nonexistent tools, or modifies system config.
 
 Architecture rules to check:
 1. Tool names must match Plaw's built-in set

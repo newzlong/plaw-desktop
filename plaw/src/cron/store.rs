@@ -32,7 +32,7 @@ pub fn add_shell_job(
     name: Option<String>,
     schedule: Schedule,
     command: &str,
-    lobster_session: Option<String>,
+    plaw_session: Option<String>,
 ) -> Result<CronJob> {
     let now = Utc::now();
     validate_schedule(&schedule, now)?;
@@ -47,7 +47,7 @@ pub fn add_shell_job(
         conn.execute(
             "INSERT INTO cron_jobs (
                 id, expression, command, schedule, job_type, prompt, name, session_target, model,
-                enabled, delivery, delete_after_run, created_at, next_run, lobster_session
+                enabled, delivery, delete_after_run, created_at, next_run, plaw_session
              ) VALUES (?1, ?2, ?3, ?4, 'shell', NULL, ?5, 'isolated', NULL, 1, ?6, ?7, ?8, ?9, ?10)",
             params![
                 id,
@@ -59,7 +59,7 @@ pub fn add_shell_job(
                 if delete_after_run { 1 } else { 0 },
                 now.to_rfc3339(),
                 next_run.to_rfc3339(),
-                lobster_session,
+                plaw_session,
             ],
         )
         .context("Failed to insert cron shell job")?;
@@ -79,7 +79,7 @@ pub fn add_agent_job(
     model: Option<String>,
     delivery: Option<DeliveryConfig>,
     delete_after_run: bool,
-    lobster_session: Option<String>,
+    plaw_session: Option<String>,
     context_summary: Option<String>,
 ) -> Result<CronJob> {
     let now = Utc::now();
@@ -94,7 +94,7 @@ pub fn add_agent_job(
         conn.execute(
             "INSERT INTO cron_jobs (
                 id, expression, command, schedule, job_type, prompt, name, session_target, model,
-                enabled, delivery, delete_after_run, created_at, next_run, lobster_session, context_summary
+                enabled, delivery, delete_after_run, created_at, next_run, plaw_session, context_summary
              ) VALUES (?1, ?2, '', ?3, 'agent', ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 id,
@@ -108,7 +108,7 @@ pub fn add_agent_job(
                 if delete_after_run { 1 } else { 0 },
                 now.to_rfc3339(),
                 next_run.to_rfc3339(),
-                lobster_session,
+                plaw_session,
                 context_summary,
             ],
         )
@@ -125,7 +125,7 @@ pub fn add_notification_job(
     schedule: Schedule,
     prompt: &str,
     delete_after_run: bool,
-    lobster_session: Option<String>,
+    plaw_session: Option<String>,
 ) -> Result<CronJob> {
     let now = Utc::now();
     validate_schedule(&schedule, now)?;
@@ -138,7 +138,7 @@ pub fn add_notification_job(
         conn.execute(
             "INSERT INTO cron_jobs (
                 id, expression, command, schedule, job_type, prompt, name, session_target, model,
-                enabled, delivery, delete_after_run, created_at, next_run, lobster_session
+                enabled, delivery, delete_after_run, created_at, next_run, plaw_session
              ) VALUES (?1, ?2, '', ?3, 'notification', ?4, ?5, 'isolated', NULL, 1, ?6, ?7, ?8, ?9, ?10)",
             params![
                 id,
@@ -150,7 +150,7 @@ pub fn add_notification_job(
                 if delete_after_run { 1 } else { 0 },
                 now.to_rfc3339(),
                 next_run.to_rfc3339(),
-                lobster_session,
+                plaw_session,
             ],
         )
         .context("Failed to insert cron notification job")?;
@@ -164,7 +164,7 @@ pub fn list_jobs(config: &Config) -> Result<Vec<CronJob>> {
     with_connection(config, |conn| {
         let mut stmt = conn.prepare(
             "SELECT id, expression, command, schedule, job_type, prompt, name, session_target, model,
-                    enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output, lobster_session, context_summary
+                    enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output, plaw_session, context_summary
              FROM cron_jobs ORDER BY next_run ASC",
         )?;
 
@@ -182,7 +182,7 @@ pub fn get_job(config: &Config, job_id: &str) -> Result<CronJob> {
     with_connection(config, |conn| {
         let mut stmt = conn.prepare(
             "SELECT id, expression, command, schedule, job_type, prompt, name, session_target, model,
-                    enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output, lobster_session, context_summary
+                    enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output, plaw_session, context_summary
              FROM cron_jobs WHERE id = ?1",
         )?;
 
@@ -215,7 +215,7 @@ pub fn due_jobs(config: &Config, now: DateTime<Utc>) -> Result<Vec<CronJob>> {
     with_connection(config, |conn| {
         let mut stmt = conn.prepare(
             "SELECT id, expression, command, schedule, job_type, prompt, name, session_target, model,
-                    enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output, lobster_session, context_summary
+                    enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output, plaw_session, context_summary
              FROM cron_jobs
              WHERE enabled = 1 AND next_run <= ?1
              ORDER BY next_run ASC
@@ -266,8 +266,8 @@ pub fn update_job(config: &Config, job_id: &str, patch: CronJobPatch) -> Result<
     if let Some(delete_after_run) = patch.delete_after_run {
         job.delete_after_run = delete_after_run;
     }
-    if let Some(lobster_session) = patch.lobster_session {
-        job.lobster_session = Some(lobster_session);
+    if let Some(plaw_session) = patch.plaw_session {
+        job.plaw_session = Some(plaw_session);
     }
     if let Some(context_summary) = patch.context_summary {
         job.context_summary = Some(context_summary);
@@ -282,7 +282,7 @@ pub fn update_job(config: &Config, job_id: &str, patch: CronJobPatch) -> Result<
             "UPDATE cron_jobs
              SET expression = ?1, command = ?2, schedule = ?3, job_type = ?4, prompt = ?5, name = ?6,
                  session_target = ?7, model = ?8, enabled = ?9, delivery = ?10, delete_after_run = ?11,
-                 next_run = ?12, lobster_session = ?14, context_summary = ?15
+                 next_run = ?12, plaw_session = ?14, context_summary = ?15
              WHERE id = ?13",
             params![
                 job.expression,
@@ -298,7 +298,7 @@ pub fn update_job(config: &Config, job_id: &str, patch: CronJobPatch) -> Result<
                 if job.delete_after_run { 1 } else { 0 },
                 job.next_run.to_rfc3339(),
                 job.id,
-                job.lobster_session,
+                job.plaw_session,
                 job.context_summary,
             ],
         )
@@ -505,7 +505,7 @@ fn map_cron_job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CronJob> {
         },
         last_status: row.get(15)?,
         last_output: row.get(16)?,
-        lobster_session: row.get(17)?,
+        plaw_session: row.get(17)?,
         context_summary: row.get(18)?,
     })
 }
@@ -628,7 +628,7 @@ fn with_connection<T>(config: &Config, f: impl FnOnce(&Connection) -> Result<T>)
     add_column_if_missing(&conn, "enabled", "INTEGER NOT NULL DEFAULT 1")?;
     add_column_if_missing(&conn, "delivery", "TEXT")?;
     add_column_if_missing(&conn, "delete_after_run", "INTEGER NOT NULL DEFAULT 0")?;
-    add_column_if_missing(&conn, "lobster_session", "TEXT")?;
+    add_column_if_missing(&conn, "plaw_session", "TEXT")?;
     add_column_if_missing(&conn, "context_summary", "TEXT")?;
 
     f(&conn)
