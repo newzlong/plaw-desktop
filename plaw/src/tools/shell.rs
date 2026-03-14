@@ -421,6 +421,7 @@ impl Tool for ShellTool {
                     // data_root is the parent of bin/ (exe_dir)
                     if let Some(data_root) = exe_dir.parent() {
                         let candidates = [
+                            "pwsh",
                             "python",
                             "python/Scripts",
                             "pandoc",
@@ -452,6 +453,7 @@ impl Tool for ShellTool {
             if let Ok(home) = std::env::var("HOME") {
                 let home_path = std::path::Path::new(&home);
                 let candidates = [
+                    "pwsh",
                     "python",
                     "python/Scripts",
                     "pandoc",
@@ -481,13 +483,48 @@ impl Tool for ShellTool {
                 cmd.env("PATH", format!("{}{sep}{current_path}", extra_dirs.join(sep)));
             }
 
-            // Also set NODE_PATH for bundled node_modules if available
+            // Also set NODE_PATH for bundled node_modules if available,
+            // and PLAYWRIGHT_BROWSERS_PATH / CHROMIUM_EXECUTABLE_PATH for html2pptx.
             if let Ok(home) = std::env::var("HOME") {
-                let nm = std::path::Path::new(&home)
-                    .join("node_modules_global")
-                    .join("node_modules");
+                let home_path = std::path::Path::new(&home);
+                let nm = home_path.join("node_modules_global").join("node_modules");
                 if nm.is_dir() {
                     cmd.env("NODE_PATH", nm.to_string_lossy().to_string());
+                }
+
+                // Playwright: set browsers path + direct executable path for headless shell
+                let browsers_dir = home_path.join("browsers");
+                if browsers_dir.is_dir() {
+                    cmd.env(
+                        "PLAYWRIGHT_BROWSERS_PATH",
+                        browsers_dir.to_string_lossy().to_string(),
+                    );
+                    // Find the headless shell binary for direct executablePath usage
+                    if let Ok(entries) = std::fs::read_dir(&browsers_dir) {
+                        for entry in entries.flatten() {
+                            let name = entry.file_name();
+                            let name_str = name.to_string_lossy();
+                            if name_str.starts_with("chromium_headless_shell-") {
+                                #[cfg(windows)]
+                                let exe = entry
+                                    .path()
+                                    .join("chrome-headless-shell-win64")
+                                    .join("chrome-headless-shell.exe");
+                                #[cfg(not(windows))]
+                                let exe = entry
+                                    .path()
+                                    .join("chrome-headless-shell-linux")
+                                    .join("chrome-headless-shell");
+                                if exe.is_file() {
+                                    cmd.env(
+                                        "CHROMIUM_EXECUTABLE_PATH",
+                                        exe.to_string_lossy().to_string(),
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

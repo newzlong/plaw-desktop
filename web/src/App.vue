@@ -132,8 +132,7 @@ onUnmounted(() => {
   overflow: hidden;
   background: var(--bg-base);
   color: var(--text-primary);
-  transition: background var(--duration-normal) var(--ease-out),
-              color var(--duration-normal) var(--ease-out);
+  transition: color var(--duration-normal) var(--ease-out);
 }
 
 /* Content below titlebar fills remaining space */

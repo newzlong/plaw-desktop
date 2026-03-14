@@ -82,12 +82,15 @@ impl EmbeddingManager {
         self.child = Some(child);
         self.running = true;
 
-        // Wait 2s then verify alive
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        if !self.check_alive().await {
-            self.running = false;
-            self.child = None;
-            return Err("Embedding server exited immediately after start".into());
+        // Wait for model to fully load (poll /health up to 30s)
+        let ready = self.wait_ready(30).await;
+        if !ready {
+            if !self.check_alive().await {
+                self.running = false;
+                self.child = None;
+                return Err("Embedding server exited during startup".into());
+            }
+            eprintln!("[plaw] Embedding server alive but model still loading after 30s");
         }
 
         // Update config.toml [memory] section
@@ -143,6 +146,40 @@ impl EmbeddingManager {
         }
         self.child = None;
         self.running = false;
+    }
+
+    /// Poll /health endpoint until the server returns 200 (model loaded).
+    async fn wait_ready(&mut self, timeout_secs: u64) -> bool {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .no_proxy()
+            .build()
+            .unwrap_or_default();
+        let url = format!("http://127.0.0.1:{}/health", self.port);
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(timeout_secs);
+        while std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            // Check process still alive
+            if !self.check_alive_peek() {
+                return false;
+            }
+            if let Ok(resp) = client.get(&url).send().await {
+                if resp.status().is_success() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Non-destructive alive check (doesn't clear child on exit)
+    fn check_alive_peek(&mut self) -> bool {
+        if let Some(ref mut child) = self.child {
+            matches!(child.try_wait(), Ok(None))
+        } else {
+            false
+        }
     }
 
     /// Check if the process is still alive

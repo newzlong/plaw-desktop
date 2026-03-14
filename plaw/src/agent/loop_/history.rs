@@ -1,6 +1,9 @@
+use crate::memory::capsules::CapsuleStore;
+use crate::memory::embeddings::EmbeddingProvider;
 use crate::providers::{ChatMessage, Provider};
 use crate::util::truncate_with_ellipsis;
 use anyhow::Result;
+use std::sync::Arc;
 
 /// Keep this many most-recent non-system messages after compaction.
 const COMPACTION_KEEP_RECENT_MESSAGES: usize = 20;
@@ -315,14 +318,18 @@ Any stated preferences about workflow, style, language, or approach.
 ## Relevant Code Context
 Important file paths, function names, variable names, or code patterns that the AI needs to remember.
 
+## Keywords
+5-10 key terms/phrases that identify this conversation segment. Include tool names, technology names, file paths, error types, and feature names. Output as a comma-separated list on a single line.
+
 Rules:
 - Keep each section concise (2-5 bullet points max)
-- Omit empty sections entirely
+- Omit empty sections entirely (except Keywords — always include Keywords)
 - Preserve exact file paths, function names, and technical terms
 - Focus on WHAT and WHY, not HOW (skip verbose implementation details)
 - If prior compaction summaries exist, merge them — do not nest summaries
 - Tool execution logs should be reduced to their key findings/outcomes only
-- Use the same language as the conversation (if Chinese, write in Chinese)"#;
+- Use the same language as the conversation (if Chinese, write in Chinese)
+- Keywords section must always be present, even when other sections are omitted"#;
 
 /// Auto-compact conversation history.
 ///
@@ -336,6 +343,9 @@ pub(crate) async fn auto_compact_history(
     max_history: usize,
     last_input_tokens: Option<u64>,
     max_context_tokens: usize,
+    capsule_store: Option<&Arc<CapsuleStore>>,
+    session_id: Option<&str>,
+    embedding_provider: Option<&Arc<dyn EmbeddingProvider>>,
 ) -> Result<bool> {
     let has_system = history.first().map_or(false, |m| m.role == "system");
     let non_system_count = if has_system {
@@ -377,7 +387,82 @@ pub(crate) async fn auto_compact_history(
         });
 
     let summary = truncate_with_ellipsis(&summary_raw, COMPACTION_MAX_SUMMARY_CHARS);
+
+    // ── Capsule archival: preserve pre-compact messages ──────────
+    if let (Some(store), Some(sid)) = (capsule_store, session_id) {
+        let keywords = extract_keywords_from_summary(&summary);
+        // Serialize messages for archival (role: content pairs)
+        let serialized = serialize_messages_for_capsule(&to_compact);
+        let token_estimate = estimate_tokens_simple(&serialized);
+
+        // Embed the summary for semantic search (best-effort, non-blocking failure)
+        let embedding = if let Some(emb) = embedding_provider {
+            match emb.embed_one(&summary).await {
+                Ok(vec) => Some(vec),
+                Err(e) => {
+                    tracing::warn!("[capsule] embedding failed (falling back to keyword-only): {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        if let Err(e) = store.create_from_compact(
+            sid,
+            keywords,
+            &summary,
+            &serialized,
+            token_estimate,
+            to_compact.len() as u64,
+            embedding,
+        ) {
+            eprintln!("[capsule] Failed to archive capsule: {e}");
+        }
+    }
+
     apply_compaction_summary(history, start, compact_end, &summary);
 
     Ok(true)
+}
+
+/// Extract keywords from the structured summary's `## Keywords` section.
+fn extract_keywords_from_summary(summary: &str) -> Vec<String> {
+    let mut in_keywords = false;
+    for line in summary.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("## Keywords") || trimmed.starts_with("## 关键词") {
+            in_keywords = true;
+            continue;
+        }
+        if in_keywords {
+            if trimmed.starts_with("##") {
+                break; // next section
+            }
+            if !trimmed.is_empty() {
+                // Parse comma-separated keywords
+                return trimmed
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            }
+        }
+    }
+    // Fallback: no Keywords section found — extract from section headers
+    Vec::new()
+}
+
+/// Serialize chat messages into a human-readable archive format.
+fn serialize_messages_for_capsule(messages: &[ChatMessage]) -> String {
+    let mut buf = String::new();
+    for msg in messages {
+        buf.push_str(&format!("[{}]\n{}\n\n", msg.role, msg.content));
+    }
+    buf
+}
+
+/// Simple token estimate: ~4 chars per token (rough approximation).
+fn estimate_tokens_simple(text: &str) -> u64 {
+    (text.len() as u64) / 4
 }

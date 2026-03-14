@@ -10,6 +10,7 @@ export default {
     agents: 'Agents',
     cron: 'Cron',
     knowledge: 'Knowledge',
+    capsules: 'Capsules',
     logs: 'Logs',
   },
 
@@ -245,6 +246,23 @@ export default {
     entryTags: 'Tags (comma separated)',
     entryContent: 'Content',
     saveFailed: 'Save failed',
+  },
+
+  // Memory Capsules
+  capsules: {
+    title: 'Memory Capsules',
+    desc: 'Archived conversation segments from context compaction. AI can recall past conversations via keywords.',
+    empty: 'No memory capsules yet. They are created automatically when conversation context is compacted.',
+    total: 'capsules',
+    totalTokens: 'total tokens',
+    session: 'Session',
+    created: 'Created',
+    tokens: 'tokens',
+    messages: 'messages',
+    keywords: 'Keywords',
+    deleteConfirm: 'Delete this memory capsule? The AI will no longer be able to recall its contents.',
+    deleteTitle: 'Delete Capsule',
+    refresh: 'Refresh',
   },
 
   // Setup Wizard

@@ -208,6 +208,13 @@ impl PlawManager {
             .stderr(std::process::Stdio::piped())
             ;
 
+        // Inherit system proxy env vars (HTTPS_PROXY etc.) so Plaw follows
+        // the user's network environment. If no proxy is set, Plaw connects
+        // directly. Users can override via config.toml [proxy] section.
+        //
+        // Protect local services (embedding server, gateway) from being proxied.
+        cmd.env("NO_PROXY", "localhost,127.0.0.1,::1");
+
         // Prepend bundled tools to PATH so Plaw's shell can find them
         {
             let mut extra_paths = Vec::new();

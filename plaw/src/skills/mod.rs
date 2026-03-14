@@ -117,6 +117,9 @@ pub struct Skill {
     pub prompts: Vec<String>,
     #[serde(skip)]
     pub location: Option<PathBuf>,
+    /// Pre-computed embedding vector for semantic matching (populated at runtime).
+    #[serde(skip)]
+    pub embedding: Option<Vec<f32>>,
 }
 
 /// A tool defined by a skill (shell command, HTTP call, etc.)
@@ -504,6 +507,7 @@ fn load_skill_toml(path: &Path) -> Result<Skill> {
         tools: manifest.tools,
         prompts: manifest.prompts,
         location: Some(path.to_path_buf()),
+        embedding: None,
     })
 }
 
@@ -529,6 +533,7 @@ fn load_skill_md(path: &Path, dir: &Path) -> Result<Skill> {
         tools: Vec::new(),
         prompts: vec![body],
         location: Some(path.to_path_buf()),
+        embedding: None,
     })
 }
 
@@ -553,6 +558,7 @@ fn load_open_skill_md(path: &Path) -> Result<Skill> {
         tools: Vec::new(),
         prompts: vec![body],
         location: Some(path.to_path_buf()),
+        embedding: None,
     })
 }
 
@@ -628,6 +634,100 @@ fn resolve_skill_location(skill: &Skill, workspace_dir: &Path) -> PathBuf {
             .join(&skill.name)
             .join("SKILL.md")
     })
+}
+
+// ── Semantic skill matching ──────────────────────────────────────
+
+/// Build the text representation of a skill for embedding.
+fn skill_embedding_text(skill: &Skill) -> String {
+    let mut text = format!("{}: {}", skill.name, skill.description);
+    if !skill.tags.is_empty() {
+        text.push_str(" [");
+        text.push_str(&skill.tags.join(", "));
+        text.push(']');
+    }
+    for tool in &skill.tools {
+        text.push_str(" | tool: ");
+        text.push_str(&tool.name);
+    }
+    text
+}
+
+/// Pre-compute embedding vectors for all skills (best-effort, logs warnings on failure).
+pub async fn compute_skill_embeddings(
+    skills: &mut [Skill],
+    provider: &dyn crate::memory::embeddings::EmbeddingProvider,
+) {
+    if skills.is_empty() {
+        return;
+    }
+
+    let texts: Vec<String> = skills.iter().map(skill_embedding_text).collect();
+    let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+
+    match provider.embed(&text_refs).await {
+        Ok(embeddings) => {
+            for (skill, emb) in skills.iter_mut().zip(embeddings.into_iter()) {
+                if !emb.is_empty() {
+                    skill.embedding = Some(emb);
+                }
+            }
+            tracing::info!(
+                "[skills] pre-computed embeddings for {} skill(s)",
+                skills.len()
+            );
+        }
+        Err(e) => {
+            tracing::warn!("[skills] failed to compute skill embeddings: {e}");
+        }
+    }
+}
+
+/// Select semantically relevant skills for a given query embedding.
+///
+/// Returns indices of skills whose cosine similarity exceeds `min_score`,
+/// sorted by relevance (highest first). The number of results is driven
+/// purely by the threshold — no artificial cap.
+///
+/// Falls back to returning all indices if no skill has an embedding.
+pub fn select_relevant_skills(
+    skills: &[Skill],
+    query_vec: &[f32],
+    min_score: f32,
+) -> Vec<usize> {
+    let scored: Vec<(usize, f32)> = skills
+        .iter()
+        .enumerate()
+        .filter_map(|(i, skill)| {
+            skill.embedding.as_ref().map(|emb| {
+                let sim = crate::memory::vector::cosine_similarity(query_vec, emb);
+                (i, sim)
+            })
+        })
+        .collect();
+
+    // If no skills have embeddings, return all (graceful fallback)
+    if scored.is_empty() && skills.iter().all(|s| s.embedding.is_none()) {
+        return (0..skills.len()).collect();
+    }
+
+    if scored.is_empty() {
+        return vec![];
+    }
+
+    const MAX_SKILLS: usize = 10;
+
+    // Threshold-based filtering: use the caller-supplied min_score (typically 0.5).
+    // Small embedding models produce compressed cosine ranges, so 0.5 works as
+    // a safe lower bound that still filters out clearly irrelevant skills.
+    let mut filtered: Vec<(usize, f32)> = scored
+        .into_iter()
+        .filter(|(_, score)| *score >= min_score)
+        .collect();
+
+    filtered.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    filtered.truncate(MAX_SKILLS);
+    filtered.into_iter().map(|(i, _)| i).collect()
 }
 
 fn render_skill_location(skill: &Skill, workspace_dir: &Path, prefer_relative: bool) -> String {
@@ -1702,6 +1802,7 @@ command = "echo hello"
             tools: vec![],
             prompts: vec!["Do the thing.".to_string()],
             location: None,
+            embedding: None,
         }];
         let prompt = skills_to_prompt(&skills, Path::new("/tmp"));
         assert!(prompt.contains("<available_skills>"));
@@ -1726,6 +1827,7 @@ command = "echo hello"
             }],
             prompts: vec!["Do the thing.".to_string()],
             location: Some(PathBuf::from("/tmp/workspace/skills/test/SKILL.md")),
+            embedding: None,
         }];
         let prompt = skills_to_prompt_with_mode(
             &skills,
@@ -1955,6 +2057,7 @@ description = "Bare minimum"
             }],
             prompts: vec![],
             location: None,
+            embedding: None,
         }];
         let prompt = skills_to_prompt(&skills, Path::new("/tmp"));
         assert!(prompt.contains("weather"));
@@ -1974,6 +2077,7 @@ description = "Bare minimum"
             tools: vec![],
             prompts: vec!["Use <tool> & check \"quotes\".".to_string()],
             location: None,
+            embedding: None,
         }];
 
         let prompt = skills_to_prompt(&skills, Path::new("/tmp"));

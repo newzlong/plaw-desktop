@@ -47,7 +47,11 @@ fn describe_tool_action(tool_name: &str, args: &serde_json::Value) -> Option<Str
             })
         }
         "shell" => command.map(|cmd| {
-            let short = if cmd.len() > 60 { &cmd[..60] } else { cmd };
+            let short = if cmd.chars().count() > 60 {
+                cmd.chars().take(60).collect::<String>()
+            } else {
+                cmd.to_string()
+            };
             format!("Running: {short}")
         }),
         "file_read" | "read_file" => path.map(|p| format!("Reading {p}")),

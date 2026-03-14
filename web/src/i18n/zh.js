@@ -10,6 +10,7 @@ export default {
     agents: '智能体',
     cron: '定时任务',
     knowledge: '知识库',
+    capsules: '记忆胶囊',
     logs: '日志',
   },
 
@@ -242,6 +243,23 @@ export default {
     entryTags: '标签（逗号分隔）',
     entryContent: '内容',
     saveFailed: '保存失败',
+  },
+
+  // Memory Capsules
+  capsules: {
+    title: '记忆胶囊仓',
+    desc: '对话压缩时自动归档的记忆胶囊。AI 可通过关键词回忆过往对话。',
+    empty: '暂无记忆胶囊。对话过程中上下文压缩后会自动生成。',
+    total: '枚胶囊',
+    totalTokens: '总 tokens',
+    session: '会话',
+    created: '创建时间',
+    tokens: 'tokens',
+    messages: '条消息',
+    keywords: '关键词',
+    deleteConfirm: '确定删除这枚记忆胶囊？删除后 AI 将无法回忆其中的内容。',
+    deleteTitle: '删除胶囊',
+    refresh: '刷新',
   },
 
   // Setup Wizard

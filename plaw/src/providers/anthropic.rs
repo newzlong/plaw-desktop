@@ -54,6 +54,8 @@ struct NativeChatRequest<'a> {
     temperature: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<NativeToolSpec<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -230,7 +232,10 @@ impl AnthropicProvider {
         }
     }
 
-    fn convert_tools<'a>(tools: Option<&'a [ToolSpec]>) -> Option<Vec<NativeToolSpec<'a>>> {
+    fn convert_tools<'a>(
+        tools: Option<&'a [ToolSpec]>,
+        use_cache: bool,
+    ) -> Option<Vec<NativeToolSpec<'a>>> {
         let items = tools?;
         if items.is_empty() {
             return None;
@@ -245,9 +250,11 @@ impl AnthropicProvider {
             })
             .collect();
 
-        // Cache the last tool definition (caches all tools)
-        if let Some(last_tool) = native_tools.last_mut() {
-            last_tool.cache_control = Some(CacheControl::ephemeral());
+        // Cache the last tool definition (caches all tools) — only for native Anthropic
+        if use_cache {
+            if let Some(last_tool) = native_tools.last_mut() {
+                last_tool.cache_control = Some(CacheControl::ephemeral());
+            }
         }
 
         Some(native_tools)
@@ -343,7 +350,16 @@ impl AnthropicProvider {
         blocks
     }
 
-    fn convert_messages(messages: &[ChatMessage]) -> (Option<SystemPrompt>, Vec<NativeMessage>) {
+    /// Convert ChatMessage history to Anthropic native format.
+    /// `use_cache`: enable prompt caching (Anthropic official only).
+    /// `native_tool_msgs`: use tool_use/tool_result content blocks (Anthropic official).
+    ///   When false, tool call history is kept as plain text — needed for providers
+    ///   like Kimi that support tool_use in responses but not in request messages.
+    fn convert_messages(
+        messages: &[ChatMessage],
+        use_cache: bool,
+        native_tool_msgs: bool,
+    ) -> (Option<SystemPrompt>, Vec<NativeMessage>) {
         let mut system_text = None;
         let mut native_messages = Vec::new();
 
@@ -355,29 +371,53 @@ impl AnthropicProvider {
                     }
                 }
                 "assistant" => {
-                    if let Some(blocks) = Self::parse_assistant_tool_call_message(&msg.content) {
-                        native_messages.push(NativeMessage {
-                            role: "assistant".to_string(),
-                            content: blocks,
-                        });
+                    if native_tool_msgs {
+                        if let Some(blocks) = Self::parse_assistant_tool_call_message(&msg.content) {
+                            native_messages.push(NativeMessage {
+                                role: "assistant".to_string(),
+                                content: blocks,
+                            });
+                        } else {
+                            native_messages.push(NativeMessage {
+                                role: "assistant".to_string(),
+                                content: vec![NativeContentOut::Text {
+                                    text: msg.content.clone(),
+                                    cache_control: None,
+                                }],
+                            });
+                        }
                     } else {
+                        // Non-native: downgrade tool call JSON to plain text
+                        let text = Self::downgrade_assistant_tool_message(&msg.content);
                         native_messages.push(NativeMessage {
                             role: "assistant".to_string(),
                             content: vec![NativeContentOut::Text {
-                                text: msg.content.clone(),
+                                text,
                                 cache_control: None,
                             }],
                         });
                     }
                 }
                 "tool" => {
-                    if let Some(tool_result) = Self::parse_tool_result_message(&msg.content) {
-                        native_messages.push(tool_result);
+                    if native_tool_msgs {
+                        if let Some(tool_result) = Self::parse_tool_result_message(&msg.content) {
+                            native_messages.push(tool_result);
+                        } else {
+                            native_messages.push(NativeMessage {
+                                role: "user".to_string(),
+                                content: vec![NativeContentOut::Text {
+                                    text: msg.content.clone(),
+                                    cache_control: None,
+                                }],
+                            });
+                        }
                     } else {
+                        // Non-native: convert tool result to plain text user message
+                        let text = Self::downgrade_tool_result_message(&msg.content);
                         native_messages.push(NativeMessage {
                             role: "user".to_string(),
                             content: vec![NativeContentOut::Text {
-                                text: msg.content.clone(),
+                                text,
                                 cache_control: None,
                             }],
                         });
@@ -392,9 +432,9 @@ impl AnthropicProvider {
             }
         }
 
-        // Convert system text to SystemPrompt with cache control if large
+        // Convert system text to SystemPrompt with cache control if large (native Anthropic only)
         let system_prompt = system_text.map(|text| {
-            if Self::should_cache_system(&text) {
+            if use_cache && Self::should_cache_system(&text) {
                 SystemPrompt::Blocks(vec![SystemBlock {
                     block_type: "text".to_string(),
                     text,
@@ -466,7 +506,231 @@ impl AnthropicProvider {
     }
 
     fn http_client(&self) -> Client {
-        crate::config::build_runtime_proxy_client_with_timeouts("provider.anthropic", 120, 10)
+        let builder = reqwest::Client::builder()
+            .pool_max_idle_per_host(0)
+            .timeout(std::time::Duration::from_secs(120))
+            .connect_timeout(std::time::Duration::from_secs(10));
+        let builder =
+            crate::config::apply_runtime_proxy_to_builder(builder, "provider.anthropic");
+        builder.build().unwrap_or_else(|e| {
+            tracing::warn!("[anthropic] http_client build failed: {e}");
+            reqwest::Client::new()
+        })
+    }
+
+    /// Longer timeouts for streaming requests (10 min read, 30s connect)
+    fn streaming_http_client(&self) -> Client {
+        // Disable connection pooling — some Anthropic-compatible endpoints (e.g. Kimi)
+        // return 400 on the second request when reusing a connection after SSE streaming.
+        let builder = reqwest::Client::builder()
+            .pool_max_idle_per_host(0)
+            .timeout(std::time::Duration::from_secs(600))
+            .connect_timeout(std::time::Duration::from_secs(30));
+        let builder =
+            crate::config::apply_runtime_proxy_to_builder(builder, "provider.anthropic");
+        builder.build().unwrap_or_else(|e| {
+            tracing::warn!("[anthropic] streaming_http_client build failed: {e}");
+            reqwest::Client::new()
+        })
+    }
+
+    /// Returns true only for the official Anthropic API endpoint.
+    /// Custom endpoints (Kimi, etc.) don't support prompt caching.
+    fn supports_caching(&self) -> bool {
+        self.base_url.contains("api.anthropic.com")
+    }
+
+    /// Downgrade an assistant message that may contain tool_use JSON to plain text.
+    /// For providers like Kimi that return tool_use in responses but reject them in requests.
+    fn downgrade_assistant_tool_message(content: &str) -> String {
+        // Try to parse as our internal tool call JSON format
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(content) {
+            let mut parts = Vec::new();
+            // Extract any text content
+            if let Some(text) = value.get("content").and_then(|v| v.as_str()) {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    parts.push(trimmed.to_string());
+                }
+            }
+            // Extract tool calls as readable text
+            if let Some(calls) = value.get("tool_calls").and_then(|v| v.as_array()) {
+                for call in calls {
+                    let name = call.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
+                    let args = call.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}");
+                    parts.push(format!("[Calling tool: {name}({args})]"));
+                }
+            }
+            if !parts.is_empty() {
+                return parts.join("\n");
+            }
+        }
+        // Not parseable or empty — return as-is
+        content.to_string()
+    }
+
+    /// Downgrade a tool result message to plain text user message.
+    /// For providers like Kimi that reject tool_result content blocks in requests.
+    fn downgrade_tool_result_message(content: &str) -> String {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(content) {
+            let tool_id = value.get("tool_call_id").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let result = value.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            return format!("[Tool result for {tool_id}]:\n{result}");
+        }
+        // Not parseable — return as-is
+        content.to_string()
+    }
+
+    /// Consume an Anthropic SSE stream and accumulate into a NativeChatResponse.
+    /// Falls back to JSON parsing if the response is not SSE formatted.
+    async fn consume_sse_stream(
+        response: reqwest::Response,
+    ) -> anyhow::Result<NativeChatResponse> {
+        // Collect the full response body first, then decide parsing strategy.
+        let body = response.text().await?;
+
+        // Quick check: is this SSE or plain JSON?
+        let trimmed = body.trim_start();
+        let is_sse = trimmed.starts_with("event:") || trimmed.starts_with("data:");
+
+        if !is_sse {
+            // Plain JSON response (provider doesn't support streaming)
+            tracing::info!(
+                "[anthropic] non-SSE response ({}B), parsing as JSON",
+                body.len(),
+            );
+            match serde_json::from_str::<NativeChatResponse>(&body) {
+                Ok(resp) => return Ok(resp),
+                Err(e) => {
+                    tracing::warn!(
+                        "[anthropic] JSON parse failed: {e}, preview: {}",
+                        &body[..body.len().min(500)],
+                    );
+                    anyhow::bail!("Failed to parse response as JSON or SSE: {e}");
+                }
+            }
+        }
+
+        // Parse SSE events
+        let mut content_blocks: Vec<NativeContentIn> = Vec::new();
+        let mut current_text = String::new();
+        let mut current_tool_id: Option<String> = None;
+        let mut current_tool_name: Option<String> = None;
+        let mut current_tool_input_json = String::new();
+        let mut current_block_type = String::new();
+        let mut input_tokens: Option<u64> = None;
+        let mut output_tokens: Option<u64> = None;
+
+        for event_block in body.split("\n\n") {
+            for line in event_block.lines() {
+                // SSE spec: space after colon is optional (Kimi sends "data:{json}")
+                let data = match line.strip_prefix("data: ")
+                    .or_else(|| line.strip_prefix("data:"))
+                {
+                    Some(d) if d != "[DONE]" => d,
+                    _ => continue,
+                };
+                let event: serde_json::Value = match serde_json::from_str(data) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                match event["type"].as_str() {
+                    Some("message_start") => {
+                        if let Some(usage) =
+                            event.get("message").and_then(|m| m.get("usage"))
+                        {
+                            input_tokens =
+                                usage.get("input_tokens").and_then(|v| v.as_u64());
+                        }
+                    }
+                    Some("content_block_start") => {
+                        let block = &event["content_block"];
+                        current_block_type =
+                            block["type"].as_str().unwrap_or("").to_string();
+                        if current_block_type == "text" {
+                            current_text.clear();
+                        } else if current_block_type == "tool_use" {
+                            current_tool_id =
+                                block["id"].as_str().map(String::from);
+                            current_tool_name =
+                                block["name"].as_str().map(String::from);
+                            current_tool_input_json.clear();
+                        }
+                    }
+                    Some("content_block_delta") => {
+                        let delta = &event["delta"];
+                        match delta["type"].as_str() {
+                            Some("text_delta") => {
+                                if let Some(text) = delta["text"].as_str() {
+                                    current_text.push_str(text);
+                                }
+                            }
+                            Some("input_json_delta") => {
+                                if let Some(json) =
+                                    delta["partial_json"].as_str()
+                                {
+                                    current_tool_input_json.push_str(json);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    Some("content_block_stop") => {
+                        if current_block_type == "text" {
+                            content_blocks.push(NativeContentIn {
+                                kind: "text".to_string(),
+                                text: Some(current_text.clone()),
+                                id: None,
+                                name: None,
+                                input: None,
+                            });
+                            current_text.clear();
+                        } else if current_block_type == "tool_use" {
+                            let input =
+                                serde_json::from_str(&current_tool_input_json)
+                                    .ok();
+                            content_blocks.push(NativeContentIn {
+                                kind: "tool_use".to_string(),
+                                text: None,
+                                id: current_tool_id.take(),
+                                name: current_tool_name.take(),
+                                input,
+                            });
+                            current_tool_input_json.clear();
+                        }
+                    }
+                    Some("message_delta") => {
+                        if let Some(usage) = event.get("usage") {
+                            output_tokens =
+                                usage.get("output_tokens").and_then(|v| v.as_u64());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if content_blocks.is_empty() {
+            tracing::warn!(
+                "[anthropic] SSE parsed but no content blocks, body preview: {}",
+                &body[..body.len().min(500)],
+            );
+        }
+
+        let usage = if input_tokens.is_some() || output_tokens.is_some() {
+            Some(AnthropicUsage {
+                input_tokens,
+                output_tokens,
+            })
+        } else {
+            None
+        };
+
+        Ok(NativeChatResponse {
+            content: content_blocks,
+            usage,
+        })
     }
 }
 
@@ -527,10 +791,13 @@ impl Provider for AnthropicProvider {
             )
         })?;
 
-        let (system_prompt, mut messages) = Self::convert_messages(request.messages);
+        let use_cache = self.supports_caching();
+        let native_tool_msgs = true; // Kimi fully supports Anthropic tool_use/tool_result format (curl-verified)
+        let (system_prompt, mut messages) =
+            Self::convert_messages(request.messages, use_cache, native_tool_msgs);
 
-        // Auto-cache last message if conversation is long
-        if Self::should_cache_conversation(request.messages) {
+        // Auto-cache last message if conversation is long (native Anthropic only)
+        if use_cache && Self::should_cache_conversation(request.messages) {
             Self::apply_cache_to_last_message(&mut messages);
         }
 
@@ -540,22 +807,26 @@ impl Provider for AnthropicProvider {
             system: system_prompt,
             messages,
             temperature,
-            tools: Self::convert_tools(request.tools),
+            tools: Self::convert_tools(request.tools, use_cache),
+            stream: Some(true),
         };
 
-        let req = self
-            .http_client()
-            .post(format!("{}/v1/messages", self.base_url))
+        let url = format!("{}/v1/messages", self.base_url);
+
+        let mut request = self
+            .streaming_http_client()
+            .post(&url)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
             .json(&native_request);
+        request = self.apply_auth(request, credential);
 
-        let response = self.apply_auth(req, credential).send().await?;
+        let response = request.send().await?;
         if !response.status().is_success() {
             return Err(super::api_error("Anthropic", response).await);
         }
 
-        let native_response: NativeChatResponse = response.json().await?;
+        let native_response = Self::consume_sse_stream(response).await?;
         Ok(Self::parse_native_response(native_response))
     }
 
@@ -1138,7 +1409,7 @@ mod tests {
             },
         ];
 
-        let native_tools = AnthropicProvider::convert_tools(Some(&tools)).unwrap();
+        let native_tools = AnthropicProvider::convert_tools(Some(&tools), true).unwrap();
 
         assert_eq!(native_tools.len(), 2);
         assert!(native_tools[0].cache_control.is_none());
@@ -1153,7 +1424,7 @@ mod tests {
             parameters: serde_json::json!({"type": "object"}),
         }];
 
-        let native_tools = AnthropicProvider::convert_tools(Some(&tools)).unwrap();
+        let native_tools = AnthropicProvider::convert_tools(Some(&tools), true).unwrap();
 
         assert_eq!(native_tools.len(), 1);
         assert!(native_tools[0].cache_control.is_some());
@@ -1166,7 +1437,7 @@ mod tests {
             content: "Short system prompt".to_string(),
         }];
 
-        let (system_prompt, _) = AnthropicProvider::convert_messages(&messages);
+        let (system_prompt, _) = AnthropicProvider::convert_messages(&messages, true, true);
 
         match system_prompt.unwrap() {
             SystemPrompt::String(s) => {
@@ -1184,7 +1455,7 @@ mod tests {
             content: large_content.clone(),
         }];
 
-        let (system_prompt, _) = AnthropicProvider::convert_messages(&messages);
+        let (system_prompt, _) = AnthropicProvider::convert_messages(&messages, true, true);
 
         match system_prompt.unwrap() {
             SystemPrompt::Blocks(blocks) => {
@@ -1212,6 +1483,7 @@ mod tests {
             }],
             temperature: 0.7,
             tools: None,
+            stream: None,
         };
 
         let json = serde_json::to_string(&req).unwrap();
@@ -1247,7 +1519,7 @@ mod tests {
             },
         ];
 
-        let (system, native_msgs) = AnthropicProvider::convert_messages(&messages);
+        let (system, native_msgs) = AnthropicProvider::convert_messages(&messages, true, true);
 
         // System prompt extracted
         assert!(system.is_some());
@@ -1277,16 +1549,32 @@ mod tests {
                 let cap = captured_clone.clone();
                 async move {
                     *cap.lock().unwrap() = Some(body);
-                    // Return a minimal valid Anthropic response
-                    Json(serde_json::json!({
-                        "id": "msg_test",
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "text", "text": "The make function creates a map."}],
-                        "model": "claude-opus-4-6",
-                        "stop_reason": "end_turn",
-                        "usage": {"input_tokens": 100, "output_tokens": 20}
-                    }))
+                    // Return SSE stream matching Anthropic streaming format
+                    let sse_body = [
+                        "event: message_start",
+                        r#"data: {"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","content":[],"model":"claude-opus-4-6","usage":{"input_tokens":100}}}"#,
+                        "",
+                        "event: content_block_start",
+                        r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+                        "",
+                        "event: content_block_delta",
+                        r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"The make function creates a map."}}"#,
+                        "",
+                        "event: content_block_stop",
+                        r#"data: {"type":"content_block_stop","index":0}"#,
+                        "",
+                        "event: message_delta",
+                        r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":20}}"#,
+                        "",
+                        "event: message_stop",
+                        r#"data: {"type":"message_stop"}"#,
+                        "",
+                    ].join("\n");
+                    (
+                        axum::http::StatusCode::OK,
+                        [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                        sse_body,
+                    )
                 }
             }),
         );
@@ -1301,6 +1589,7 @@ mod tests {
         let provider = AnthropicProvider {
             credential: Some("test-key".to_string()),
             base_url: format!("http://{addr}"),
+            max_tokens: DEFAULT_MAX_TOKENS,
         };
 
         // Multi-turn conversation: system → user (Go code) → assistant (code response) → user (follow-up)

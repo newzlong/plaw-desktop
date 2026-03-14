@@ -392,6 +392,7 @@ mod tests {
             }],
             prompts: vec!["Run smoke tests before deploy.".into()],
             location: None,
+            embedding: None,
         }];
 
         let ctx = PromptContext {
@@ -430,6 +431,7 @@ mod tests {
             }],
             prompts: vec!["Run smoke tests before deploy.".into()],
             location: Some(Path::new("/tmp/workspace/skills/deploy/SKILL.md").to_path_buf()),
+            embedding: None,
         }];
 
         let ctx = PromptContext {
@@ -490,6 +492,7 @@ mod tests {
             }],
             prompts: vec!["Use <tool_call> and & keep output \"safe\"".into()],
             location: None,
+            embedding: None,
         }];
         let ctx = PromptContext {
             workspace_dir: Path::new("/tmp/workspace"),

@@ -41,7 +41,7 @@ import { ref, computed } from 'vue'
 import { useI18n } from '../composables/useI18n'
 import {
   LayoutDashboard, Bot, Radio, Shield,
-  Puzzle, Users, Clock, BookOpen, FileText,
+  Puzzle, Users, Clock, BookOpen, Pill, FileText,
 } from 'lucide-vue-next'
 
 import { defineAsyncComponent } from 'vue'
@@ -54,6 +54,7 @@ const SkillsManager = defineAsyncComponent(() => import('../views/SkillsManager.
 const AgentManager = defineAsyncComponent(() => import('../views/AgentManager.vue'))
 const CronManager = defineAsyncComponent(() => import('../views/CronManager.vue'))
 const KnowledgeManager = defineAsyncComponent(() => import('../views/KnowledgeManager.vue'))
+const CapsulesPanel = defineAsyncComponent(() => import('../views/CapsulesPanel.vue'))
 const Logs = defineAsyncComponent(() => import('../views/Logs.vue'))
 
 defineProps({ modelValue: Boolean })
@@ -70,6 +71,7 @@ const tabs = [
   { id: 'agents', i18nKey: 'nav.agents', icon: Users },
   { id: 'cron', i18nKey: 'nav.cron', icon: Clock },
   { id: 'knowledge', i18nKey: 'nav.knowledge', icon: BookOpen },
+  { id: 'capsules', i18nKey: 'nav.capsules', icon: Pill },
   { id: 'logs', i18nKey: 'nav.logs', icon: FileText },
 ]
 
@@ -92,6 +94,7 @@ const componentMap = {
   agents: AgentManager,
   cron: CronManager,
   knowledge: KnowledgeManager,
+  capsules: CapsulesPanel,
   logs: Logs,
 }
 
@@ -113,7 +116,7 @@ const activeComponent = computed(() => componentMap[activeTab.value])
 .settings-panel {
   width: min(920px, 92vw);
   height: min(680px, 88vh);
-  background: var(--card-bg);
+  background: var(--bg-overlay);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
   display: flex;
@@ -228,7 +231,7 @@ const activeComponent = computed(() => componentMap[activeTab.value])
   position: sticky;
   top: -20px;              /* counteract parent padding */
   z-index: 10;
-  background: var(--card-bg);
+  background: var(--bg-overlay);
   margin: -20px -24px 16px; /* bleed into parent padding */
   padding: 20px 24px 12px;
 }
@@ -248,7 +251,7 @@ const activeComponent = computed(() => componentMap[activeTab.value])
   position: sticky;
   top: 48px;               /* below the sticky page-header */
   z-index: 9;
-  background: var(--card-bg);
+  background: var(--bg-overlay);
   margin-left: -24px;
   margin-right: -24px;
   padding-left: 24px;
@@ -261,7 +264,7 @@ const activeComponent = computed(() => componentMap[activeTab.value])
   position: sticky;
   bottom: -20px;           /* counteract parent padding */
   z-index: 10;
-  background: var(--card-bg);
+  background: var(--bg-overlay);
   margin: 0 -24px -20px;
   padding: 12px 24px 20px;
   border-top: 1px solid var(--border-subtle);

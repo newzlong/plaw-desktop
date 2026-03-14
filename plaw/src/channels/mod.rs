@@ -3793,6 +3793,21 @@ pub fn build_system_prompt_with_mode(
          - When in doubt, ask before acting externally.\n\n",
     );
 
+    // ── 2b. Long-term memory (capsules) ──────────────────────────
+    prompt.push_str(
+        "## Long-term Memory\n\n\
+         You have persistent long-term memory through **memory capsules** — archived \
+         segments of past conversations preserved across sessions.\n\n\
+         **How to use your memory:**\n\
+         - When a problem feels familiar, or the user references something from a previous \
+           conversation, **proactively** call `capsule_search` to look it up.\n\
+         - When you encounter an error or tricky situation during tool execution, search your \
+           memory — you may have solved the same issue before.\n\
+         - Use `capsule_search` with descriptive keywords, then `capsule_recall` to read the \
+           full archived conversation when a capsule looks relevant.\n\
+         - Do NOT wait for the user to ask you to search memory. Take the initiative.\n\n",
+    );
+
     // ── 3. Skills (full or compact, based on config) ─────────────
     if !skills.is_empty() {
         prompt.push_str(&crate::skills::skills_to_prompt_with_mode(
@@ -8885,6 +8900,7 @@ BTC is currently around $65,000 based on latest tool output."#
             }],
             prompts: vec!["Always run cargo test before final response.".into()],
             location: None,
+            embedding: None,
         }];
 
         let prompt = build_system_prompt(ws.path(), "model", &[], &skills, None, None);
@@ -8920,6 +8936,7 @@ BTC is currently around $65,000 based on latest tool output."#
             }],
             prompts: vec!["Always run cargo test before final response.".into()],
             location: None,
+            embedding: None,
         }];
 
         let prompt = build_system_prompt_with_mode(
@@ -8961,6 +8978,7 @@ BTC is currently around $65,000 based on latest tool output."#
             }],
             prompts: vec!["Use <tool_call> and & keep output \"safe\"".into()],
             location: None,
+            embedding: None,
         }];
 
         let prompt = build_system_prompt(ws.path(), "model", &[], &skills, None, None);

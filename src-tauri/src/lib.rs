@@ -13,6 +13,7 @@ mod embedding;
 mod sessions;
 mod notifications;
 mod cron_watcher;
+mod capsules;
 
 use plaw::{LogLine, SharedManager, PlawManager};
 use embedding::{EmbeddingManager, SharedEmbedding};
@@ -232,6 +233,10 @@ fn ensure_config_defaults(data_dir: &std::path::Path) {
         }
     }
 
+    // [proxy] — NOT injected automatically.
+    // Plaw inherits system proxy env vars (HTTPS_PROXY etc.) at runtime.
+    // Users can manually configure [proxy] in config.toml if needed.
+
     if changed {
         if let Ok(s) = toml::to_string_pretty(&val) {
             let _ = std::fs::write(&config_path, s);
@@ -275,6 +280,17 @@ async fn start_plaw(
 ) -> Result<u16, String> {
     // Patch config defaults (no pairing, web_search enabled, etc.)
     ensure_config_defaults(&state.data_dir);
+
+    // Start embedding server early so model loads while Plaw boots
+    {
+        let mut emb = state.embedding.lock().await;
+        if emb.is_available() && !emb.running {
+            match emb.start().await {
+                Ok(_) => eprintln!("[plaw] Embedding server ready on port {}", emb.port),
+                Err(e) => eprintln!("[plaw] Embedding server auto-start failed: {e}"),
+            }
+        }
+    }
 
     let port = allocate_port(&state.data_dir);
     let mut mgr = state.manager.lock().await;
@@ -349,18 +365,6 @@ async fn start_plaw(
             state.data_dir.clone(),
             state.sse_stop.clone(),
         );
-    }
-
-    // Auto-start embedding server if available
-    {
-        let mut emb = state.embedding.lock().await;
-        if emb.is_available() && !emb.running {
-            if let Err(e) = emb.start().await {
-                eprintln!("[plaw] Embedding server auto-start failed: {e}");
-            } else {
-                eprintln!("[plaw] Embedding server auto-started on port {}", emb.port);
-            }
-        }
     }
 
     Ok(actual_port)
@@ -1220,6 +1224,30 @@ fn session_exists(state: tauri::State<AppState>, id: String) -> bool {
 }
 
 // ========================
+// Capsule Warehouse Commands
+// ========================
+
+#[tauri::command]
+fn list_capsules(state: tauri::State<AppState>, limit: Option<usize>) -> Result<Vec<capsules::CapsuleMeta>, String> {
+    capsules::list_capsules(&state.data_dir, limit.unwrap_or(100))
+}
+
+#[tauri::command]
+fn delete_capsule(state: tauri::State<AppState>, id: String) -> Result<bool, String> {
+    capsules::delete_capsule(&state.data_dir, &id)
+}
+
+#[tauri::command]
+fn get_capsule_stats(state: tauri::State<AppState>) -> Result<capsules::CapsuleStats, String> {
+    capsules::get_capsule_stats(&state.data_dir)
+}
+
+// ========================
+// Window Effects Commands
+// ========================
+
+
+// ========================
 // File Upload Commands
 // ========================
 
@@ -1496,6 +1524,9 @@ pub fn run() {
             save_upload,
             get_uploads_info,
             clear_uploads,
+            list_capsules,
+            delete_capsule,
+            get_capsule_stats,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -1521,6 +1552,7 @@ fn extract_bundle_if_needed(data_dir: &std::path::Path) {
         ("skills-bundle.tar.gz", ".plaw"),  // extracts .plaw/workspace/skills/
         ("node-modules-bundle.tar.gz", "node_modules_global"),
         ("poppler-bundle.tar.gz", "poppler"),
+        ("cli-bundle.tar.gz", "bin/cli"),
     ];
     for (archive_name, check_dir) in bundles {
         let archive_path = data_dir.join(archive_name);

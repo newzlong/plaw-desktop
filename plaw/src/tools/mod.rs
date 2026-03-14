@@ -19,6 +19,7 @@ pub mod agents_ipc;
 pub mod apply_patch;
 pub mod browser;
 pub mod browser_open;
+pub mod capsule;
 pub mod cli_discovery;
 pub mod composio;
 pub mod content_search;
@@ -70,6 +71,7 @@ pub mod web_search_tool;
 pub use apply_patch::ApplyPatchTool;
 pub use browser::{BrowserTool, ComputerUseConfig, cleanup_browser_processes};
 pub use browser_open::BrowserOpenTool;
+pub use capsule::{CapsuleRecallTool, CapsuleSearchTool};
 pub use composio::ComposioTool;
 pub use content_search::ContentSearchTool;
 pub use cron_add::CronAddTool;
@@ -601,6 +603,42 @@ fn all_tools_impl(
             Err(e) => {
                 tracing::warn!("agents_ipc: failed to open IPC database: {e}");
             }
+        }
+    }
+
+    // Memory capsule tools (search + recall archived conversation segments)
+    match crate::memory::capsules::CapsuleStore::new(workspace_dir) {
+        Ok(store) => {
+            let store = Arc::new(store);
+            // Build CapsuleSearchTool with optional embedding for hybrid search
+            let mem_cfg = &root_config.memory;
+            let search_tool = {
+                let mut tool = CapsuleSearchTool::new(store.clone());
+                let emb_provider_name = mem_cfg.embedding_provider.trim();
+                if !emb_provider_name.is_empty() && emb_provider_name != "none" {
+                    let emb: Arc<dyn crate::memory::embeddings::EmbeddingProvider> =
+                        Arc::from(crate::memory::embeddings::create_embedding_provider(
+                            emb_provider_name,
+                            fallback_api_key,
+                            &mem_cfg.embedding_model,
+                            mem_cfg.embedding_dimensions,
+                        ));
+                    #[allow(clippy::cast_possible_truncation)]
+                    {
+                        tool = tool.with_embedding(
+                            emb,
+                            mem_cfg.vector_weight as f32,
+                            mem_cfg.keyword_weight as f32,
+                        );
+                    }
+                }
+                tool
+            };
+            tool_arcs.push(Arc::new(search_tool));
+            tool_arcs.push(Arc::new(CapsuleRecallTool::new(store)));
+        }
+        Err(e) => {
+            tracing::warn!("capsule tools: failed to open capsule store: {e}");
         }
     }
 

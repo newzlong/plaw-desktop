@@ -257,6 +257,15 @@ impl OpenAiCompatibleProvider {
         }
     }
 
+    /// Disable native tool calling (tools parameter in API requests).
+    /// When disabled, tools are injected into the system prompt as text
+    /// and the AI responds with tool calls in its text output.
+    /// Used for providers like Kimi Code that don't support function calling.
+    pub fn with_native_tool_calling_disabled(mut self) -> Self {
+        self.native_tool_calling = false;
+        self
+    }
+
     /// Collect all `system` role messages, concatenate their content,
     /// and prepend to the first `user` message. Drop all system messages.
     /// Used for providers (e.g. MiniMax) that reject `role: system`.
@@ -2114,6 +2123,8 @@ impl Provider for OpenAiCompatibleProvider {
         }
 
         let url = self.chat_completions_url();
+
+
         let response = match self
             .apply_auth_header(
                 self.http_client().post(&url).json(&native_request),

@@ -1590,6 +1590,12 @@ impl ProxyConfig {
         mut builder: reqwest::ClientBuilder,
         service_key: &str,
     ) -> reqwest::ClientBuilder {
+        // enabled=false means "no proxy at all" — explicitly block env var proxy
+        // so reqwest doesn't pick up inherited HTTPS_PROXY etc. from parent process.
+        if !self.enabled {
+            return builder.no_proxy();
+        }
+
         if !self.should_apply_to_service(service_key) {
             return builder;
         }
@@ -6330,6 +6336,11 @@ impl Config {
 
         if self.proxy.enabled && self.proxy.scope == ProxyScope::Environment {
             self.proxy.apply_to_process_env();
+        } else if !self.proxy.enabled {
+            // Explicitly clear inherited proxy env vars so no library picks them up.
+            clear_proxy_env_pair("HTTP_PROXY");
+            clear_proxy_env_pair("HTTPS_PROXY");
+            clear_proxy_env_pair("ALL_PROXY");
         }
 
         set_runtime_proxy_config(self.proxy.clone());

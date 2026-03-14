@@ -1101,7 +1101,8 @@ fn create_provider_with_url_and_options(
                 key,
                 AuthStyle::Bearer,
                 "KimiCLI/0.77",
-            ),
+            )
+            .with_native_tool_calling_disabled(),
         )),
         "synthetic" => Ok(Box::new(OpenAiCompatibleProvider::new(
             "Synthetic", "https://api.synthetic.new/openai/v1", key, AuthStyle::Bearer,

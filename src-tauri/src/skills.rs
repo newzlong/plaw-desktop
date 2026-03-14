@@ -214,6 +214,7 @@ const PROTECTED_SKILL_NAMES: &[&str] = &[
     "skill-creator",
     "audit-skills",
     "fix-skills",
+    "cli-improve-skills",
     "pptx",
     "xlsx",
     "docx",

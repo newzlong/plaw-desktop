@@ -53,6 +53,7 @@
 
         <div
           v-for="(msg, i) in messages"
+          v-show="!(msg.role === 'assistant' && !msg.content && (!msg.steps || !msg.steps.length) && streaming && i === messages.length - 1)"
           :key="i"
           class="chat-msg"
           :class="`chat-msg--${msg.role}`"
@@ -470,6 +471,13 @@ async function newSession() {
   ignoreNextDone = false
   clearTimeout(interruptTimer)
   sessionStorage.removeItem('plaw-chat-session')
+  // Reconnect WebSocket so server-side history is cleared
+  if (ws) {
+    ws.onclose = null
+    ws.close()
+    ws = null
+  }
+  await connectWebSocket()
 }
 
 async function removeSession(id) {
@@ -495,6 +503,13 @@ async function confirmDelete() {
     ignoreNextDone = false
     clearTimeout(interruptTimer)
     sessionStorage.removeItem('plaw-chat-session')
+    // Reconnect WebSocket so server-side history is cleared
+    if (ws) {
+      ws.onclose = null
+      ws.close()
+      ws = null
+    }
+    await connectWebSocket()
   }
   await refreshSessions()
 }
@@ -949,7 +964,7 @@ function buildContentWithFiles(text, savedFiles) {
     if (f.isImage) {
       content += `\n[IMAGE:${f.path}]`
     } else {
-      content += `\n[用户附件: ${f.name}, 路径: ${f.path}]`
+      content += `\n[附件] 原始文件名: ${f.name} → 已保存到: ${f.path} (请使用此完整路径读取文件)`
     }
   }
   return content
@@ -1274,8 +1289,6 @@ onUnmounted(() => {
   flex-direction: column;
   margin: 8px 0 8px 8px;
   background: var(--sidebar-bg);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
   border: 1px solid var(--sidebar-border);
   border-radius: var(--radius-lg);
   overflow: hidden;
@@ -1538,6 +1551,7 @@ onUnmounted(() => {
 .chat-msg--assistant .chat-msg__bubble {
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
+  box-shadow: var(--shadow-card);
   color: var(--text-primary);
   border-bottom-left-radius: 4px;
 }
@@ -1546,8 +1560,6 @@ onUnmounted(() => {
   border: 1px solid var(--border-default);
   color: var(--text-secondary);
   font-size: 0.82rem;
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
 }
 
 .chat-msg__text :deep(pre) {
@@ -1825,8 +1837,6 @@ onUnmounted(() => {
 .chat-input-area {
   margin: 0 12px 12px;
   background: var(--bg-raised, var(--sidebar-bg));
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
   border: 1px solid var(--sidebar-border);
   border-radius: var(--radius-lg);
   overflow: hidden;

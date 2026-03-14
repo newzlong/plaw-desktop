@@ -965,7 +965,11 @@ pub(crate) async fn run_tool_call_loop(
                     let _ = tx.send(chunk).await;
                 }
             }
-            history.push(ChatMessage::assistant(response_text.clone()));
+            // Only push non-empty assistant messages to history.
+            // Empty messages cause 400 errors on some providers (e.g. Kimi).
+            if !response_text.trim().is_empty() {
+                history.push(ChatMessage::assistant(response_text.clone()));
+            }
             return Ok(display_text);
         }
 
@@ -2029,6 +2033,9 @@ pub async fn run(
                 config.agent.max_history_messages,
                 None, // CLI loop doesn't track input_tokens per-turn
                 config.agent.max_context_tokens,
+                None, // No capsule store in CLI mode
+                None, // No session_id in CLI mode
+                None, // No embedding provider in CLI mode
             )
             .await
             {

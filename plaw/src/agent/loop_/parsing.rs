@@ -1054,6 +1054,19 @@ pub(super) fn parse_glm_shortened_body(body: &str) -> Option<ParsedToolCall> {
 
     let tool_name = map_tool_name_alias(tool_raw);
 
+    // Try JSON args first (e.g. Kimi outputs `browser({"action":"open","url":"..."})`)
+    if value_part.starts_with('{') || value_part.starts_with('[') {
+        if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(value_part) {
+            if json_value.is_object() {
+                return Some(ParsedToolCall {
+                    name: tool_name.to_string(),
+                    arguments: json_value,
+                    tool_call_id: None,
+                });
+            }
+        }
+    }
+
     // Try attribute-style: `key="value" key2="value2"`
     if value_part.contains("=\"") {
         let mut args = serde_json::Map::new();

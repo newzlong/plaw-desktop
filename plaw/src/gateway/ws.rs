@@ -216,8 +216,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     // Maintain conversation history for this WebSocket session
     let mut history: Vec<ChatMessage> = Vec::new();
 
-    // Build system prompt once for the session (with skills loaded)
-    let (system_prompt, initial_skill_names) = {
+    // Load skills and session config (mutable — embeddings will be computed)
+    let (mut all_skills, initial_skill_names, skill_mode, skill_workspace, identity_cfg) = {
         let config_guard = state.config.lock();
         let skills = crate::skills::load_skills_with_config(
             &config_guard.workspace_dir,
@@ -225,29 +225,70 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         );
         let names: std::collections::HashSet<String> =
             skills.iter().map(|s| s.name.clone()).collect();
-        let prompt = crate::channels::build_system_prompt_with_mode(
-            &config_guard.workspace_dir,
-            &state.model,
-            &[],
-            &skills,
-            Some(&config_guard.identity),
-            None,
-            false,
-            config_guard.skills.prompt_injection_mode,
-        );
-        (prompt, names)
+        let mode = config_guard.skills.prompt_injection_mode;
+        let ws_dir = config_guard.workspace_dir.clone();
+        let identity = config_guard.identity.clone();
+        (skills, names, mode, ws_dir, identity)
     };
 
     // Track known skills for hot-reload detection
     let mut known_skill_names = initial_skill_names;
 
-    // Add system message to history
-    history.push(ChatMessage::system(&system_prompt));
-
     let approval_manager = {
         let config_guard = state.config.lock();
         ApprovalManager::from_config(&config_guard.autonomy)
     };
+
+    // Capsule store for archiving pre-compact conversation context
+    let capsule_store: Option<std::sync::Arc<crate::memory::capsules::CapsuleStore>> = {
+        let config_guard = state.config.lock();
+        match crate::memory::capsules::CapsuleStore::new(&config_guard.workspace_dir) {
+            Ok(store) => Some(std::sync::Arc::new(store)),
+            Err(e) => {
+                eprintln!("[capsule] Failed to initialize capsule store: {e}");
+                None
+            }
+        }
+    };
+
+    // Embedding provider for semantic search (capsules + skill matching)
+    let embedding_provider: Option<std::sync::Arc<dyn crate::memory::embeddings::EmbeddingProvider>> = {
+        let config_guard = state.config.lock();
+        let mem_cfg = &config_guard.memory;
+        let name = mem_cfg.embedding_provider.trim();
+        if !name.is_empty() && name != "none" {
+            Some(std::sync::Arc::from(
+                crate::memory::embeddings::create_embedding_provider(
+                    name,
+                    config_guard.api_key.as_deref(),
+                    &mem_cfg.embedding_model,
+                    mem_cfg.embedding_dimensions,
+                ),
+            ))
+        } else {
+            None
+        }
+    };
+
+    // Pre-compute skill embeddings for per-turn semantic matching
+    if let Some(ref emb) = embedding_provider {
+        crate::skills::compute_skill_embeddings(&mut all_skills, emb.as_ref()).await;
+    }
+
+    // Build initial system prompt with all skills
+    let system_prompt = crate::channels::build_system_prompt_with_mode(
+        &skill_workspace,
+        &state.model,
+        &[],
+        &all_skills,
+        Some(&identity_cfg),
+        None,
+        false,
+        skill_mode,
+    );
+
+    // Add system message to history
+    history.push(ChatMessage::system(&system_prompt));
 
     let mut cron_rx = state.event_tx.subscribe();
     // When a user sends a follow-up message while the agent loop is running,
@@ -362,6 +403,55 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             }
         }
 
+        // ── Per-turn semantic skill routing ─────────────────────────
+        // Embed the user message and inject only semantically relevant skills.
+        // Threshold-driven: 0 skills if nothing matches, N skills if N match.
+        if !all_skills.is_empty() {
+            if let Some(ref emb) = embedding_provider {
+                match emb.embed_one(&content).await {
+                    Ok(query_vec) => {
+                        let indices = crate::skills::select_relevant_skills(
+                            &all_skills, &query_vec, 0.5,
+                        );
+                        // Only rebuild if we actually filtered (fewer than all skills)
+                        if indices.len() < all_skills.len() {
+                            let filtered: Vec<crate::skills::Skill> =
+                                indices.iter().map(|&i| all_skills[i].clone()).collect();
+                            tracing::info!(
+                                "[skills] semantic routing: {}/{} skills matched for this turn",
+                                filtered.len(),
+                                all_skills.len(),
+                            );
+                            let new_prompt = crate::channels::build_system_prompt_with_mode(
+                                &skill_workspace,
+                                &state.model,
+                                &[],
+                                &filtered,
+                                Some(&identity_cfg),
+                                None,
+                                false,
+                                skill_mode,
+                            );
+                            if let Some(sys_msg) = history.first_mut() {
+                                if sys_msg.role == "system" {
+                                    sys_msg.content = new_prompt;
+                                }
+                            }
+                        } else {
+                            tracing::info!(
+                                "[skills] semantic routing: all {}/{} skills matched (no filtering), threshold may be too low",
+                                indices.len(),
+                                all_skills.len(),
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("[skills] failed to embed user message, using all skills: {e}");
+                    }
+                }
+            }
+        }
+
         // Add user message to history
         history.push(ChatMessage::user(&content));
 
@@ -464,7 +554,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             Ok(response) => {
                 let safe_response =
                     finalize_ws_response(&response, &history, state.tools_registry_exec.as_ref());
-                history.push(ChatMessage::assistant(&safe_response));
+                // The agent loop already pushes assistant messages to history
+                // (loop_.rs:968 for no-tool, loop_.rs:1379 for tool-call).
+                // Do NOT push again here to avoid duplicate assistant messages.
 
                 let (_total_input, total_output) = usage_observer.totals();
                 let last_input = usage_observer.last_input();
@@ -509,6 +601,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     state.max_history_messages,
                     last_input_for_compaction,
                     state.max_context_tokens,
+                    capsule_store.as_ref(),
+                    plaw_session_id.as_deref(),
+                    embedding_provider.as_ref(),
                 ).await {
                     trim_history(&mut history, state.max_history_messages);
                     let remaining_tokens = crate::agent::loop_::history::estimate_history_tokens(&history);
@@ -531,7 +626,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
 
                 // ── Skills hot-reload: detect newly installed skills ──
-                let (current_skills, skill_mode, skill_workspace) = {
+                let (current_skills, reload_skill_mode, reload_skill_workspace) = {
                     let cg = state.config.lock();
                     let skills = crate::skills::load_skills_with_config(&cg.workspace_dir, &cg);
                     let mode = cg.skills.prompt_injection_mode;
@@ -539,7 +634,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     (skills, mode, ws_dir)
                 }; // lock released here
 
-                let new_skills: Vec<_> = current_skills
+                let mut new_skills: Vec<_> = current_skills
                     .into_iter()
                     .filter(|s| !known_skill_names.contains(&s.name))
                     .collect();
@@ -548,10 +643,15 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     let new_names: Vec<&str> = new_skills.iter().map(|s| s.name.as_str()).collect();
                     tracing::info!("ws_chat: detected {} new skill(s): {:?}", new_skills.len(), new_names);
 
+                    // Compute embeddings for new skills (for per-turn semantic filtering)
+                    if let Some(ref emb) = embedding_provider {
+                        crate::skills::compute_skill_embeddings(&mut new_skills, emb.as_ref()).await;
+                    }
+
                     let snippet = crate::skills::skills_to_prompt_with_mode(
                         &new_skills,
-                        &skill_workspace,
-                        skill_mode,
+                        &reload_skill_workspace,
+                        reload_skill_mode,
                     );
 
                     // Inject system message so AI knows about new skills
@@ -563,12 +663,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     );
                     history.push(ChatMessage::system(&reload_msg));
 
-                    // Update known set
+                    // Update known set and all_skills for semantic matching
                     for skill in &new_skills {
                         known_skill_names.insert(skill.name.clone());
                     }
 
-                    // Notify frontend
+                    // Notify frontend (before consuming new_skills)
                     let reload_event = serde_json::json!({
                         "type": "skills_reloaded",
                         "new_skills": new_skills.iter().map(|s| {
@@ -580,6 +680,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         "total_skills": known_skill_names.len(),
                     });
                     let _ = ws_tx.send(Message::Text(reload_event.to_string().into())).await;
+
+                    // Add new skills to the session's skill pool
+                    all_skills.extend(new_skills);
                 }
 
                 } // end ws_alive else

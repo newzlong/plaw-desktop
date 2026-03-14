@@ -14,7 +14,9 @@
       "../plaw-data/libreoffice-bundle.tar.gz": "plaw-data/libreoffice-bundle.tar.gz",
       "../plaw-data/skills-bundle.tar.gz": "plaw-data/skills-bundle.tar.gz",
       "../plaw-data/node-modules-bundle.tar.gz": "plaw-data/node-modules-bundle.tar.gz",
-      "../plaw-data/poppler-bundle.tar.gz": "plaw-data/poppler-bundle.tar.gz"
+      "../plaw-data/poppler-bundle.tar.gz": "plaw-data/poppler-bundle.tar.gz",
+      "../plaw-data/pwsh-bundle.tar.gz": "plaw-data/pwsh-bundle.tar.gz",
+      "../plaw-data/cli-bundle.tar.gz": "plaw-data/cli-bundle.tar.gz"
     }
   }
 }

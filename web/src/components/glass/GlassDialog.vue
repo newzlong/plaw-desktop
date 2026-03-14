@@ -47,7 +47,7 @@ function close() { if (props.closable) emit('update:modelValue', false) }
   backdrop-filter: blur(4px);
 }
 .glass-dialog__panel {
-  background: var(--bg-surface);
+  background: var(--bg-overlay);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
   width: 90%;

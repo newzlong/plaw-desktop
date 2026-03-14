@@ -25,11 +25,11 @@
 
 /* ====== DARK THEME ====== */
 .app-dark {
-  --bg-base: #0A1628;
-  --bg-raised: #111D33;
+  --bg-base: #0f172a;
+  --bg-raised: #111d33;
   --bg-surface: #162240;
-  --bg-surface-hover: #1C2B4F;
-  --bg-overlay: rgba(10, 22, 40, 0.92);
+  --bg-surface-hover: #1c2b4f;
+  --bg-overlay: #0a1628ee;
 
   --border-subtle: rgba(255, 255, 255, 0.08);
   --border-default: rgba(255, 255, 255, 0.12);
@@ -44,15 +44,15 @@
   --shadow-card-hover: 0 8px 24px rgba(0, 0, 0, 0.4);
   --shadow-glow: 0 0 20px rgba(255, 77, 42, 0.2);
 
-  --input-bg: #0B1220;
+  --input-bg: #0b1220;
   --input-border: rgba(255, 255, 255, 0.15);
   --input-focus-border: var(--plaw-primary);
   --input-focus-shadow: 0 0 0 3px rgba(255, 77, 42, 0.2);
 
-  --sidebar-bg: rgba(17, 29, 51, 0.85);
+  --sidebar-bg: #111d33;
   --sidebar-border: rgba(255, 255, 255, 0.06);
 
-  --card-bg: #111D33;
+  --card-bg: #111d33;
 
   --status-ok: #22C55E;
   --status-err: #EF4444;
@@ -62,34 +62,34 @@
 
 /* ====== LIGHT THEME ====== */
 .app-light {
-  --bg-base: #F5F0EB;
-  --bg-raised: #FFFFFF;
-  --bg-surface: #FFFFFF;
-  --bg-surface-hover: #FFF7F5;
-  --bg-overlay: rgba(255, 255, 255, 0.95);
+  --bg-base: #f1f5f9;
+  --bg-raised: #ffffff;
+  --bg-surface: #ffffff;
+  --bg-surface-hover: #fff7f5;
+  --bg-overlay: #ffffffee;
 
-  --border-subtle: rgba(0, 0, 0, 0.06);
-  --border-default: rgba(0, 0, 0, 0.1);
-  --border-strong: rgba(0, 0, 0, 0.18);
+  --border-subtle: rgba(0, 0, 0, 0.08);
+  --border-default: rgba(0, 0, 0, 0.13);
+  --border-strong: rgba(0, 0, 0, 0.22);
 
   --text-primary: #1A1A2E;
-  --text-secondary: #64748B;
-  --text-muted: #94A3B8;
+  --text-secondary: #475569;
+  --text-muted: #64748B;
   --text-inverse: #FFFFFF;
 
-  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.06), 0 2px 8px rgba(0, 0, 0, 0.04);
-  --shadow-card-hover: 0 4px 16px rgba(255, 77, 42, 0.08), 0 2px 6px rgba(0, 0, 0, 0.06);
+  --shadow-card: 0 1px 4px rgba(0, 0, 0, 0.08), 0 2px 8px rgba(0, 0, 0, 0.05);
+  --shadow-card-hover: 0 4px 16px rgba(255, 77, 42, 0.1), 0 2px 6px rgba(0, 0, 0, 0.08);
   --shadow-glow: 0 0 20px rgba(255, 77, 42, 0.12);
 
-  --input-bg: #EFF1F5;
-  --input-border: #C8CDD5;
+  --input-bg: #eff1f5;
+  --input-border: rgba(0, 0, 0, 0.15);
   --input-focus-border: var(--plaw-primary);
   --input-focus-shadow: 0 0 0 3px rgba(255, 77, 42, 0.12);
 
-  --sidebar-bg: rgba(255, 255, 255, 0.8);
-  --sidebar-border: rgba(0, 0, 0, 0.06);
+  --sidebar-bg: #ffffff;
+  --sidebar-border: rgba(0, 0, 0, 0.08);
 
-  --card-bg: #FFFFFF;
+  --card-bg: #ffffff;
 
   --status-ok: #16A34A;
   --status-err: #DC2626;

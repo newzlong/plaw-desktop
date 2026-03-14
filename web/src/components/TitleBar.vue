@@ -73,7 +73,7 @@ onUnmounted(() => {
   justify-content: space-between;
   height: 32px;
   flex-shrink: 0;
-  background: var(--card-bg);
+  background: transparent;
   border-bottom: 1px solid var(--border-subtle);
   user-select: none;
   -webkit-app-region: drag;
