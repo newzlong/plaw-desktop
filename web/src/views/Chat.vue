@@ -99,6 +99,10 @@
                     <div v-for="(p, pi) in step.progress" :key="pi" class="step-tool__progress-line">{{ p }}</div>
                   </div>
                 </div>
+                <!-- Intermediate text step (AI text between tool calls) -->
+                <div v-else-if="step.type === 'text'" class="step-text">
+                  <span v-html="renderMarkdown(step.content)" />
+                </div>
               </div>
             </div>
             <!-- User attached images -->
@@ -155,9 +159,9 @@
             <button class="attach-btn" :disabled="connStatus !== 'connected'" @click="fileInputRef?.click()" :title="isZh ? '添加文件' : 'Attach file'">
               <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M14 10l-4.5-4.5a2.12 2.12 0 0 0-3 3L11 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M11 13l1.5-1.5a3.18 3.18 0 0 0-4.5-4.5L2 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
             </button>
-            <div class="context-indicator" :title="contextTooltip">
+            <div class="context-indicator" :class="{ 'context-indicator--clickable': canManualCompact }" :title="compactTooltip" @click="manualCompact">
               <span class="context-dot" :class="contextDotClass" />
-              <span class="context-text">{{ Math.round(contextPercent) }}% used</span>
+              <span class="context-text">{{ compacting ? (isZh ? '压缩中...' : 'Compacting...') : Math.round(contextPercent) + '% used' }}</span>
             </div>
           </div>
           <button
@@ -252,6 +256,7 @@ const appIsZh = inject('isZh', computed(() => false))
 const messages = ref([])
 const inputText = ref('')
 const streaming = ref(false)
+const compacting = ref(false)
 // WebSocket-level connection status
 const wsConnected = ref(false)
 const messagesRef = ref(null)
@@ -325,6 +330,28 @@ const contextTooltip = computed(() => {
     : `Context usage ${p}% (${contextLabel.value} tokens)`
 })
 
+const canManualCompact = computed(() => {
+  return connStatus.value === 'connected' && !streaming.value && !compacting.value && messages.value.length > 2
+})
+
+const compactTooltip = computed(() => {
+  if (compacting.value) return isZh.value ? '正在压缩上下文...' : 'Compacting context...'
+  if (!canManualCompact.value) return contextTooltip.value
+  return isZh.value
+    ? `${contextTooltip.value}\n点击压缩上下文并归档到胶囊记忆`
+    : `${contextTooltip.value}\nClick to compact context and archive to capsule memory`
+})
+
+function manualCompact() {
+  if (!canManualCompact.value) return
+  compacting.value = true
+  try {
+    ws.send(JSON.stringify({ type: 'manual_compact', session_id: currentSessionId.value || undefined }))
+  } catch {
+    compacting.value = false
+  }
+}
+
 // Typewriter buffer: content arrives in targetContent, displayLen advances per frame
 let targetContent = ''
 let displayLen = 0
@@ -367,6 +394,17 @@ function flushTypewriter() {
 function resetTypewriter() {
   if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null }
   pendingFinalize = null
+  targetContent = ''
+  displayLen = 0
+}
+
+/** If there's accumulated chunk text, convert it to a text step (for mid-loop text between tools) */
+function flushTextToStep() {
+  if (!targetContent.trim()) return
+  // Instantly display all remaining text
+  if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null }
+  currentAssistant.value.steps.push({ type: 'text', content: targetContent })
+  currentAssistant.value.content = ''
   targetContent = ''
   displayLen = 0
 }
@@ -525,7 +563,7 @@ function generateTitle() {
 /** Save current session to disk. If quiet=true, skip refreshing the session list. */
 async function autoSave(quiet = false) {
   const saveable = messages.value.filter(m =>
-    m.role === 'user' || (m.role === 'assistant' && m.content) || m.role === 'system'
+    m.role === 'user' || (m.role === 'assistant' && (m.content || (m.steps && m.steps.length))) || m.role === 'system'
   )
   if (saveable.length === 0) return
 
@@ -793,6 +831,8 @@ function handleWsMessage(data) {
   if (!streaming.value) return
 
   if (type === 'thinking') {
+    // If there's accumulated text before this thinking, save it as a text step
+    flushTextToStep()
     const steps = currentAssistant.value.steps
     const last = steps[steps.length - 1]
     // Consecutive thinking messages update the same step
@@ -810,6 +850,8 @@ function handleWsMessage(data) {
       animFrame = requestAnimationFrame(tickTypewriter)
     }
   } else if (type === 'tool_call' || type === 'tool_call_start') {
+    // If there's accumulated text before this tool call, save it as a text step
+    flushTextToStep()
     currentAssistant.value.steps.push({
       type: 'tool',
       name: data.name || 'unknown',
@@ -869,12 +911,14 @@ function handleWsMessage(data) {
       animFrame = requestAnimationFrame(tickTypewriter)
     }
   } else if (type === 'compacted') {
-    // Context was auto-compacted — update progress bar with post-compaction estimate
+    // Context was compacted (auto or manual) — update progress bar
+    compacting.value = false
     if (data.estimated_tokens) contextUsed.value = data.estimated_tokens
     const hasPending = data.has_pending_tasks
+    const isManual = data.manual
     const notice = isZh.value
-      ? `上下文已自动压缩（剩余 ${data.remaining_messages} 条消息，约 ${Math.round((data.estimated_tokens || 0) / 1000)}K tokens）${hasPending ? '\n检测到未完成的任务，正在自动继续...' : ''}`
-      : `Context auto-compacted (${data.remaining_messages} messages remaining, ~${Math.round((data.estimated_tokens || 0) / 1000)}K tokens)${hasPending ? '\nPending tasks detected, auto-continuing...' : ''}`
+      ? `上下文已${isManual ? '手动' : '自动'}压缩（剩余 ${data.remaining_messages} 条消息，约 ${Math.round((data.estimated_tokens || 0) / 1000)}K tokens）${hasPending ? '\n检测到未完成的任务，正在自动继续...' : ''}`
+      : `Context ${isManual ? 'manually' : 'auto-'}compacted (${data.remaining_messages} messages remaining, ~${Math.round((data.estimated_tokens || 0) / 1000)}K tokens)${hasPending ? '\nPending tasks detected, auto-continuing...' : ''}`
     messages.value.push({ role: 'system', content: notice })
     scrollToBottom()
     // Auto-continue if there are pending tasks (wait for typewriter/streaming to finish)
@@ -923,7 +967,7 @@ async function confirmRollback() {
   }
   // If all messages were rolled back, delete the session file
   const hasContent = messages.value.some(m =>
-    m.role === 'user' || (m.role === 'assistant' && m.content)
+    m.role === 'user' || (m.role === 'assistant' && (m.content || (m.steps && m.steps.length)))
   )
   if (!hasContent && currentSessionId.value) {
     await deleteSession(currentSessionId.value)
@@ -1099,8 +1143,17 @@ function doSendAfterInterrupt(text) {
 function actuallySendWs(text) {
   // Build history for Plaw context restore
   const history = messages.value.slice(0, -1)
-    .filter(m => m.role === 'user' || (m.role === 'assistant' && m.content))
-    .map(m => ({ role: m.role, content: m.content }))
+    .filter(m => m.role === 'user' || (m.role === 'assistant' && (m.content || (m.steps && m.steps.some(s => s.type === 'text')))))
+    .map(m => {
+      // Merge text steps back into content for history
+      let content = m.content || ''
+      if (m.steps) {
+        const textParts = m.steps.filter(s => s.type === 'text').map(s => s.content)
+        if (textParts.length && content) content = textParts.join('\n\n') + '\n\n' + content
+        else if (textParts.length) content = textParts.join('\n\n')
+      }
+      return { role: m.role, content }
+    })
 
   try {
     ws.send(JSON.stringify({
@@ -1787,6 +1840,14 @@ onUnmounted(() => {
   opacity: 0.5;
 }
 
+/* Intermediate text step (AI text between tool calls) */
+.step-text {
+  padding: 6px 0;
+  font-size: 0.88rem;
+  line-height: 1.6;
+  color: var(--text-primary);
+}
+
 .step-tool__body {
   padding: 0 10px 8px;
   display: flex;
@@ -1979,6 +2040,15 @@ onUnmounted(() => {
   align-items: center;
   gap: 6px;
   cursor: default;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: background 0.2s;
+}
+.context-indicator--clickable {
+  cursor: pointer;
+}
+.context-indicator--clickable:hover {
+  background: rgba(255,255,255,0.06);
 }
 .context-dot {
   width: 7px; height: 7px;

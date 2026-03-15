@@ -152,21 +152,27 @@ async function save() {
       ...cfg.autonomy,
       level: form.level,
       workspace_only: form.workspaceOnly,
-      allowed_commands: form.allowedCommands || [],
+      allowed_commands: form.level === 'full' ? ['*'] : (form.allowedCommands || []),
       forbidden_paths: form.forbiddenPaths || [],
       max_actions_per_hour: cfg.autonomy?.max_actions_per_hour || 1000,
       max_cost_per_day_cents: cfg.autonomy?.max_cost_per_day_cents || 10000,
     }
 
-    // Sync network/tool permissions based on autonomy level
+    // Sync all config sections based on autonomy level
     if (form.level === 'full') {
       cfg.autonomy.block_high_risk_commands = false
-      cfg.autonomy.non_cli_excluded_tools = []  // Allow all tools including shell via WebSocket
+      cfg.autonomy.require_approval_for_medium_risk = false
+      cfg.autonomy.non_cli_excluded_tools = []
       cfg.web_fetch = { ...cfg.web_fetch, allowed_domains: ['*'], enabled: true }
       cfg.http_request = { ...cfg.http_request, allowed_domains: ['*'], allow_local: true, enabled: true }
       cfg.browser = { ...cfg.browser, enabled: true, allowed_domains: ['*'] }
+      // Full mode: no iteration limit
+      cfg.agent = { ...cfg.agent }
+      delete cfg.agent.max_tool_iterations  // let code default to unlimited
+      cfg.skills = { ...cfg.skills, prompt_injection_mode: 'compact' }
     } else if (form.level === 'supervised') {
       cfg.autonomy.block_high_risk_commands = true
+      cfg.autonomy.require_approval_for_medium_risk = true
       cfg.autonomy.non_cli_excluded_tools = [
         'shell', 'file_write', 'file_edit', 'git_operations',
         'browser', 'browser_open', 'memory_forget',
@@ -174,9 +180,13 @@ async function save() {
       cfg.web_fetch = { ...cfg.web_fetch, allowed_domains: ['*'], enabled: true }
       cfg.http_request = { ...cfg.http_request, allowed_domains: ['localhost', '127.0.0.1'], allow_local: true, enabled: true }
       cfg.browser = { ...cfg.browser, enabled: false }
+      // Supervised: moderate iteration limit
+      cfg.agent = { ...cfg.agent, max_tool_iterations: 200 }
+      cfg.skills = { ...cfg.skills, prompt_injection_mode: 'compact' }
     } else {
       // readonly
       cfg.autonomy.block_high_risk_commands = true
+      cfg.autonomy.require_approval_for_medium_risk = true
       cfg.autonomy.non_cli_excluded_tools = [
         'shell', 'file_write', 'file_edit', 'git_operations',
         'browser', 'browser_open', 'http_request',
@@ -186,6 +196,9 @@ async function save() {
       cfg.web_fetch = { ...cfg.web_fetch, allowed_domains: [], enabled: false }
       cfg.http_request = { ...cfg.http_request, allowed_domains: [], allow_local: false, enabled: false }
       cfg.browser = { ...cfg.browser, enabled: false, allowed_domains: [] }
+      // ReadOnly: lower iteration limit, compact skill injection
+      cfg.agent = { ...cfg.agent, max_tool_iterations: 50 }
+      cfg.skills = { ...cfg.skills, prompt_injection_mode: 'compact' }
     }
 
     await writeConfig(cfg)

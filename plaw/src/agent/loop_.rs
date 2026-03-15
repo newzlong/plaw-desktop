@@ -59,9 +59,18 @@ const MAX_SAME_TOOL_PER_TURN: usize = 6;
 /// Tools exempt from per-turn frequency limits.
 /// Browser automation naturally requires many sequential calls (open → snapshot → click → wait → ...).
 /// File operations (reading/writing multiple files) are also normal in complex tasks.
+/// Shell and delegate tools are also exempt since complex tasks (e.g. PPT generation) need many calls.
 const ANTI_LOOP_EXEMPT_TOOLS: &[&str] = &[
-    "browser",
-    "read_file", "write_file", "edit_file", "list_dir",
+    // File operations — multi-file generation (e.g. 10 HTML slides → PPT)
+    "file_read", "file_write", "file_edit", "glob_search", "content_search",
+    // Shell — complex tasks chain many commands
+    "shell",
+    // Browser — navigation requires many sequential calls
+    "browser", "browser_open", "screenshot",
+    // Delegation — parallel/sub-agent orchestration
+    "delegate", "parallel_delegate",
+    // Web — research tasks may fetch many pages
+    "web_fetch", "http_request",
 ];
 
 /// Tools that return external (untrusted) content which may contain prompt injection.
@@ -2036,6 +2045,7 @@ pub async fn run(
                 None, // No capsule store in CLI mode
                 None, // No session_id in CLI mode
                 None, // No embedding provider in CLI mode
+                false, // not forced
             )
             .await
             {

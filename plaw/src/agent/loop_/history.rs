@@ -346,6 +346,7 @@ pub(crate) async fn auto_compact_history(
     capsule_store: Option<&Arc<CapsuleStore>>,
     session_id: Option<&str>,
     embedding_provider: Option<&Arc<dyn EmbeddingProvider>>,
+    force: bool,
 ) -> Result<bool> {
     let has_system = history.first().map_or(false, |m| m.role == "system");
     let non_system_count = if has_system {
@@ -354,12 +355,14 @@ pub(crate) async fn auto_compact_history(
         history.len()
     };
 
-    let trigger_by_count = non_system_count > max_history;
-    let trigger_by_tokens =
-        should_compact_by_tokens(history, last_input_tokens, max_context_tokens);
+    if !force {
+        let trigger_by_count = non_system_count > max_history;
+        let trigger_by_tokens =
+            should_compact_by_tokens(history, last_input_tokens, max_context_tokens);
 
-    if !trigger_by_count && !trigger_by_tokens {
-        return Ok(false);
+        if !trigger_by_count && !trigger_by_tokens {
+            return Ok(false);
+        }
     }
 
     let start = if has_system { 1 } else { 0 };

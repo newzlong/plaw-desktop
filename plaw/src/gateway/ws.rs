@@ -331,6 +331,66 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         };
 
         let msg_type = parsed["type"].as_str().unwrap_or("");
+
+        // ── Manual compact request ──
+        if msg_type == "manual_compact" {
+            tracing::info!("ws_chat: manual compact requested");
+            let estimated = crate::agent::loop_::history::estimate_history_tokens(&history);
+            let last_input_for_compaction = if estimated > 0 { Some(estimated as u64) } else { None };
+            let compact_session_id = parsed["session_id"].as_str().map(str::to_string);
+            match auto_compact_history(
+                &mut history,
+                state.provider.as_ref(),
+                &state.model,
+                state.max_history_messages,
+                last_input_for_compaction,
+                state.max_context_tokens,
+                capsule_store.as_ref(),
+                compact_session_id.as_deref(),
+                embedding_provider.as_ref(),
+                true, // force
+            ).await {
+                Ok(true) => {
+                    trim_history(&mut history, state.max_history_messages);
+                    let remaining_tokens = crate::agent::loop_::history::estimate_history_tokens(&history);
+                    let has_pending = history.iter().any(|m| {
+                        m.content.starts_with("[Compaction summary]")
+                            && summary_has_pending_tasks(&m.content)
+                    });
+                    let event = serde_json::json!({
+                        "type": "compacted",
+                        "remaining_messages": history.len(),
+                        "estimated_tokens": remaining_tokens,
+                        "has_pending_tasks": has_pending,
+                        "manual": true,
+                    });
+                    let _ = ws_tx.send(Message::Text(event.to_string().into())).await;
+                    tracing::info!("ws_chat: manual compaction done (remaining={})", history.len());
+                }
+                Ok(false) => {
+                    // Nothing to compact (too few messages)
+                    let event = serde_json::json!({
+                        "type": "compacted",
+                        "remaining_messages": history.len(),
+                        "estimated_tokens": crate::agent::loop_::history::estimate_history_tokens(&history),
+                        "has_pending_tasks": false,
+                        "manual": true,
+                        "skipped": true,
+                    });
+                    let _ = ws_tx.send(Message::Text(event.to_string().into())).await;
+                }
+                Err(e) => {
+                    tracing::error!("ws_chat: manual compaction failed: {e}");
+                    let event = serde_json::json!({
+                        "type": "error",
+                        "message": format!("Compact failed: {e}"),
+                    });
+                    let _ = ws_tx.send(Message::Text(event.to_string().into())).await;
+                }
+            }
+            continue;
+        }
+
         if msg_type != "message" {
             continue;
         }
@@ -604,6 +664,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     capsule_store.as_ref(),
                     plaw_session_id.as_deref(),
                     embedding_provider.as_ref(),
+                    false, // not forced
                 ).await {
                     trim_history(&mut history, state.max_history_messages);
                     let remaining_tokens = crate::agent::loop_::history::estimate_history_tokens(&history);

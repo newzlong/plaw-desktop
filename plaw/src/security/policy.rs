@@ -742,39 +742,48 @@ impl SecurityPolicy {
             return false;
         }
 
-        // Block subshell/expansion operators — these allow hiding arbitrary
-        // commands inside an allowed command (e.g. `echo $(rm -rf /)`) and
-        // bypassing path checks through variable indirection. The helper below
-        // ignores escapes and literals inside single quotes, so `$(` or `${`
-        // literals are permitted there.
-        if command.contains('`')
-            || contains_unquoted_shell_variable_expansion(command)
-            || command.contains("<(")
-            || command.contains(">(")
-        {
-            return false;
-        }
+        // In Full autonomy with wildcard allowlist, the user has explicitly chosen
+        // to trust the agent with all commands. Skip shell-syntax restrictions
+        // (redirects, variable expansion, tee, etc.) that are designed for
+        // server/supervised deployments. Still block empty commands.
+        let full_wildcard = self.autonomy == AutonomyLevel::Full
+            && self.allowed_commands.iter().any(|c| c == "*");
 
-        // Block shell redirections (`<`, `>`, `>>`) — they can read/write
-        // arbitrary paths and bypass path checks.
-        // Ignore quoted literals, e.g. `echo "a>b"` and `echo "a<b"`.
-        if contains_unquoted_char(command, '>') || contains_unquoted_char(command, '<') {
-            return false;
-        }
+        if !full_wildcard {
+            // Block subshell/expansion operators — these allow hiding arbitrary
+            // commands inside an allowed command (e.g. `echo $(rm -rf /)`) and
+            // bypassing path checks through variable indirection. The helper below
+            // ignores escapes and literals inside single quotes, so `$(` or `${`
+            // literals are permitted there.
+            if command.contains('`')
+                || contains_unquoted_shell_variable_expansion(command)
+                || command.contains("<(")
+                || command.contains(">(")
+            {
+                return false;
+            }
 
-        // Block `tee` — it can write to arbitrary files, bypassing the
-        // redirect check above (e.g. `echo secret | tee /etc/crontab`)
-        if command
-            .split_whitespace()
-            .any(|w| w == "tee" || w.ends_with("/tee"))
-        {
-            return false;
-        }
+            // Block shell redirections (`<`, `>`, `>>`) — they can read/write
+            // arbitrary paths and bypass path checks.
+            // Ignore quoted literals, e.g. `echo "a>b"` and `echo "a<b"`.
+            if contains_unquoted_char(command, '>') || contains_unquoted_char(command, '<') {
+                return false;
+            }
 
-        // Block background command chaining (`&`), which can hide extra
-        // sub-commands and outlive timeout expectations. Keep `&&` allowed.
-        if contains_unquoted_single_ampersand(command) {
-            return false;
+            // Block `tee` — it can write to arbitrary files, bypassing the
+            // redirect check above (e.g. `echo secret | tee /etc/crontab`)
+            if command
+                .split_whitespace()
+                .any(|w| w == "tee" || w.ends_with("/tee"))
+            {
+                return false;
+            }
+
+            // Block background command chaining (`&`), which can hide extra
+            // sub-commands and outlive timeout expectations. Keep `&&` allowed.
+            if contains_unquoted_single_ampersand(command) {
+                return false;
+            }
         }
 
         // Split on unquoted command separators and validate each sub-command.
@@ -799,10 +808,13 @@ impl SecurityPolicy {
                 return false;
             }
 
-            // Validate arguments for the command
-            let args: Vec<String> = words.map(|w| w.to_ascii_lowercase()).collect();
-            if !self.is_args_safe(base_cmd, &args) {
-                return false;
+            // In full wildcard mode, skip argument validation (user trusts the agent)
+            if !full_wildcard {
+                // Validate arguments for the command
+                let args: Vec<String> = words.map(|w| w.to_ascii_lowercase()).collect();
+                if !self.is_args_safe(base_cmd, &args) {
+                    return false;
+                }
             }
         }
 

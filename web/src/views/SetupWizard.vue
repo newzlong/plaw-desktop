@@ -232,17 +232,31 @@ async function finish() {
     cfg.autonomy = {
       level: form.value.autonomy,
       workspace_only: form.value.autonomy !== 'full',
-      allowed_commands: [],
+      allowed_commands: form.value.autonomy === 'full' ? ['*'] : [],
       forbidden_paths: [],
+      block_high_risk_commands: form.value.autonomy !== 'full',
+      require_approval_for_medium_risk: form.value.autonomy !== 'full',
       max_actions_per_hour: 1000,
       max_cost_per_day_cents: 10000,
+    }
+    // Agent & skills config based on autonomy level
+    if (form.value.autonomy === 'full') {
+      cfg.agent = { ...cfg.agent }
+      delete cfg.agent.max_tool_iterations  // unlimited
+      cfg.skills = { ...cfg.skills, prompt_injection_mode: 'compact' }
+    } else if (form.value.autonomy === 'supervised') {
+      cfg.agent = { ...cfg.agent, max_tool_iterations: 200 }
+      cfg.skills = { ...cfg.skills, prompt_injection_mode: 'compact' }
+    } else {
+      cfg.agent = { ...cfg.agent, max_tool_iterations: 50 }
+      cfg.skills = { ...cfg.skills, prompt_injection_mode: 'compact' }
     }
     // Tool configs — enable web search and fetch by default
     cfg.web_search = {
       enabled: true,
       provider: 'bing',
       max_results: 5,
-      timeout_secs: 15,
+      timeout_secs: 30,
     }
     cfg.web_fetch = {
       enabled: true,
