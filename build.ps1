@@ -1,5 +1,7 @@
 # Plaw Desktop - Production build
-# Usage: .\build.ps1
+# Usage: .\build.ps1            — full build (compile Plaw + package)
+#        .\build.ps1 -NoPlaw    — skip Plaw compilation (use your own plaw.exe)
+param([switch]$NoPlaw)
 
 Write-Host "=== Plaw Desktop Build ===" -ForegroundColor Cyan
 
@@ -15,6 +17,29 @@ if (-not (Test-Path "web/node_modules")) {
     Push-Location web
     pnpm install
     Pop-Location
+}
+
+# ---- Build Plaw engine (skip with -NoPlaw) ----
+if ($NoPlaw) {
+    Write-Host "Skipping Plaw engine build (-NoPlaw)" -ForegroundColor DarkGray
+    if (-not (Test-Path "plaw-data/bin/plaw.exe")) {
+        Write-Host "WARNING: plaw-data/bin/plaw.exe not found! Place your own build there." -ForegroundColor Red
+    }
+} else {
+    Write-Host "Building Plaw engine (release)..." -ForegroundColor Yellow
+    Push-Location plaw
+    cargo build --release
+    Pop-Location
+
+    $builtExe = "plaw/target/release/plaw.exe"
+    if (Test-Path $builtExe) {
+        Remove-Item -Force "plaw-data/bin/plaw.exe" -ErrorAction SilentlyContinue
+        Copy-Item $builtExe "plaw-data/bin/plaw.exe"
+        Write-Host "Plaw engine deployed to plaw-data/bin/plaw.exe" -ForegroundColor Green
+    } else {
+        Write-Host "ERROR: plaw.exe not found after build!" -ForegroundColor Red
+        exit 1
+    }
 }
 
 # ---- (Re)generate all tar.gz bundles every time ----

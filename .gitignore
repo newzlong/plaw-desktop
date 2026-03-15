@@ -24,3 +24,6 @@ plaw-data/
 # Env
 .env
 packages/
+
+# Secrets
+kmkey.txt

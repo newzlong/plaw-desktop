@@ -207,13 +207,16 @@ plaw-desktop/
 ## 编译打包
 
 ```powershell
-# 重新编译 Plaw 引擎
-cd plaw && cargo build --release
-cp plaw/target/release/plaw.exe plaw-data/bin/
-
-# 打包 NSIS 安装程序
+# 完整构建（编译 Plaw 引擎 + 打包安装程序）
 .\build.ps1
+
+# 跳过 Plaw 编译（自己编译 Plaw 的用户）
+.\build.ps1 -NoPlaw
 ```
+
+`build.ps1` 自动完成：编译 Plaw 引擎 → 部署到 plaw-data/bin/ → 生成资源包 → Tauri 打包。
+
+`-NoPlaw` 适合自行编译 Plaw 引擎的用户，手动将 `plaw.exe` 放到 `plaw-data/bin/` 后直接打包。
 
 输出：`src-tauri/target/release/bundle/nsis/plaw-desktop_x.x.x_x64-setup.exe`
 
