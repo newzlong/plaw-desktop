@@ -1,125 +1,127 @@
-**English** | [中文](README_zh.md)
+[English](README_en.md) | **中文**
 
 # Plaw Desktop
 
-**Plaw** — A ready-to-use desktop AI Agent with the built-in [Plaw](plaw/) autonomous agent engine.
+**Plaw** — 开箱即用的桌面 AI Agent，内嵌 [Plaw](plaw/) 自主智能体引擎。
 
-One-click install, enter your API Key, and you have an AI assistant that can control your computer, browse the web, read/write files, and execute code.
+一键安装，填入 API Key，即可拥有一个能操作电脑、浏览网页、读写文件、执行代码的 AI 助手。
 
-> For everyday users — no Docker, Python, or command-line knowledge required. Install and go.
+> 面向普通用户，不需要 Docker、Python、命令行知识。安装即用。
 
-## Acknowledgments
+## 致谢
 
-The Plaw engine is built upon [ZeroClaw](https://github.com/ZeroClaw-AI/ZeroClaw). Thanks to [OpenClaw](https://github.com/OpenClaw-AI) and ZeroClaw for their open-source contributions. The codebase has diverged significantly (embedded desktop app, parallel sub-agents, browser automation, security system, hot-reloading skills, etc.), but Plaw wouldn't exist without ZeroClaw's foundation. Long live open source.
+Plaw 引擎基于 [ZeroClaw](https://github.com/ZeroClaw-AI/ZeroClaw) 改造而来，感谢 [OpenClaw](https://github.com/OpenClaw-AI) 和 ZeroClaw 的开源贡献。
 
-The vast majority of code in this project was co-authored with [Claude](https://claude.ai/) (Anthropic), including the Rust backend, Vue frontend, security policies, skills system, and more. Thanks to Claude as the full-time AI pair-programming partner.
+虽然改到现在代码已经面目全非（内嵌桌面端、并行子 Agent、浏览器自动化、安全防护体系、Skills 热加载……），但没有 ZeroClaw 打下的基础就没有 Plaw。开源精神万岁。
+
+本项目的绝大部分代码由 [Claude](https://claude.ai/)（Anthropic）辅助编写，包括 Rust 后端、Vue 前端、安全策略、Skills 系统等。感谢 Claude 作为全程 AI 结对编程伙伴的贡献。
 
 ---
 
-## Why?
+## 为什么做这个？
 
-Existing AI Agent tools (Claude Code, Cursor, Cline, etc.) are all developer-oriented. Regular users simply can't use them.
+市面上的 AI Agent 工具（Claude Code、Cursor、Cline 等）都面向开发者，普通用户根本用不了。
 
-Plaw's mission: **bring AI Agents to everyone, not just developers.**
+Plaw 要解决的问题：**让不懂技术的人也能用上 AI Agent**。
 
-- No Python / Docker / WSL installation needed
-- No environment variables or config files to set up
-- No command-line knowledge required
-- Install → enter API Key → start using
+- 不需要装 Python / Docker / WSL
+- 不需要配环境变量、改配置文件
+- 不需要懂命令行
+- 安装 → 填 Key → 直接用
 
-## Key Features
+## 核心特性
 
-### AI Capabilities
+### AI 能力
 
-| Feature | Description |
-|---------|-------------|
-| **Autonomous Agent** | AI plans, invokes tools, and reasons through multi-step tasks until completion |
-| **Real-time Interrupt** | Interrupt AI anytime — user messages take priority, AI stops immediately |
-| **File Understanding** | Send images, PDFs, Excel, Word attachments — AI analyzes them directly |
-| **Parallel Execution** | Complex tasks auto-split into parallel sub-agents (parallel_delegate) |
-| **Context Compaction** | Long conversations auto-compressed, saving tokens without losing key info |
-| **Capsule Memory** | Conversations distilled into capsules, AI remembers across sessions |
-| **Agentic Recall** | AI proactively searches past capsules when encountering familiar problems |
-| **Semantic Skill Routing** | Each turn semantically matches the most relevant skills instead of injecting all |
-| **Skills Extension** | Markdown skill packs extend AI capabilities, hot-reloaded without restart |
-| **Streaming Output** | SSE streaming — AI thinking and responses visible in real-time with tool progress |
+| 特性 | 说明 |
+|------|------|
+| **自主 Agent** | AI 自主规划、调用工具、多步推理，直到任务完成 |
+| **实时打断** | 随时发消息打断 AI，用户优先，AI 立即停下响应你 |
+| **文件理解** | 发送图片、PDF、Excel、Word 等附件，AI 直接分析 |
+| **并行执行** | 复杂任务自动拆分为多个子 Agent 并行处理（parallel_delegate） |
+| **上下文压缩** | 长对话自动压缩，不丢关键信息，节省 Token |
+| **胶囊记忆** | 对话自动沉淀为胶囊，AI 跨会话记住你的偏好和历史 |
+| **主动回忆** | AI 遇到似曾相识的问题时，主动搜索历史胶囊辅助回答 |
+| **语义 Skill 路由** | 每轮对话根据语义匹配最相关的 Skills，而非全量注入 |
+| **Skills 扩展** | Markdown 技能包扩展 AI 能力，热加载，无需重启 |
+| **流式输出** | SSE 流式传输，AI 思考和回复实时可见，工具执行带进度提示 |
 
-### Toolbox
+### 工具箱
 
-| Tool | Capability |
-|------|-----------|
-| **Shell** | PowerShell / Bash / Cmd, auto-selects optimal shell |
-| **File Ops** | Read, write, edit, search, directory browsing |
-| **Web Search** | Bing search, direct access in China (no proxy needed) |
-| **Web Fetch** | Fetch any webpage, auto-convert to Markdown |
-| **Browser** | Built-in Chromium, AI can browse and interact with web pages |
-| **HTTP Request** | Connect to any REST API |
-| **Capsule Search** | Vector + keyword hybrid search, cross-session knowledge retrieval |
-| **Office Docs** | AI generates PPTX / DOCX / XLSX / PDF (built-in Office CLI) |
-| **Cron** | Cron expressions, AI runs tasks on schedule |
-| **Git** | Version control |
-| **PDF / Images** | Read PDFs, analyze image content |
+| 工具 | 能力 |
+|------|------|
+| **Shell 执行** | PowerShell / Bash / Cmd，自动选择最优 Shell |
+| **文件操作** | 读、写、编辑、搜索、目录浏览 |
+| **网络搜索** | Bing 搜索，国内直连无需代理 |
+| **网页抓取** | 抓取任意网页内容，自动转 Markdown |
+| **浏览器自动化** | 内置 Chromium，AI 可自主浏览和操作网页 |
+| **API 调用** | HTTP 请求，对接任意 REST API |
+| **胶囊记忆搜索** | 向量 + 关键词混合搜索，跨会话知识检索 |
+| **Office 文档** | AI 生成 PPTX / DOCX / XLSX / PDF（内置 Office CLI） |
+| **定时任务** | Cron 表达式，AI 定时自动执行 |
+| **Git 操作** | 代码版本管理 |
+| **PDF / 图片** | 读取 PDF、分析图片内容 |
 
-### Security
+### 安全防护
 
-| Layer | Mechanism |
-|-------|-----------|
-| **Input Guard** | PromptGuard prompt injection detection |
-| **External Scan** | Auto-flags injection attacks in web/search results |
-| **Anti-Loop** | Repeated tool call detection + iteration limits |
-| **Config Protection** | API Key encrypted locally, sensitive operations blocked |
-| **Skills Audit** | Auto-scans skill files, blocks suspicious scripts and injection patterns |
-| **Privacy First** | All data stored locally, API Key connects directly to provider, no third-party relay |
+| 层级 | 机制 |
+|------|------|
+| **输入防护** | PromptGuard 提示词注入检测 |
+| **外部内容扫描** | 自动标记网页/搜索结果中的注入攻击 |
+| **反死循环** | 同名工具重复调用检测 + 迭代上限 |
+| **配置保护** | API Key 加密存储，敏感操作拦截 |
+| **Skills 安全审计** | 自动扫描 Skill 文件，拦截可疑脚本和注入模式 |
+| **隐私优先** | 所有数据本地存储，API Key 直连厂商，不经第三方 |
 
-### Desktop Experience
+### 桌面体验
 
-| Feature | Description |
-|---------|-------------|
-| **Glassmorphism UI** | Dark theme, custom components, no UI library dependencies |
-| **Portable** | Data stored alongside install directory, USB-portable |
-| **Bilingual** | Chinese and English UI |
-| **Setup Wizard** | First-launch guided setup, beginner-friendly |
-| **Sessions** | Multi-session, history, tool execution steps persisted |
-| **Live Progress** | Tool execution progress shown in real-time |
+| 特性 | 说明 |
+|------|------|
+| **毛玻璃 UI** | Glassmorphism 风格，深色主题，纯自定义组件 |
+| **Portable 模式** | 数据存在安装目录旁，U 盘拷走即用 |
+| **中英双语** | 界面支持中文和英文切换 |
+| **Setup Wizard** | 首次启动引导配置，傻瓜式操作 |
+| **会话管理** | 多会话、历史记录、工具执行步骤持久化 |
+| **实时进度** | 工具执行实时显示进度，不是黑盒 |
 
-## Supported AI Models
+## 支持的 AI 模型
 
-| Provider | Format | Recommended Model | Notes |
-|----------|--------|-------------------|-------|
-| **Kimi Coder** | Anthropic-compatible | k2p5 | Direct access in China, recommended |
-| Anthropic | Native | Claude Sonnet/Opus | Proxy required |
-| OpenAI | Native | GPT-4o | Proxy required |
-| DeepSeek | OpenAI-compatible | DeepSeek-V3 | Direct access in China |
-| Gemini | Native | Gemini Pro | Proxy required |
-| Ollama | Local | Any local model | Works offline |
-| GLM (Zhipu) | OpenAI-compatible | GLM-4 | Direct access in China |
-| Qwen (Tongyi) | OpenAI-compatible | Qwen-Max | Direct access in China |
-| Moonshot | OpenAI-compatible | Moonshot-v1 | Direct access in China |
-| OpenRouter | OpenAI-compatible | Multi-model router | Proxy required |
-| Custom | OpenAI/Anthropic-compatible | - | Any endpoint |
+| Provider | 格式 | 推荐模型 | 备注 |
+|----------|------|----------|------|
+| **Kimi Coder** | Anthropic 兼容 | k2p5 | 国内直连，推荐 |
+| Anthropic | 原生 | Claude Sonnet/Opus | 需代理 |
+| OpenAI | 原生 | GPT-4o | 需代理 |
+| DeepSeek | OpenAI 兼容 | DeepSeek-V3 | 国内直连 |
+| Gemini | 原生 | Gemini Pro | 需代理 |
+| Ollama | 本地 | 任意本地模型 | 离线可用 |
+| GLM (智谱) | OpenAI 兼容 | GLM-4 | 国内直连 |
+| Qwen (通义) | OpenAI 兼容 | Qwen-Max | 国内直连 |
+| Moonshot | OpenAI 兼容 | Moonshot-v1 | 国内直连 |
+| OpenRouter | OpenAI 兼容 | 多模型路由 | 需代理 |
+| 自定义 | OpenAI/Anthropic 兼容 | - | 支持任意端点 |
 
-> **Note**: Only **Kimi Coder (k2p5)** has been fully tested by the developer. Other providers should work in theory but are unverified — if you encounter network or format issues, feel free to check the source code and submit a PR.
+> **注意**：开发者目前只用 **Kimi Coder (k2p5)** 做过完整测试。其他 Provider 理论上可用但未经验证——如果遇到网络连接或消息格式问题，欢迎自行查看源码修复并提 PR。
 
-## Architecture
+## 架构
 
 ```
 +---------------------------------------------------+
 |                 Plaw Desktop                       |
 |  +-----------+-----------+-----------+----------+  |
 |  |   Chat    | Capsules  | Settings  |  Cron    |  |
-|  |           | (Memory)  |           | (Sched.) |  |
+|  |           |  (记忆)   |           |  (定时)  |  |
 |  +-----------+-----------+-----------+----------+  |
 |  |           Vue 3 + Glassmorphism UI            |  |
 |  +---------------------+------------------------+  |
-|                        | WebSocket (SSE Stream)      |
+|                        | WebSocket (SSE 流式)       |
 |  +---------------------+------------------------+  |
 |  |              Plaw Agent Engine                |  |
 |  |  +---------+ +--------+ +------------------+ |  |
 |  |  | Provider| | Tools  | | Memory & Skills  | |  |
 |  |  | 10+ LLM | | Shell  | | Capsule (SQLite) | |  |
-|  |  | Anthropic| | File  | | Embedding Vector | |  |
+|  |  | Anthropic| | File  | | Embedding 向量   | |  |
 |  |  | OpenAI  | | Web    | | Semantic Routing | |  |
-|  |  | Kimi    | | Browser| | Skills Hot-load  | |  |
+|  |  | Kimi    | | Browser| | Skills 热加载    | |  |
 |  |  | Custom  | | Office | | Agentic Recall   | |  |
 |  |  +---------+ +--------+ +------------------+ |  |
 |  +-----------------------------------------------+  |
@@ -130,117 +132,117 @@ Plaw's mission: **bring AI Agents to everyone, not just developers.**
 +---------------------------------------------------+
 ```
 
-| Layer | Technology | Description |
-|-------|-----------|-------------|
-| Desktop | **Tauri 2.0** | Rust backend + system WebView, ~50MB installer |
-| AI Engine | **Plaw** | Pure Rust autonomous agent, 16MB single binary |
-| Frontend | **Vue 3** | Glassmorphism UI, custom components, zero UI library deps |
-| Communication | **WebSocket** | Bidirectional real-time, SSE streaming |
-| Memory | **SQLite + Embedding** | Capsule memory + FTS5 keywords + vector hybrid search |
-| Embedding | **llama-server** | Local 768-dim vectors, GemmaEmbedding 300M quantized |
-| Config | **TOML** | Human-readable, visual editor in-app |
+| 层级 | 技术 | 说明 |
+|------|------|------|
+| 桌面框架 | **Tauri 2.0** | Rust 后端 + 系统 WebView，安装包 ~50MB |
+| AI 引擎 | **Plaw** | 纯 Rust 自主智能体，16MB 单二进制 |
+| 前端 | **Vue 3** | 毛玻璃 UI，纯自定义组件，零 UI 库依赖 |
+| 通信 | **WebSocket** | 前端与 Plaw 实时双向通信，SSE 流式输出 |
+| 记忆 | **SQLite + Embedding** | 胶囊记忆 + FTS5 关键词 + 向量混合搜索 |
+| Embedding | **llama-server** | 本地 768 维向量，GemmaEmbedding 300M 量化模型 |
+| 配置 | **TOML** | 人类可读，应用内可视化编辑 |
 
-## Quick Start
+## 快速开始
 
-### End Users
+### 普通用户
 
-Download the installer from [Releases](https://github.com/gfisrubbish/plaw-desktop/releases):
+从 [Releases](https://github.com/gfisrubbish/plaw-desktop/releases) 下载安装包：
 
 - **Windows**: `plaw-desktop_x.x.x_x64-setup.exe`
 
-Install → launch → Setup Wizard guides you to choose a model and enter your API Key → done, start chatting.
+安装后启动 → Setup Wizard 引导你选择模型、填入 API Key → 完成，开始对话。
 
-> **Why is the installer so large? (~800MB)** Plaw aims for "install and go, zero config", so all runtime environments are bundled — users don't need to install anything:
+> **安装包为什么这么大？（~800MB）** Plaw 的目标是"安装即用，零配置"，所以把所有运行时环境全部内置打包，用户不需要自己装任何东西：
 >
-> | Component | Size | Purpose |
-> |-----------|------|---------|
-> | Chromium Headless | ~260MB | Browser automation (AI browses the web) |
-> | Python 3 + libs | ~130MB | Office document generation, data processing |
-> | LibreOffice Portable | ~210MB | DOCX/XLSX/PDF conversion |
-> | Node.js | ~80MB | PPTX generation, browser daemon |
-> | Embedding Model | ~315MB | Local semantic search (capsule memory, skill routing) |
-> | Plaw Engine | ~16MB | AI Agent core |
-> | Skills Pack | ~14MB | 30+ pre-installed AI skills |
+> | 内置组件 | 大小 | 用途 |
+> |----------|------|------|
+> | Chromium Headless | ~260MB | 浏览器自动化（AI 浏览网页） |
+> | Python 3 + 常用库 | ~130MB | Office 文档生成、数据处理 |
+> | LibreOffice Portable | ~210MB | DOCX/XLSX/PDF 转换 |
+> | Node.js | ~80MB | PPTX 生成、浏览器 daemon |
+> | Embedding 模型 | ~315MB | 本地语义搜索（胶囊记忆、Skill 路由） |
+> | Plaw 引擎 | ~16MB | AI Agent 核心 |
+> | Skills 技能包 | ~14MB | 30+ 预装 AI 技能 |
 >
-> All bundled for a zero-config experience. Developers can trim as needed.
+> 这些都是为了让普通用户开箱即用。如果你是开发者，可以按需裁剪。
 
-### Developers
+### 开发者
 
 ```powershell
 git clone https://github.com/gfisrubbish/plaw-desktop.git
 cd plaw-desktop
-.\setup.ps1     # Install all dependencies + compile Plaw engine
-.\dev.ps1       # Start dev (Vite + Tauri hot-reload)
+.\setup.ps1     # 一键安装所有依赖 + 编译 Plaw 引擎
+.\dev.ps1       # 启动开发（Vite + Tauri 热重载）
 ```
 
-`setup.ps1` auto-completes 7 steps:
+`setup.ps1` 自动完成 7 件事：
 
-| Step | Task | Method |
-|------|------|--------|
-| 1 | Rust toolchain | rustup |
+| 步骤 | 内容 | 安装方式 |
+|------|------|----------|
+| 1 | Rust 工具链 | rustup |
 | 2 | Node.js | winget |
 | 3 | pnpm | npm |
 | 4 | Tauri CLI | cargo |
-| 5 | Frontend deps | pnpm install |
-| 6 | plaw-data dir + default config | auto-create |
-| 7 | Compile Plaw engine + deploy | cargo build --release |
+| 5 | 前端依赖 | pnpm install |
+| 6 | plaw-data 目录 + 默认配置 | 自动创建 |
+| 7 | 编译 Plaw 引擎 + 部署 | cargo build --release |
 
-Idempotent — run as many times as you want, completed steps are skipped.
+脚本幂等，可反复运行，已完成的步骤自动跳过。
 
-Launch the app → Setup Wizard to enter API Key → ready to use.
+启动后打开应用 → Setup Wizard 填 API Key → 就能用了。
 
-## Project Structure
+## 项目结构
 
 ```
 plaw-desktop/
-├── src-tauri/              # Tauri Rust backend
+├── src-tauri/              # Tauri Rust 后端
 │   └── src/
-│       ├── lib.rs          # Portable data dir, port allocation, config R/W
-│       └── plaw.rs         # Plaw process management
-├── web/                    # Vue 3 frontend
+│       ├── lib.rs          # Portable 数据目录、端口分配、config 读写
+│       └── plaw.rs         # Plaw 进程管理
+├── web/                    # Vue 3 前端
 │   └── src/
-│       ├── views/          # Chat, Dashboard, Settings, SetupWizard, etc.
-│       ├── components/     # GlassDialog, SettingsPanel, custom components
-│       ├── composables/    # usePlawState, useI18n, etc.
-│       └── api/            # Tauri commands + WebSocket wrapper
-├── plaw/                   # Plaw AI engine (full Rust source)
+│       ├── views/          # Chat, Dashboard, Settings, SetupWizard 等
+│       ├── components/     # GlassDialog, SettingsPanel 等自定义组件
+│       ├── composables/    # usePlawState, useI18n 等
+│       └── api/            # Tauri 命令 + WebSocket 封装
+├── plaw/                   # Plaw AI 引擎（完整 Rust 源码）
 │   └── src/
-│       ├── agent/          # Agent loop, tool calls, context compaction
-│       ├── providers/      # 10+ LLM provider implementations
-│       ├── tools/          # 50+ tools (shell, file, browser, search, etc.)
-│       ├── security/       # Security (PromptGuard, audit, sandbox)
-│       ├── gateway/        # WebSocket gateway
-│       ├── memory/         # Capsule memory (SQLite + FTS5 + embedding vector hybrid)
-│       └── skills/         # Skills loading, security audit, semantic routing
-├── plaw-data/              # Runtime data (portable, git-ignored)
-│   ├── bin/                # Plaw binary + Office CLI
-│   ├── embedding/          # Local embedding model (llama-server + GGUF)
-│   ├── browsers/           # Built-in Chromium headless
-│   └── .plaw/              # config.toml, session DB, skills
-├── setup.ps1               # One-click environment setup
-├── dev.ps1                 # Dev launcher
-└── build.ps1               # Build & package
+│       ├── agent/          # Agent 循环、工具调用、上下文压缩
+│       ├── providers/      # 10+ LLM Provider 实现
+│       ├── tools/          # 50+ 工具（Shell、文件、浏览器、搜索等）
+│       ├── security/       # 安全防护（PromptGuard、审计、沙箱）
+│       ├── gateway/        # WebSocket 网关
+│       ├── memory/         # 胶囊记忆（SQLite + FTS5 + Embedding 向量混合搜索）
+│       └── skills/         # Skills 加载、安全审计、语义路由
+├── plaw-data/              # 运行时数据（Portable，git 忽略）
+│   ├── bin/                # Plaw 二进制 + Office CLI
+│   ├── embedding/          # 本地 Embedding 模型（llama-server + GGUF）
+│   ├── browsers/           # 内置 Chromium headless
+│   └── .plaw/              # config.toml、会话数据库、Skills
+├── setup.ps1               # 一键环境安装
+├── dev.ps1                 # 开发启动
+└── build.ps1               # 打包构建
 ```
 
-## Building
+## 编译打包
 
 ```powershell
-# Full build (compile Plaw engine + package installer)
+# 完整构建（编译 Plaw 引擎 + 打包安装程序）
 .\build.ps1
 
-# Skip Plaw compilation (for users who compile Plaw separately)
+# 跳过 Plaw 编译（自己编译 Plaw 的用户）
 .\build.ps1 -NoPlaw
 ```
 
-`build.ps1` auto-completes: compile Plaw → deploy to plaw-data/bin/ → generate bundles → Tauri package.
+`build.ps1` 自动完成：编译 Plaw 引擎 → 部署到 plaw-data/bin/ → 生成资源包 → Tauri 打包。
 
-`-NoPlaw` is for users who compile the Plaw engine themselves — place `plaw.exe` in `plaw-data/bin/` then package.
+`-NoPlaw` 适合自行编译 Plaw 引擎的用户，手动将 `plaw.exe` 放到 `plaw-data/bin/` 后直接打包。
 
-Output: `src-tauri/target/release/bundle/nsis/plaw-desktop_x.x.x_x64-setup.exe`
+输出：`src-tauri/target/release/bundle/nsis/plaw-desktop_x.x.x_x64-setup.exe`
 
-## Configuration
+## 配置
 
-All options are configurable via the in-app Settings panel. The underlying config file is at `plaw-data/.plaw/config.toml`:
+应用内 Settings 面板可视化配置所有选项。底层配置文件位于 `plaw-data/.plaw/config.toml`：
 
 ```toml
 api_key = "sk-xxx"
@@ -259,31 +261,31 @@ backend = "rust_native"
 enabled = true
 ```
 
-## FAQ
+## 常见问题
 
-**Q: Is my API Key safe? Does it get uploaded to third parties?**
-No. Keys are encrypted locally. Requests go directly to your chosen provider (Kimi / OpenAI / Anthropic) — no third-party relay.
+**Q: API Key 安全吗？会上传到第三方吗？**
+不会。Key 加密存储在本地，请求直连你选的模型厂商（Kimi / OpenAI / Anthropic），不经过任何中转。
 
-**Q: Does it work offline?**
-AI chat requires internet (cloud API calls). File operations and shell commands work offline. Ollama local models are supported.
+**Q: 支持离线吗？**
+AI 对话需要网络（调用云端 API）。文件操作、命令执行等工具离线可用。支持 Ollama 本地模型。
 
-**Q: How to migrate to another PC?**
-Copy the entire install directory (including `plaw-data/`). All configs, sessions, and knowledge are inside.
+**Q: 怎么迁移到另一台电脑？**
+拷贝整个安装目录（含 `plaw-data/`）即可，所有配置、会话、知识库都在里面。
 
-**Q: Is it safe for AI to run commands?**
-Plaw has multi-layer security: PromptGuard injection detection, external content scanning, anti-loop, sensitive operation blocking. But the agent can execute system commands — review with care.
+**Q: AI 执行命令安全吗？**
+Plaw 内置多层安全：PromptGuard 注入检测、外部内容扫描、反死循环、敏感操作拦截。但 Agent 确实能执行系统命令，请注意审查。
 
-**Q: Recommended model for China users?**
-Kimi Coder (k2p5) — direct access in China, no proxy needed, Anthropic-compatible API. DeepSeek, GLM, Qwen also work without proxy.
+**Q: 国内用户推荐什么模型？**
+推荐 Kimi Coder（k2p5），国内直连无需代理，API 兼容 Anthropic 格式。DeepSeek、智谱 GLM、通义千问也可直连。
 
-## Tech Stack
+## 技术栈
 
-- [Tauri 2.0](https://v2.tauri.app/) — Lightweight desktop framework (Rust + WebView)
-- [Vue 3](https://vuejs.org/) — Frontend framework
-- [Plaw](plaw/) — Rust AI Agent engine
-- [Tailwind CSS v4](https://tailwindcss.com/) — Utility-first CSS
-- [marked](https://marked.js.org/) — Markdown rendering
-- [Lucide](https://lucide.dev/) — Icon library
+- [Tauri 2.0](https://v2.tauri.app/) — 轻量桌面框架（Rust + WebView）
+- [Vue 3](https://vuejs.org/) — 前端框架
+- [Plaw](plaw/) — Rust AI Agent 引擎
+- [Tailwind CSS v4](https://tailwindcss.com/) — 原子化 CSS
+- [marked](https://marked.js.org/) — Markdown 渲染
+- [Lucide](https://lucide.dev/) — 图标库
 
 ## License
 
