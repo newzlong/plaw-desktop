@@ -148,6 +148,20 @@ Plaw 要解决的问题：**让不懂技术的人也能用上 AI Agent**。
 
 安装后启动 → Setup Wizard 引导你选择模型、填入 API Key → 完成，开始对话。
 
+> **安装包为什么这么大？（~800MB）** Plaw 的目标是"安装即用，零配置"，所以把所有运行时环境全部内置打包，用户不需要自己装任何东西：
+>
+> | 内置组件 | 大小 | 用途 |
+> |----------|------|------|
+> | Chromium Headless | ~260MB | 浏览器自动化（AI 浏览网页） |
+> | Python 3 + 常用库 | ~130MB | Office 文档生成、数据处理 |
+> | LibreOffice Portable | ~210MB | DOCX/XLSX/PDF 转换 |
+> | Node.js | ~80MB | PPTX 生成、浏览器 daemon |
+> | Embedding 模型 | ~315MB | 本地语义搜索（胶囊记忆、Skill 路由） |
+> | Plaw 引擎 | ~16MB | AI Agent 核心 |
+> | Skills 技能包 | ~14MB | 30+ 预装 AI 技能 |
+>
+> 这些都是为了让普通用户开箱即用。如果你是开发者，可以按需裁剪。
+
 ### 开发者
 
 ```powershell
