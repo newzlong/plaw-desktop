@@ -15,10 +15,15 @@
             <button v-if="closable" class="glass-dialog__close" @click="close" aria-label="Close">&times;</button>
           </div>
           <div class="glass-dialog__body">
-            <slot />
+            <slot>
+              <p v-if="message" class="glass-dialog__message">{{ message }}</p>
+            </slot>
           </div>
-          <div v-if="$slots.footer" class="glass-dialog__footer">
-            <slot name="footer" />
+          <div v-if="$slots.footer || message" class="glass-dialog__footer">
+            <slot name="footer">
+              <GlassButton @click="close">{{ cancelText || 'Cancel' }}</GlassButton>
+              <GlassButton :variant="variant === 'danger' ? 'danger' : 'primary'" @click="emit('confirm'); close()">{{ confirmText || 'Confirm' }}</GlassButton>
+            </slot>
           </div>
         </div>
       </div>
@@ -27,14 +32,20 @@
 </template>
 
 <script setup>
+import GlassButton from './GlassButton.vue'
+
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
   title: { type: String, default: '' },
+  message: { type: String, default: '' },
+  confirmText: { type: String, default: '' },
+  cancelText: { type: String, default: '' },
+  variant: { type: String, default: '' },
   width: { type: String, default: '480px' },
   persistent: { type: Boolean, default: false },
   closable: { type: Boolean, default: true },
 })
-const emit = defineEmits(['update:modelValue'])
+const emit = defineEmits(['update:modelValue', 'confirm'])
 function close() { if (props.closable) emit('update:modelValue', false) }
 </script>
 
@@ -140,6 +151,12 @@ function close() { if (props.closable) emit('update:modelValue', false) }
   flex-shrink: 0;
 }
 
+.glass-dialog__message {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  margin: 0;
+  line-height: 1.5;
+}
 /* Transitions */
 .dialog-enter-active, .dialog-leave-active {
   transition: opacity var(--duration-normal) var(--ease-out);

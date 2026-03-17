@@ -366,7 +366,8 @@ pub(crate) async fn auto_compact_history(
     }
 
     let start = if has_system { 1 } else { 0 };
-    let keep_recent = COMPACTION_KEEP_RECENT_MESSAGES.min(non_system_count);
+    // Force (manual) compact: keep only 4 recent messages so even short conversations get archived
+    let keep_recent = if force { 4_usize.min(non_system_count) } else { COMPACTION_KEEP_RECENT_MESSAGES.min(non_system_count) };
     let compact_count = non_system_count.saturating_sub(keep_recent);
     if compact_count == 0 {
         return Ok(false);

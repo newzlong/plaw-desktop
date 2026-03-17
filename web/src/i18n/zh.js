@@ -26,6 +26,7 @@ export default {
     saveFailed: '保存失败',
     restartHint: '配置已更新，重启 Plaw 后生效。',
     cancel: '取消',
+    confirm: '确认',
     delete: '删除',
     clear: '清除',
     create: '创建',

@@ -23,6 +23,8 @@ struct ChatRequest {
     system: Option<String>,
     messages: Vec<Message>,
     temperature: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -749,7 +751,7 @@ impl Provider for AnthropicProvider {
             )
         })?;
 
-        let request = ChatRequest {
+        let chat_req = ChatRequest {
             model: model.to_string(),
             max_tokens: self.max_tokens,
             system: system_prompt.map(ToString::to_string),
@@ -758,14 +760,15 @@ impl Provider for AnthropicProvider {
                 content: message.to_string(),
             }],
             temperature,
+            stream: Some(true),
         };
 
         let mut request = self
-            .http_client()
+            .streaming_http_client()
             .post(format!("{}/v1/messages", self.base_url))
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
-            .json(&request);
+            .json(&chat_req);
 
         request = self.apply_auth(request, credential);
 
@@ -775,8 +778,14 @@ impl Provider for AnthropicProvider {
             return Err(super::api_error("Anthropic", response).await);
         }
 
-        let chat_response: ChatResponse = response.json().await?;
-        Self::parse_text_response(chat_response)
+        // Use SSE stream consumption to avoid Privoxy tunnel timeout
+        let native_response = Self::consume_sse_stream(response).await?;
+        native_response
+            .content
+            .into_iter()
+            .find(|c| c.kind == "text")
+            .and_then(|c| c.text)
+            .ok_or_else(|| anyhow::anyhow!("No text in chat_with_system response"))
     }
 
     async fn chat(

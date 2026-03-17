@@ -26,6 +26,7 @@ export default {
     saveFailed: 'Save failed',
     restartHint: 'Config updated. Restart Plaw to apply.',
     cancel: 'Cancel',
+    confirm: 'Confirm',
     delete: 'Delete',
     clear: 'Clear',
     create: 'Create',

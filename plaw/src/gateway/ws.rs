@@ -338,18 +338,26 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             let estimated = crate::agent::loop_::history::estimate_history_tokens(&history);
             let last_input_for_compaction = if estimated > 0 { Some(estimated as u64) } else { None };
             let compact_session_id = parsed["session_id"].as_str().map(str::to_string);
-            match auto_compact_history(
-                &mut history,
-                state.provider.as_ref(),
-                &state.model,
-                state.max_history_messages,
-                last_input_for_compaction,
-                state.max_context_tokens,
-                capsule_store.as_ref(),
-                compact_session_id.as_deref(),
-                embedding_provider.as_ref(),
-                true, // force
-            ).await {
+            let compact_result = tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                auto_compact_history(
+                    &mut history,
+                    state.provider.as_ref(),
+                    &state.model,
+                    state.max_history_messages,
+                    last_input_for_compaction,
+                    state.max_context_tokens,
+                    capsule_store.as_ref(),
+                    compact_session_id.as_deref(),
+                    embedding_provider.as_ref(),
+                    true, // force
+                )
+            ).await;
+            let compact_result = match compact_result {
+                Ok(inner) => inner,
+                Err(_) => Err(anyhow::anyhow!("Compact timed out after 60s")),
+            };
+            match compact_result {
                 Ok(true) => {
                     trim_history(&mut history, state.max_history_messages);
                     let remaining_tokens = crate::agent::loop_::history::estimate_history_tokens(&history);
@@ -382,8 +390,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 Err(e) => {
                     tracing::error!("ws_chat: manual compaction failed: {e}");
                     let event = serde_json::json!({
-                        "type": "error",
-                        "message": format!("Compact failed: {e}"),
+                        "type": "compacted",
+                        "remaining_messages": history.len(),
+                        "estimated_tokens": crate::agent::loop_::history::estimate_history_tokens(&history),
+                        "has_pending_tasks": false,
+                        "manual": true,
+                        "error": format!("{e}"),
                     });
                     let _ = ws_tx.send(Message::Text(event.to_string().into())).await;
                 }

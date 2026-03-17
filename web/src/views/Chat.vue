@@ -345,9 +345,12 @@ const compactTooltip = computed(() => {
 function manualCompact() {
   if (!canManualCompact.value) return
   compacting.value = true
+  console.log('[compact] sending manual_compact, ws.readyState=', ws?.readyState, 'session=', currentSessionId.value)
   try {
     ws.send(JSON.stringify({ type: 'manual_compact', session_id: currentSessionId.value || undefined }))
-  } catch {
+    console.log('[compact] sent ok')
+  } catch (e) {
+    console.error('[compact] send failed:', e)
     compacting.value = false
   }
 }
@@ -810,8 +813,13 @@ async function connectWebSocket() {
   ws.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data)
+      if (data.type === 'compacted' || data.type === 'error') {
+        console.log('[compact] received ws event:', data.type, data)
+      }
       handleWsMessage(data)
-    } catch {}
+    } catch (e) {
+      console.error('[ws] onmessage parse/handle error:', e, event.data?.substring?.(0, 200))
+    }
   }
 }
 
@@ -828,7 +836,8 @@ function handleWsMessage(data) {
   }
 
   // Ignore messages when not streaming (e.g. stale responses after cancel)
-  if (!streaming.value) return
+  // But always process compacted/skills_reloaded/error events regardless of streaming state
+  if (!streaming.value && !['compacted', 'skills_reloaded'].includes(type)) return
 
   if (type === 'thinking') {
     // If there's accumulated text before this thinking, save it as a text step
@@ -904,6 +913,7 @@ function handleWsMessage(data) {
       animFrame = requestAnimationFrame(tickTypewriter)
     }
   } else if (type === 'error') {
+    compacting.value = false
     pendingFinalize = { type: 'error', message: data.message }
     if (displayLen >= targetContent.length) {
       doFinalize()
@@ -912,13 +922,20 @@ function handleWsMessage(data) {
     }
   } else if (type === 'compacted') {
     // Context was compacted (auto or manual) — update progress bar
+    console.log('[compact] BEFORE: compacting.value=', compacting.value)
     compacting.value = false
+    console.log('[compact] AFTER: compacting.value=', compacting.value)
     if (data.estimated_tokens) contextUsed.value = data.estimated_tokens
     const hasPending = data.has_pending_tasks
     const isManual = data.manual
-    const notice = isZh.value
-      ? `上下文已${isManual ? '手动' : '自动'}压缩（剩余 ${data.remaining_messages} 条消息，约 ${Math.round((data.estimated_tokens || 0) / 1000)}K tokens）${hasPending ? '\n检测到未完成的任务，正在自动继续...' : ''}`
-      : `Context ${isManual ? 'manually' : 'auto-'}compacted (${data.remaining_messages} messages remaining, ~${Math.round((data.estimated_tokens || 0) / 1000)}K tokens)${hasPending ? '\nPending tasks detected, auto-continuing...' : ''}`
+    let notice
+    if (data.error) {
+      notice = isZh.value ? `压缩失败：${data.error}` : `Compact failed: ${data.error}`
+    } else {
+      notice = isZh.value
+        ? `上下文已${isManual ? '手动' : '自动'}压缩（剩余 ${data.remaining_messages} 条消息，约 ${Math.round((data.estimated_tokens || 0) / 1000)}K tokens）${hasPending ? '\n检测到未完成的任务，正在自动继续...' : ''}`
+        : `Context ${isManual ? 'manually' : 'auto-'}compacted (${data.remaining_messages} messages remaining, ~${Math.round((data.estimated_tokens || 0) / 1000)}K tokens)${hasPending ? '\nPending tasks detected, auto-continuing...' : ''}`
+    }
     messages.value.push({ role: 'system', content: notice })
     scrollToBottom()
     // Auto-continue if there are pending tasks (wait for typewriter/streaming to finish)
