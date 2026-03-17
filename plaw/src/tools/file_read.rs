@@ -2,18 +2,102 @@ use super::traits::{Tool, ToolResult};
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use serde_json::json;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const MAX_FILE_SIZE_BYTES: u64 = 10 * 1024 * 1024;
+const MAX_OUTPUT_BYTES: usize = 1_048_576; // 1 MB output limit (matches shell tool)
 
 /// Read file contents with path sandboxing
 pub struct FileReadTool {
     security: Arc<SecurityPolicy>,
 }
 
+/// Office file extensions that should use Python extraction
+const OFFICE_EXTENSIONS: &[&str] = &[".xlsx", ".xls", ".xlsm", ".docx", ".pptx"];
+
 impl FileReadTool {
     pub fn new(security: Arc<SecurityPolicy>) -> Self {
         Self { security }
+    }
+
+    /// Resolve data_root from workspace_dir (workspace_dir is data_root/.plaw/workspace/)
+    fn data_root(&self) -> Option<PathBuf> {
+        self.security
+            .workspace_dir
+            .parent()  // .plaw/
+            .and_then(|p| p.parent())  // data_root/
+            .map(PathBuf::from)
+    }
+
+    /// Try to extract Office file content using bundled Python + office_reader.py
+    async fn try_extract_office(
+        &self,
+        file_path: &Path,
+        args: &serde_json::Value,
+    ) -> Option<String> {
+        let ext = file_path.extension()?.to_str()?.to_lowercase();
+        let dotted = format!(".{ext}");
+        if !OFFICE_EXTENSIONS.contains(&dotted.as_str()) {
+            return None;
+        }
+
+        let data_root = self.data_root()?;
+        let python = data_root.join("python").join("python.exe");
+        let script = data_root.join("bin").join("cli").join("office_reader.py");
+
+        if !python.is_file() || !script.is_file() {
+            tracing::warn!("Office reader: python or script not found at {:?} / {:?}", python, script);
+            return None;
+        }
+
+        let mut cmd = tokio::process::Command::new(&python);
+        cmd.arg(&script).arg(file_path);
+
+        // Map offset/limit args
+        if let Some(offset) = args.get("offset").and_then(|v| v.as_u64()) {
+            cmd.arg("--offset").arg(offset.to_string());
+        }
+        if let Some(limit) = args.get("limit").and_then(|v| v.as_u64()) {
+            cmd.arg("--limit").arg(limit.to_string());
+        }
+        // Sheet name from extra args (passed as part of the tool args)
+        if let Some(sheet) = args.get("sheet").and_then(|v| v.as_str()) {
+            cmd.arg("--sheet").arg(sheet);
+        }
+
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        cmd.stdin(std::process::Stdio::null());
+
+        let output = match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            cmd.output(),
+        ).await {
+            Ok(Ok(o)) => o,
+            Ok(Err(e)) => {
+                tracing::warn!("Office reader failed to execute: {e}");
+                return None;
+            }
+            Err(_) => {
+                tracing::warn!("Office reader timed out (30s)");
+                return None;
+            }
+        };
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!("Office reader exited with error: {stderr}");
+            return None;
+        }
+
+        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+        if text.len() > MAX_OUTPUT_BYTES {
+            let boundary = crate::util::floor_utf8_char_boundary(&text, MAX_OUTPUT_BYTES);
+            text.truncate(boundary);
+            text.push_str("\n\n[Output truncated at 1MB. Use offset/limit to read more data.]");
+        }
+        Some(text)
     }
 }
 
@@ -24,7 +108,7 @@ impl Tool for FileReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read file contents with line numbers. Supports partial reading via offset and limit. Extracts text from PDF; other binary files are read with lossy UTF-8 conversion."
+        "Read file contents with line numbers. Supports partial reading via offset and limit. For Office files (xlsx/docx/pptx), automatically extracts structured text. Extracts text from PDF; other binary files are read with lossy UTF-8 conversion."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -37,11 +121,15 @@ impl Tool for FileReadTool {
                 },
                 "offset": {
                     "type": "integer",
-                    "description": "Starting line number (1-based, default: 1)"
+                    "description": "Starting line/row/slide number (1-based for text, 0-based for Office files, default: start)"
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of lines to return (default: all)"
+                    "description": "Maximum number of lines/rows/slides to return (default: all for text, 50 for Excel/PPT, 200 for Word)"
+                },
+                "sheet": {
+                    "type": "string",
+                    "description": "Excel sheet name to read (default: active sheet). All sheet names are listed in the output header."
                 }
             },
             "required": ["path"]
@@ -184,9 +272,17 @@ impl Tool for FileReadTool {
                     format!("\n[{total} lines total]")
                 };
 
+                let mut output = format!("{numbered}{summary}");
+                if output.len() > MAX_OUTPUT_BYTES {
+                    let boundary = crate::util::floor_utf8_char_boundary(&output, MAX_OUTPUT_BYTES);
+                    output.truncate(boundary);
+                    output.push_str(&format!(
+                        "\n\n[Output truncated at 1MB. Use offset/limit to read specific sections. File has {total} lines.]"
+                    ));
+                }
                 Ok(ToolResult {
                     success: true,
-                    output: format!("{numbered}{summary}"),
+                    output,
                     error: None,
                 })
             }
@@ -197,15 +293,35 @@ impl Tool for FileReadTool {
                     .map_err(|e| anyhow::anyhow!("Failed to read file: {e}"))?;
 
                 if let Some(text) = try_extract_pdf_text(&bytes) {
+                    let mut output = text;
+                    if output.len() > MAX_OUTPUT_BYTES {
+                        let boundary = crate::util::floor_utf8_char_boundary(&output, MAX_OUTPUT_BYTES);
+                        output.truncate(boundary);
+                        output.push_str("\n\n[Output truncated at 1MB. PDF content too large — use a smaller page range.]");
+                    }
                     return Ok(ToolResult {
                         success: true,
-                        output: text,
+                        output,
+                        error: None,
+                    });
+                }
+
+                // Office files — extract structured text via bundled Python
+                if let Some(output) = self.try_extract_office(&resolved_path, &args).await {
+                    return Ok(ToolResult {
+                        success: true,
+                        output,
                         error: None,
                     });
                 }
 
                 // Lossy fallback — replaces invalid bytes with U+FFFD
-                let lossy = String::from_utf8_lossy(&bytes).into_owned();
+                let mut lossy = String::from_utf8_lossy(&bytes).into_owned();
+                if lossy.len() > MAX_OUTPUT_BYTES {
+                    let boundary = crate::util::floor_utf8_char_boundary(&lossy, MAX_OUTPUT_BYTES);
+                    lossy.truncate(boundary);
+                    lossy.push_str("\n\n[Output truncated at 1MB. Binary/non-UTF8 file — consider using shell tools to extract specific data.]");
+                }
                 Ok(ToolResult {
                     success: true,
                     output: lossy,
