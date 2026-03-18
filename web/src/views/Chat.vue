@@ -159,7 +159,7 @@
             <button class="attach-btn" :disabled="connStatus !== 'connected'" @click="fileInputRef?.click()" :title="isZh ? '添加文件' : 'Attach file'">
               <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M14 10l-4.5-4.5a2.12 2.12 0 0 0-3 3L11 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M11 13l1.5-1.5a3.18 3.18 0 0 0-4.5-4.5L2 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
             </button>
-            <div class="context-indicator" :class="{ 'context-indicator--clickable': canManualCompact }" :title="compactTooltip" @click="manualCompact">
+            <div class="context-indicator" :class="{ 'context-indicator--clickable': canManualCompact }" :title="compactTooltip" :role="canManualCompact ? 'button' : undefined" :tabindex="canManualCompact ? 0 : undefined" @click="manualCompact" @keydown.enter="manualCompact">
               <span class="context-dot" :class="contextDotClass" />
               <span class="context-text">{{ compacting ? (isZh ? '压缩中...' : 'Compacting...') : Math.round(contextPercent) + '% used' }}</span>
             </div>
@@ -1812,10 +1812,10 @@ onUnmounted(() => {
   transition: background 0.3s var(--ease-out);
 }
 .step-tool__dot--done {
-  background: var(--plaw-success, #22c55e);
+  background: var(--status-ok);
 }
 .step-tool__dot--error {
-  background: #ef4444;
+  background: var(--status-err);
 }
 .step-tool__dot--running {
   background: linear-gradient(90deg, rgba(255,255,255,0.08) 0%, rgba(255,255,255,0.3) 50%, rgba(255,255,255,0.08) 100%);
@@ -2027,7 +2027,7 @@ onUnmounted(() => {
   height: 18px;
   border-radius: 50%;
   background: rgba(0,0,0,0.65);
-  color: #fff;
+  color: var(--text-inverse);
   border: none;
   font-size: 12px;
   line-height: 1;
@@ -2073,10 +2073,10 @@ onUnmounted(() => {
   flex-shrink: 0;
   transition: background 0.4s var(--ease-out);
 }
-.context-dot--ok { background: var(--plaw-success, #22c55e); }
-.context-dot--moderate { background: var(--plaw-primary, #f97316); }
-.context-dot--warning { background: #eab308; }
-.context-dot--critical { background: #ef4444; }
+.context-dot--ok { background: var(--status-ok); }
+.context-dot--moderate { background: var(--plaw-primary); }
+.context-dot--warning { background: var(--status-warn); }
+.context-dot--critical { background: var(--status-err); }
 .context-text {
   font-size: 0.72rem;
   color: var(--text-muted);

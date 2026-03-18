@@ -111,6 +111,6 @@ onUnmounted(() => clearInterval(timer))
 .log-level--info { color: var(--status-info); }
 .log-level--warn { color: var(--status-warn); }
 .log-level--error { color: var(--status-err); }
-.log-level--debug { color: #A78BFA; }
+.log-level--debug { color: var(--status-debug); }
 .log-msg { color: var(--text-primary); word-break: break-all; }
 </style>

@@ -6,7 +6,7 @@
     <div class="max-w-xl space-y-4">
       <!-- Telegram -->
       <GlassCard :hoverable="false">
-        <div class="channel-header" @click="expanded.telegram = !expanded.telegram">
+        <div class="channel-header" role="button" tabindex="0" @click="expanded.telegram = !expanded.telegram" @keydown.enter="expanded.telegram = !expanded.telegram" :aria-expanded="expanded.telegram">
           <div class="channel-header__left">
             <MessageCircle class="w-5 h-5" style="color: #229ED9" />
             <span class="channel-header__name">Telegram</span>
@@ -35,7 +35,7 @@
 
       <!-- Discord -->
       <GlassCard :hoverable="false">
-        <div class="channel-header" @click="expanded.discord = !expanded.discord">
+        <div class="channel-header" role="button" tabindex="0" @click="expanded.discord = !expanded.discord" @keydown.enter="expanded.discord = !expanded.discord" :aria-expanded="expanded.discord">
           <div class="channel-header__left">
             <Hash class="w-5 h-5" style="color: #5865F2" />
             <span class="channel-header__name">Discord</span>
@@ -69,7 +69,7 @@
 
       <!-- Slack -->
       <GlassCard :hoverable="false">
-        <div class="channel-header" @click="expanded.slack = !expanded.slack">
+        <div class="channel-header" role="button" tabindex="0" @click="expanded.slack = !expanded.slack" @keydown.enter="expanded.slack = !expanded.slack" :aria-expanded="expanded.slack">
           <div class="channel-header__left">
             <AtSign class="w-5 h-5" style="color: #E01E5A" />
             <span class="channel-header__name">Slack</span>

@@ -25,8 +25,29 @@ html {
 ::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
 
 /* --- Focus ring --- */
+:focus-visible {
+  outline: 2px solid var(--plaw-primary);
+  outline-offset: 2px;
+}
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: none;
+  box-shadow: var(--input-focus-shadow);
+  border-color: var(--plaw-primary);
+}
 .focus-ring:focus-visible {
   outline: none;
   box-shadow: var(--input-focus-shadow);
   border-color: var(--plaw-primary);
+}
+
+/* --- Reduced motion --- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

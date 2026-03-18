@@ -58,6 +58,7 @@
   --status-err: #EF4444;
   --status-warn: #F59E0B;
   --status-info: #3B82F6;
+  --status-debug: #A78BFA;
 }
 
 /* ====== LIGHT THEME ====== */
@@ -95,4 +96,5 @@
   --status-err: #DC2626;
   --status-warn: #D97706;
   --status-info: #2563EB;
+  --status-debug: #8B5CF6;
 }
