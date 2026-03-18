@@ -30,6 +30,20 @@
 
     <!-- Installed tab -->
     <template v-if="tab === 'installed'">
+      <!-- Skeleton -->
+      <template v-if="localLoading">
+        <div class="space-y-3">
+          <div v-for="i in 4" :key="i" class="skel-skill-card">
+            <div class="skel-skill-info">
+              <GlassSkeleton width="120px" height="0.95rem" />
+              <GlassSkeleton width="260px" height="0.8rem" class="mt-1.5" />
+              <GlassSkeleton width="60px" height="0.7rem" class="mt-2" />
+            </div>
+            <GlassSkeleton width="52px" height="28px" rounded />
+          </div>
+        </div>
+      </template>
+      <template v-else>
       <div v-if="localSkills.length" class="filter-bar">
         <GlassInput
           v-model="installedQuery"
@@ -118,6 +132,7 @@
           </div>
         </GlassCard>
       </div>
+      </template><!-- end v-else localLoading -->
     </template>
 
     <!-- Market tab -->
@@ -299,7 +314,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { Plus, Puzzle, Loader2, Search, AlertTriangle, RefreshCw, Globe, Settings, ShieldCheck } from 'lucide-vue-next'
-import { GlassCard, GlassButton, GlassInput, GlassDialog } from '../components/glass'
+import { GlassCard, GlassButton, GlassInput, GlassDialog, GlassSkeleton } from '../components/glass'
 import { useI18n } from '../composables/useI18n'
 import {
   listLocalSkills, installSkill, uninstallSkill, auditSkill, auditAllUnaudited, searchRegistrySkills,
@@ -309,6 +324,7 @@ import {
 const { t } = useI18n()
 
 const tab = ref('installed')
+const localLoading = ref(true)
 const localSkills = ref([])
 const installedQuery = ref('')
 const showInstall = ref(false)
@@ -478,7 +494,11 @@ const savedProxy = ref('')
 const showProxyEdit = ref(false)
 
 async function refreshLocal() {
-  localSkills.value = await listLocalSkills()
+  try {
+    localSkills.value = await listLocalSkills()
+  } finally {
+    localLoading.value = false
+  }
 }
 
 function isInstalled(name) {
@@ -604,6 +624,21 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+/* --- Skeleton --- */
+.skel-skill-card {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 20px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+}
+.skel-skill-info {
+  display: flex; flex-direction: column;
+}
+.mt-1\.5 { margin-top: 0.375rem; }
+.mt-2 { margin-top: 0.5rem; }
+
 .page-header {
   display: flex; align-items: flex-start; justify-content: space-between;
   margin-bottom: 24px;

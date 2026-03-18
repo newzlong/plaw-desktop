@@ -1,5 +1,41 @@
 <template>
   <div>
+    <!-- Skeleton loading -->
+    <template v-if="loading">
+      <!-- Hero skeleton -->
+      <div class="skel-hero">
+        <div class="skel-hero__left">
+          <GlassSkeleton circle height="40px" />
+          <div class="skel-hero__text">
+            <GlassSkeleton width="80px" height="1.1rem" />
+            <GlassSkeleton width="140px" height="0.75rem" class="mt-1" />
+          </div>
+        </div>
+        <div class="flex gap-2">
+          <GlassSkeleton width="56px" height="30px" rounded />
+          <GlassSkeleton width="56px" height="30px" rounded />
+          <GlassSkeleton width="72px" height="30px" rounded />
+        </div>
+      </div>
+      <!-- Stats skeleton -->
+      <div class="stats-row">
+        <div v-for="i in 4" :key="i" class="skel-stat">
+          <GlassSkeleton circle height="40px" />
+          <div class="flex flex-col gap-1.5" style="flex: 1">
+            <GlassSkeleton width="60%" height="1.15rem" />
+            <GlassSkeleton width="80%" height="0.75rem" />
+          </div>
+        </div>
+      </div>
+      <!-- Storage skeleton -->
+      <div class="skel-storage mt-4">
+        <GlassSkeleton width="220px" height="0.85rem" />
+        <GlassSkeleton width="60px" height="30px" rounded />
+      </div>
+    </template>
+
+    <!-- Real content -->
+    <template v-else>
     <!-- Hero status -->
     <div class="hero-status" :class="isRunning ? 'hero-status--ok' : 'hero-status--off'">
       <div class="hero-status__left">
@@ -127,12 +163,13 @@
         </GlassButton>
       </div>
     </GlassCard>
+    </template><!-- end v-else -->
   </div>
 </template>
 
 <script setup>
 import { ref, computed, inject, onMounted, onUnmounted, watch } from 'vue'
-import { GlassCard, GlassButton } from '../components/glass'
+import { GlassCard, GlassButton, GlassSkeleton } from '../components/glass'
 import PlawActivity from '../components/PlawActivity.vue'
 import {
   Bot as BotIcon,
@@ -149,6 +186,7 @@ const { t, isZh } = useI18n()
 const openSettings = inject('openSettings', () => {})
 const { state: zcState, port: zcPort, startedAt, isRunning, isHealthy, isBusy, canStart, canStop } = usePlawState()
 
+const loading = ref(true)
 const provider = ref('')
 const model = ref('')
 const errorMsg = ref('')
@@ -284,9 +322,12 @@ async function doRestart() {
 }
 
 onMounted(async () => {
-  await loadConfigData()
-  await loadSkills()
-  await loadUploadsInfo()
+  try {
+    await Promise.all([loadConfigData(), loadUploadsInfo()])
+    await loadSkills()
+  } finally {
+    loading.value = false
+  }
   uptimeTimer = setInterval(() => { nowSec.value = Math.floor(Date.now() / 1000) }, 1000)
 })
 onUnmounted(() => {
@@ -295,6 +336,42 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+/* --- Skeleton --- */
+.skel-hero {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 20px 24px;
+  border-radius: var(--radius-lg);
+  margin-bottom: 24px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-card);
+}
+.skel-hero__left {
+  display: flex; align-items: center; gap: 16px;
+}
+.skel-hero__text {
+  display: flex; flex-direction: column; gap: 6px;
+}
+.skel-stat {
+  display: flex; align-items: center; gap: 14px;
+  padding: 18px 20px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+}
+.skel-storage {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+}
+.mt-1 { margin-top: 0.25rem; }
+
 /* --- Hero Status Bar --- */
 .hero-status {
   display: flex; align-items: center; justify-content: space-between;

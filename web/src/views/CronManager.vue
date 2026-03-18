@@ -24,13 +24,22 @@
       </div>
     </GlassCard>
 
-    <!-- Loading -->
-    <GlassCard v-else-if="loading" :hoverable="false">
-      <div class="empty-hint">
-        <Loader2 class="w-5 h-5 animate-spin" style="color: var(--text-muted)" />
-        <span>{{ t('common.loading') || 'Loading...' }}</span>
+    <!-- Loading skeleton -->
+    <template v-else-if="loading">
+      <div class="space-y-3">
+        <div v-for="i in 3" :key="i" class="skel-cron-card">
+          <div class="skel-cron-main">
+            <div class="skel-cron-header">
+              <GlassSkeleton width="140px" height="0.95rem" />
+              <GlassSkeleton width="32px" height="18px" rounded />
+            </div>
+            <GlassSkeleton width="180px" height="0.78rem" class="mt-1.5" />
+            <GlassSkeleton width="220px" height="0.72rem" class="mt-2" />
+          </div>
+          <GlassSkeleton width="28px" height="28px" rounded />
+        </div>
       </div>
-    </GlassCard>
+    </template>
 
     <!-- Error -->
     <GlassCard v-else-if="error" :hoverable="false">
@@ -153,7 +162,7 @@
 <script setup>
 import { ref, computed, watch, onMounted } from 'vue'
 import { Plus, Clock, Trash2, RefreshCw, Loader2, AlertCircle, AlertTriangle, CalendarClock } from 'lucide-vue-next'
-import { GlassCard, GlassButton, GlassInput, GlassSelect, GlassDialog } from '../components/glass'
+import { GlassCard, GlassButton, GlassInput, GlassSelect, GlassDialog, GlassSkeleton } from '../components/glass'
 import { useI18n } from '../composables/useI18n'
 import { usePlawState } from '../composables/usePlawState'
 import { getCronJobs, addCronJob, deleteCronJob, patchCronJob } from '../api/gateway'
@@ -309,6 +318,24 @@ onMounted(() => {
 </script>
 
 <style scoped>
+/* --- Skeleton --- */
+.skel-cron-card {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 20px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+}
+.skel-cron-main {
+  display: flex; flex-direction: column;
+}
+.skel-cron-header {
+  display: flex; align-items: center; gap: 10px;
+}
+.mt-1\.5 { margin-top: 0.375rem; }
+.mt-2 { margin-top: 0.5rem; }
+
 .page-header {
   display: flex; align-items: flex-start; justify-content: space-between;
   margin-bottom: 24px;

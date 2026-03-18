@@ -1,10 +1,19 @@
 <template>
   <div class="chat-page">
     <!-- Session sidebar -->
-    <div class="chat-sidebar">
-      <button class="sidebar-new" :disabled="streaming" @click="newSession">
-        <span>+</span> {{ t('chat.newChat') }}
-      </button>
+    <div class="chat-sidebar" :class="{ 'chat-sidebar--collapsed': sidebarCollapsed }">
+      <div class="sidebar-topbar">
+        <button class="sidebar-toggle" :title="sidebarCollapsed ? (isZh ? '展开侧边栏' : 'Expand sidebar') : (isZh ? '收起侧边栏' : 'Collapse sidebar')" @click="toggleSidebar">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <rect x="1" y="2" width="12" height="1.5" rx="0.75" fill="currentColor"/>
+            <rect x="1" y="6.25" width="12" height="1.5" rx="0.75" fill="currentColor"/>
+            <rect x="1" y="10.5" width="12" height="1.5" rx="0.75" fill="currentColor"/>
+          </svg>
+        </button>
+        <button v-if="!sidebarCollapsed" class="sidebar-new" :disabled="streaming" @click="newSession">
+          <span>+</span> {{ t('chat.newChat') }}
+        </button>
+      </div>
       <div class="sidebar-list">
         <div v-if="!sessions.length" class="sidebar-empty">
           {{ t('chat.noHistory') }}
@@ -43,7 +52,7 @@
     </div>
 
     <!-- Main chat area -->
-    <div class="chat-main">
+    <div class="chat-main" :class="{ 'chat-main--full': sidebarCollapsed }">
       <!-- Messages -->
       <div class="chat-messages" ref="messagesRef">
         <div v-if="!messages.length" class="chat-empty">
@@ -212,6 +221,17 @@
 
 <script setup>
 import { ref, computed, nextTick, inject, onMounted, onUnmounted, onActivated, onDeactivated, watch } from 'vue'
+
+// ---- Responsive sidebar ----
+const sidebarCollapsed = ref(false)
+
+function _checkWidth() {
+  sidebarCollapsed.value = window.innerWidth < 768
+}
+
+function toggleSidebar() {
+  sidebarCollapsed.value = !sidebarCollapsed.value
+}
 import { Settings, Sun, Moon, Play, Square, Loader2, RotateCcw } from 'lucide-vue-next'
 
 defineOptions({ name: 'ChatView' })
@@ -1248,6 +1268,10 @@ onMounted(async () => {
     connectWebSocket()
   }
 
+  // Responsive sidebar: collapse on small windows
+  _checkWidth()
+  window.addEventListener('resize', _checkWidth)
+
   // Register beforeunload guard: cancel AI + save if page refreshes/closes
   window.addEventListener('beforeunload', handleBeforeUnload)
 
@@ -1330,6 +1354,7 @@ onDeactivated(() => {
 })
 
 onUnmounted(() => {
+  window.removeEventListener('resize', _checkWidth)
   window.removeEventListener('beforeunload', handleBeforeUnload)
   interruptAndSave()
   resetTypewriter()
@@ -1362,6 +1387,65 @@ onUnmounted(() => {
   border: 1px solid var(--sidebar-border);
   border-radius: var(--radius-lg);
   overflow: hidden;
+  transition: width var(--duration-normal) var(--ease-out),
+              min-width var(--duration-normal) var(--ease-out);
+}
+
+/* Collapsed sidebar: icon-only strip */
+.chat-sidebar--collapsed {
+  width: 48px;
+  min-width: 48px;
+}
+.chat-sidebar--collapsed .sidebar-list,
+.chat-sidebar--collapsed .sidebar-empty {
+  display: none;
+}
+
+/* Sidebar topbar: toggle button + new-chat button on same row */
+.sidebar-topbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 8px 0;
+  flex-shrink: 0;
+}
+
+.sidebar-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-out);
+}
+.sidebar-toggle:hover {
+  background: var(--plaw-primary-soft);
+  color: var(--plaw-primary);
+  border-color: var(--plaw-primary-soft);
+}
+
+/* New-chat button inside topbar: stretch to fill remaining space */
+.sidebar-topbar .sidebar-new {
+  flex: 1;
+  margin: 0;
+  min-width: 0;
+}
+
+/* Collapsed state: topbar centers the toggle button */
+.chat-sidebar--collapsed .sidebar-topbar {
+  justify-content: center;
+  margin: 8px 0;
+}
+
+/* Main area occupies full width when sidebar is collapsed */
+.chat-main--full {
+  /* flex: 1 already handles it; this class can be used for future tweaks */
 }
 
 .sidebar-new {
@@ -2139,5 +2223,29 @@ onUnmounted(() => {
   50% { opacity: 0; }
 }
 
-
+/* ---- Responsive breakpoints ---- */
+@media (max-width: 768px) {
+  .chat-sidebar {
+    /* On small windows, sidebar shrinks to icon-only automatically via JS.
+       But even without JS, constrain max width so chat area stays usable. */
+    width: 48px;
+    min-width: 48px;
+  }
+  .chat-sidebar:not(.chat-sidebar--collapsed) {
+    /* User manually expanded on small screen: allow it but limit width */
+    width: 200px;
+    min-width: 200px;
+  }
+  /* Reduce chat padding on narrow windows */
+  .chat-messages {
+    padding: 16px 12px;
+    gap: 12px;
+  }
+  .chat-msg {
+    max-width: 95%;
+  }
+  .chat-input-area {
+    margin: 0 8px 8px;
+  }
+}
 </style>

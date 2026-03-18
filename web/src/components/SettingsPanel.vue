@@ -280,6 +280,36 @@ const activeComponent = computed(() => componentMap[activeTab.value])
   border-radius: 0;
 }
 
+/* ---- Responsive breakpoints ---- */
+@media (max-width: 768px) {
+  .settings-panel {
+    width: 100vw;
+    height: 100vh;
+    max-width: none;
+    max-height: none;
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
+  }
+  .settings-tabs {
+    width: 120px;
+  }
+  .settings-tab span {
+    font-size: 0.75rem;
+  }
+  .settings-content {
+    padding: 16px;
+  }
+  .settings-content :deep(.page-header) {
+    margin: -16px -16px 12px;
+    padding: 16px 16px 10px;
+  }
+  .settings-content :deep(.sticky-actions) {
+    margin: 0 -16px -16px;
+    padding: 10px 16px 16px;
+  }
+}
+
 /* --- Transition --- */
 .settings-fade-enter-active,
 .settings-fade-leave-active {
