@@ -32,7 +32,7 @@ html {
 input:focus-visible,
 textarea:focus-visible,
 select:focus-visible {
-  outline: none;
+  outline: none !important;
   box-shadow: var(--input-focus-shadow);
   border-color: var(--plaw-primary);
 }
