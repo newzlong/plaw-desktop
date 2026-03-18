@@ -101,8 +101,8 @@ async function togglePlaw() {
   border: 1px solid var(--sidebar-border);
   border-radius: var(--radius-lg);
   overflow: hidden;
-  transition: width var(--duration-normal) var(--ease-out),
-              min-width var(--duration-normal) var(--ease-out);
+  will-change: width;
+  transition: width 0.2s var(--ease-out);
 }
 
 /* Collapsed sidebar: icon-only strip */
@@ -112,7 +112,10 @@ async function togglePlaw() {
 }
 .chat-sidebar--collapsed .sidebar-list,
 .chat-sidebar--collapsed .sidebar-empty {
-  display: none;
+  opacity: 0;
+  visibility: hidden;
+  height: 0;
+  overflow: hidden;
 }
 
 /* Sidebar topbar: toggle button + new-chat button on same row */
@@ -189,6 +192,7 @@ async function togglePlaw() {
   flex: 1;
   overflow-y: auto;
   padding: 6px 8px;
+  transition: opacity 0.15s var(--ease-out);
 }
 
 .sidebar-empty {
