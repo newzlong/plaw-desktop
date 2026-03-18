@@ -25,21 +25,17 @@ html {
 ::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
 
 /* --- Focus ring --- */
-:focus-visible {
+:focus-visible:not(input):not(textarea):not(select):not([data-focus-own]) {
   outline: 2px solid var(--plaw-primary);
   outline-offset: 2px;
 }
 input:focus-visible,
 textarea:focus-visible,
-select:focus-visible {
+select:focus-visible,
+[data-focus-own]:focus-visible {
   outline: none !important;
   box-shadow: var(--input-focus-shadow);
-  border-color: var(--plaw-primary);
-}
-.focus-ring:focus-visible {
-  outline: none;
-  box-shadow: var(--input-focus-shadow);
-  border-color: var(--plaw-primary);
+  border-color: var(--input-focus-border);
 }
 
 /* --- Reduced motion --- */
