@@ -441,12 +441,36 @@ async fn auto_restart(
             if std::net::TcpListener::bind(format!("127.0.0.1:{last_port}")).is_ok() {
                 last_port
             } else {
-                let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-                l.local_addr().unwrap().port()
+                match std::net::TcpListener::bind("127.0.0.1:0")
+                    .and_then(|l| l.local_addr().map(|a| a.port()))
+                {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let mut mgr = manager.lock().await;
+                        mgr.logs.push(LogLine {
+                            timestamp: chrono_now(),
+                            level: "ERROR".to_string(),
+                            message: format!("Auto-restart failed: cannot allocate port: {e}"),
+                        });
+                        return;
+                    }
+                }
             }
         } else {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            l.local_addr().unwrap().port()
+            match std::net::TcpListener::bind("127.0.0.1:0")
+                .and_then(|l| l.local_addr().map(|a| a.port()))
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    let mut mgr = manager.lock().await;
+                    mgr.logs.push(LogLine {
+                        timestamp: chrono_now(),
+                        level: "ERROR".to_string(),
+                        message: format!("Auto-restart failed: cannot allocate port: {e}"),
+                    });
+                    return;
+                }
+            }
         };
 
         let mut mgr = manager.lock().await;

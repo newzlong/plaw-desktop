@@ -198,9 +198,11 @@ import ChatSidebar from '../components/ChatSidebar.vue'
 
 defineOptions({ name: 'ChatView' })
 import { getGatewayPort } from '../api/tauri'
-import { listSessions, readSession, saveSession, deleteSession, getSessionNotifications, consumeNotifications, cancelActiveChat, auditAllUnaudited, saveUpload } from '../api/tauri'
+import { listSessions, readSession, saveSession, deleteSession, getSessionNotifications, consumeNotifications, cancelActiveChat, auditAllUnaudited } from '../api/tauri'
 import { usePlawState } from '../composables/usePlawState'
 import { useI18n } from '../composables/useI18n'
+import { useFileAttachments } from '../composables/useFileAttachments'
+import { useContextWindow } from '../composables/useContextWindow'
 import { listen } from '@tauri-apps/api/event'
 import { useNotifications } from '../composables/useNotifications'
 import { marked } from 'marked'
@@ -229,17 +231,18 @@ const appIsZh = inject('isZh', computed(() => false))
 const messages = ref([])
 const inputText = ref('')
 const streaming = ref(false)
-const compacting = ref(false)
 // WebSocket-level connection status
 const wsConnected = ref(false)
 const messagesRef = ref(null)
 const inputRef = ref(null)
 const fileInputRef = ref(null)
 
-// File attachments: { name, type, size, file (File object), preview (data URI for images) }
-const attachedFiles = ref([])
-const MAX_FILE_SIZE = 50 * 1024 * 1024 // 50MB
-const MAX_FILES = 10
+// File attachments (composable)
+const {
+  attachedFiles, addFiles, removeFile, clearFiles,
+  onFileSelect, onPaste, onDrop, onDragOver,
+  formatFileSize, saveFilesToDisk, buildContentWithFiles,
+} = useFileAttachments()
 
 const sessions = ref([])
 const currentSessionId = ref(null)
@@ -263,45 +266,13 @@ const showDeleteDialog = computed({
   set: (v) => { if (!v) confirmDeleteId.value = null },
 })
 
-// Context window usage tracking
-const contextUsed = ref(0)   // input_tokens from last done event
-const contextMax = ref(0)    // max_context_tokens from server
-let lastConfirmedTokens = 0  // last server-confirmed input_tokens (for streaming estimation)
-
-/** Rough token estimate from message list (fallback when no server data) */
-function estimateTokens(msgs) {
-  let chars = 0
-  for (const m of msgs) chars += (m.content || '').length
-  // ~3 chars per token for mixed CJK/English; add overhead for system prompt (~2000 tokens)
-  return Math.round(chars / 3) + 2000
-}
-
-const contextPercent = computed(() => {
-  if (!contextMax.value || !contextUsed.value) return 0
-  return Math.min(100, (contextUsed.value / contextMax.value) * 100)
-})
-
-const contextDotClass = computed(() => {
-  const p = contextPercent.value
-  if (p >= 85) return 'context-dot--critical'
-  if (p >= 70) return 'context-dot--warning'
-  if (p >= 50) return 'context-dot--moderate'
-  return 'context-dot--ok'
-})
-
-const contextLabel = computed(() => {
-  if (!contextMax.value) return '0K / 200K'
-  const usedK = (contextUsed.value / 1000).toFixed(1)
-  const maxK = Math.round(contextMax.value / 1000)
-  return `${usedK}K / ${maxK}K`
-})
-
-const contextTooltip = computed(() => {
-  const p = contextPercent.value.toFixed(2)
-  return isZh.value
-    ? `上下文用量 ${p}%（${contextLabel.value} tokens）`
-    : `Context usage ${p}% (${contextLabel.value} tokens)`
-})
+// Context window usage tracking (composable)
+const {
+  contextUsed, contextMax, compacting,
+  contextPercent, contextDotClass, contextLabel, contextTooltip,
+  updateFromDone: ctxUpdateFromDone, updateFromCompacted: ctxUpdateFromCompacted,
+  initEstimate: ctxInitEstimate, reset: ctxReset, restoreFromSession: ctxRestoreFromSession,
+} = useContextWindow(isZh)
 
 const canManualCompact = computed(() => {
   return connStatus.value === 'connected' && !streaming.value && !compacting.value && messages.value.length > 2
@@ -318,10 +289,8 @@ const compactTooltip = computed(() => {
 function manualCompact() {
   if (!canManualCompact.value) return
   compacting.value = true
-  console.log('[compact] sending manual_compact, ws.readyState=', ws?.readyState, 'session=', currentSessionId.value)
   try {
     ws.send(JSON.stringify({ type: 'manual_compact', session_id: currentSessionId.value || undefined }))
-    console.log('[compact] sent ok')
   } catch (e) {
     console.error('[compact] send failed:', e)
     compacting.value = false
@@ -459,11 +428,7 @@ async function loadSession(id) {
       content: m.content,
       steps: m.steps || [],
     }))
-    // Restore context usage from saved session
-    if (session.context_used) contextUsed.value = session.context_used
-    else contextUsed.value = estimateTokens(messages.value)
-    if (session.context_max) contextMax.value = session.context_max
-    else contextMax.value = 200000  // default fallback
+    ctxRestoreFromSession(session)
     scrollToBottom()
   } catch {
     // Session may have been deleted
@@ -477,9 +442,7 @@ async function newSession() {
   currentSessionId.value = null
   messages.value = []
   currentAssistant.value = { content: '', steps: [] }
-  contextUsed.value = 0
-  contextMax.value = 0
-  lastConfirmedTokens = 0
+  ctxReset()
   pendingAutoContinue = false
   pendingSendText = null
   ignoreNextDone = false
@@ -509,9 +472,7 @@ async function confirmDelete() {
     currentSessionId.value = null
     messages.value = []
     currentAssistant.value = { content: '', steps: [] }
-    contextUsed.value = 0
-    contextMax.value = 0
-    lastConfirmedTokens = 0
+    ctxReset()
     pendingAutoContinue = false
     pendingSendText = null
     ignoreNextDone = false
@@ -588,76 +549,7 @@ function autoGrow() {
   el.style.overflowY = sh > maxH ? 'auto' : 'hidden'
 }
 
-// ── File attachment helpers ──
-function readFileAsDataURI(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(reader.result)
-    reader.onerror = reject
-    reader.readAsDataURL(file)
-  })
-}
-
-function readFileAsArrayBuffer(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(new Uint8Array(reader.result))
-    reader.onerror = reject
-    reader.readAsArrayBuffer(file)
-  })
-}
-
-async function addFiles(files) {
-  for (const file of files) {
-    if (attachedFiles.value.length >= MAX_FILES) break
-    if (file.size > MAX_FILE_SIZE) continue
-    const entry = { name: file.name, type: file.type, size: file.size, file }
-    if (file.type.startsWith('image/')) {
-      entry.preview = await readFileAsDataURI(file)
-    }
-    attachedFiles.value.push(entry)
-  }
-}
-
-function removeFile(index) {
-  attachedFiles.value.splice(index, 1)
-}
-
-function onFileSelect(e) {
-  if (e.target.files) addFiles(Array.from(e.target.files))
-  e.target.value = ''
-}
-
-function onPaste(e) {
-  const items = e.clipboardData?.items
-  if (!items) return
-  const pasteFiles = []
-  for (const item of items) {
-    if (item.kind === 'file') {
-      const file = item.getAsFile()
-      if (file) pasteFiles.push(file)
-    }
-  }
-  if (pasteFiles.length) {
-    e.preventDefault()
-    addFiles(pasteFiles)
-  }
-}
-
-function onDrop(e) {
-  e.preventDefault()
-  if (e.dataTransfer?.files) addFiles(Array.from(e.dataTransfer.files))
-}
-
-function onDragOver(e) {
-  e.preventDefault()
-}
-
-function formatFileSize(bytes) {
-  if (bytes < 1024) return bytes + 'B'
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + 'KB'
-  return (bytes / (1024 * 1024)).toFixed(1) + 'MB'
-}
+// File attachment helpers are now in useFileAttachments composable
 
 function renderMarkdown(text) {
   try {
@@ -868,12 +760,7 @@ function handleWsMessage(data) {
     updateLastAssistant()
     scrollToBottom()
   } else if (type === 'done') {
-    // Server sends context_used = full history size (next request's expected input).
-    if (data.usage?.context_used) {
-      contextUsed.value = data.usage.context_used
-      lastConfirmedTokens = contextUsed.value
-    }
-    if (data.context_window) contextMax.value = data.context_window
+    ctxUpdateFromDone(data)
     // If full_response arrived but no chunks were streamed, feed it to typewriter
     if (data.full_response && !targetContent) {
       targetContent = data.full_response
@@ -898,7 +785,7 @@ function handleWsMessage(data) {
     console.log('[compact] BEFORE: compacting.value=', compacting.value)
     compacting.value = false
     console.log('[compact] AFTER: compacting.value=', compacting.value)
-    if (data.estimated_tokens) contextUsed.value = data.estimated_tokens
+    ctxUpdateFromCompacted(data)
     const hasPending = data.has_pending_tasks
     const isManual = data.manual
     let notice
@@ -976,33 +863,7 @@ async function confirmRollback() {
   })
 }
 
-/** Save file entries via Tauri, return array of { name, path, isImage } */
-async function saveFilesToDisk(entries) {
-  const results = []
-  for (const entry of entries) {
-    try {
-      const bytes = await readFileAsArrayBuffer(entry.file)
-      const savedPath = await saveUpload(entry.name, bytes)
-      results.push({ name: entry.name, path: savedPath, isImage: entry.type.startsWith('image/') })
-    } catch (e) {
-      console.warn('Failed to save upload:', entry.name, e)
-    }
-  }
-  return results
-}
-
-function buildContentWithFiles(text, savedFiles) {
-  if (!savedFiles.length) return text
-  let content = text
-  for (const f of savedFiles) {
-    if (f.isImage) {
-      content += `\n[IMAGE:${f.path}]`
-    } else {
-      content += `\n[附件] 原始文件名: ${f.name} → 已保存到: ${f.path} (请使用此完整路径读取文件)`
-    }
-  }
-  return content
-}
+// saveFilesToDisk and buildContentWithFiles are now in useFileAttachments composable
 
 function sendMessage() {
   const text = inputText.value.trim()
@@ -1029,7 +890,7 @@ function sendMessage() {
     const interruptDisplay = text + (interruptFiles.length ? `\n📎 ${interruptFiles.map(f => f.name).join(', ')}` : '')
     messages.value.push({ role: 'user', content: interruptDisplay, images: interruptPreviews })
     messages.value.push({ role: 'assistant', content: '', steps: [] })
-    attachedFiles.value = []
+    clearFiles()
     inputText.value = ''
     scheduleSave()
     scrollToBottom()
@@ -1078,14 +939,9 @@ async function doSendMessage(text) {
   messages.value.push({ role: 'user', content: displayContent, images: filePreviews })
   messages.value.push({ role: 'assistant', content: '', steps: [] })
   currentAssistant.value = { content: '', steps: [] }
-  attachedFiles.value = []
+  clearFiles()
 
-  // Context bar: keep last server-confirmed value (updated on 'done' events).
-  // Only use rough estimate for the very first message when no server data exists.
-  if (!contextUsed.value && !lastConfirmedTokens) {
-    contextUsed.value = estimateTokens(messages.value)
-  }
-  if (!contextMax.value) contextMax.value = 200000
+  ctxInitEstimate(messages.value)
 
   inputText.value = ''
   streaming.value = true
@@ -1190,11 +1046,7 @@ onMounted(async () => {
         content: m.content,
         steps: m.steps || [],
       }))
-      // Restore context usage from saved session
-      if (session.context_used) contextUsed.value = session.context_used
-      else contextUsed.value = estimateTokens(messages.value)
-      if (session.context_max) contextMax.value = session.context_max
-      else contextMax.value = 200000
+      ctxRestoreFromSession(session)
     } catch {
       // Session may have been deleted, try the most recent
     }

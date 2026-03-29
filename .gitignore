@@ -27,3 +27,11 @@ packages/
 
 # Secrets
 kmkey.txt
+
+# Test/probe files
+src-tauri/plaw_probe_*.json
+1.md
+
+# Build artifacts
+src-tauri/target/
+plaw/target/
