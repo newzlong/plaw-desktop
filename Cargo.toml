@@ -24,6 +24,7 @@ statrs = "0.18"
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "process", "signal", "io-util"] }
 tokio-stream = "0.1"
+tokio-util = "0.7"
 
 # WebSocket client (for talking to plaw)
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
