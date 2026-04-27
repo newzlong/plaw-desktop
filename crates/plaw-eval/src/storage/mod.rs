@@ -1,6 +1,10 @@
-//! SQLite-backed storage for runs, case results, judge cache, and the flywheel queue.
-//!
-//! Schema and repo layer arrive in M2.
+//! SQLite-backed storage for runs, case results, judge cache, flywheel queue.
 
-// pub mod schema;
-// pub mod repo;
+pub mod schema;
+pub mod repo;
+
+pub use schema::{
+    AggregateReport, CaseResult, FlywheelEntry, JudgeCacheEntry, MetricAggregate, MetricScore, Run,
+    SCHEMA_SQL,
+};
+pub use repo::EvalRepo;

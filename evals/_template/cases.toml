@@ -1,0 +1,74 @@
+# Plaw Eval Suite Template
+#
+# Copy this directory to `evals/<your-suite-name>/` and edit. The schema
+# version follows semver; bump major when removing fields. plaw-eval will
+# only load suites whose major version matches its own (currently 1).
+
+name = "template"
+version = "1.0.0"
+description = "Template suite. Replace with a real description before use."
+
+# Default judge applied to every metric in this suite. Individual metrics
+# can override via [metrics.<name>.judge].
+[default_judge]
+model = "kimi-k2.5"
+provider = "kimi"
+temperature = 0.0
+mode = { kind = "pairwise", dual_pass = true }
+
+# A jury example (uncomment to use):
+# [default_judge]
+# model = "kimi-k2.5"           # primary
+# provider = "kimi"
+# temperature = 0.0
+# [default_judge.mode]
+# kind = "jury"
+# aggregator = "majority"
+# models = [
+#   { model = "claude-sonnet-4.5", provider = "anthropic", temperature = 0.0,
+#     mode = { kind = "pairwise", dual_pass = true } },
+#   { model = "gpt-4o-mini", provider = "openai", temperature = 0.0,
+#     mode = { kind = "pairwise", dual_pass = true } },
+# ]
+
+# Metrics to compute on each case. Names must match a metric impl in
+# plaw_eval::metrics::*.
+[[metrics]]
+name = "g_eval"
+[metrics.params]
+dimension = "overall_quality"
+scale = 5
+
+# Cases. `cluster_id` opts a case into the cluster-robust SE pathway when
+# the suite contains many cases per cluster (e.g. multi-turn dialogues).
+[[cases]]
+id = "example-1"
+tags = ["demo"]
+cluster_id = "topic-greeting"
+[cases.input]
+kind = "chat"
+messages = [
+    { role = "user", content = "Hi, can you introduce yourself in one sentence?" },
+]
+[cases.expected]
+answer_keywords = ["assistant", "help"]
+
+[[cases]]
+id = "example-2"
+tags = ["demo"]
+[cases.input]
+kind = "agent"
+task = "List the files in the current directory."
+max_steps = 5
+[cases.expected]
+tool_sequence = ["list_dir"]
+
+[[cases]]
+id = "example-3"
+tags = ["demo", "rag"]
+[cases.input]
+kind = "rag"
+question = "What is the capital of France?"
+ground_truth_doc = "Paris is the capital and most populous city of France."
+[cases.expected]
+answer_keywords = ["Paris"]
