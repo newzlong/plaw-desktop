@@ -1,0 +1,23 @@
+[package]
+name = "plaw-eval-cli"
+description = "CLI for plaw-eval"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "plaw-eval"
+path = "src/main.rs"
+
+[dependencies]
+plaw-eval = { path = "../plaw-eval" }
+
+clap.workspace = true
+clap_complete.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
