@@ -10,7 +10,10 @@ openclaw-ref/
 # IDE
 .vscode/
 .idea/
-.kiro
+.kiro/*
+!.kiro/specs/
+.kiro/specs/*
+!.kiro/specs/plaw-elite/
 .claude
 *.swp
 
