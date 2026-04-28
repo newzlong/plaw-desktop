@@ -37,8 +37,8 @@ the standard error is too narrow when correlations exist. See
 
 | Suite | What it tests | Status |
 |-------|--------------|--------|
-| `chat_quality` | General single-turn chat quality (factual, math, writing) | Seeds only — needs designed cases |
-| `tool_routing` | Agent picks the correct tool for a stated intent | Seeds only — needs designed cases |
+| `chat_quality` | General single-turn chat quality (factual, math, writing) | **30 designed cases** — ready for baseline |
+| `tool_routing` | Agent picks the correct tool for a stated intent | **32 designed cases** — ready for baseline |
 | `rag_grounded_qa` | RAG faithfulness & answer relevancy on a fixed corpus | Stubbed — corpus + cases TBD |
 | `agent_multi_step` | Multi-step agent tasks with checkable end-state | Seeds only — needs designed cases |
 | `error_recovery` | Recovery from injected tool failures / bad outputs | Stubbed — needs fault-injection runtime |

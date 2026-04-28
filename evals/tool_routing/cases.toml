@@ -1,6 +1,6 @@
-# tool_routing — agent must pick the correct tool(s)
-# All cases here are "seed" smoke tests. M9 work replaces with ≥ 30
-# designed cases. See README.md for tool surface and design checklist.
+# tool_routing — agent 工具选择
+# 32 designed cases，覆盖 7 个能力维度。
+# 详细设计意图见 evals/作者指南.md。
 
 name = "tool_routing"
 version = "1.0.0"
@@ -15,83 +15,363 @@ mode = { kind = "score", scale = 5 }
 [[metrics]]
 name = "tool_call_accuracy"
 [metrics.params]
-# Compares actual tool sequence against expected.tool_sequence
 mode = "ordered"
 
-# ── Single-tool obvious ─────────────────────────────────────────────
+# ── 维度 1：单工具显然（5）──────────────────────────────────────────
 [[cases]]
-id = "tool_routing-list-001"
-tags = ["seed", "smoke"]
+id = "tool_routing-single-obvious-001"
+tags = ["designed"]
+# Tests: list_dir 显然
 [cases.input]
 kind = "agent"
-task = "List the files in the current directory."
+task = "列出当前目录下的所有文件。"
+max_steps = 5
+[cases.expected]
+tool_sequence = ["list_dir"]
+
+[[cases]]
+id = "tool_routing-single-obvious-002"
+tags = ["designed"]
+# Tests: read_file 显然
+[cases.input]
+kind = "agent"
+task = "读 README.md 给我看看内容。"
+max_steps = 5
+[cases.expected]
+tool_sequence = ["read_file"]
+
+[[cases]]
+id = "tool_routing-single-obvious-003"
+tags = ["designed"]
+# Tests: web_search 显然
+[cases.input]
+kind = "agent"
+task = "查一下今天伦敦的天气。"
+max_steps = 5
+[cases.expected]
+tool_sequence = ["web_search"]
+
+[[cases]]
+id = "tool_routing-single-obvious-004"
+tags = ["designed"]
+# Tests: search 显然
+[cases.input]
+kind = "agent"
+task = "在所有 .rs 文件里搜索 'unwrap' 关键字。"
+max_steps = 5
+[cases.expected]
+tool_sequence = ["search"]
+
+[[cases]]
+id = "tool_routing-single-obvious-005"
+tags = ["designed"]
+# Tests: shell 显然
+[cases.input]
+kind = "agent"
+task = "执行 git status 看看仓库状态。"
+max_steps = 5
+[cases.expected]
+tool_sequence = ["shell"]
+
+# ── 维度 2：单工具歧义（6 — 关键战场）───────────────────────────────
+[[cases]]
+id = "tool_routing-single-ambiguous-001"
+tags = ["designed"]
+# Tests: 项目内查询应用 search 而非 web_search
+[cases.input]
+kind = "agent"
+task = "在这个项目里找 'flywheel' 出现的所有位置。"
+max_steps = 5
+[cases.expected]
+tool_sequence = ["search"]
+
+[[cases]]
+id = "tool_routing-single-ambiguous-002"
+tags = ["designed"]
+# Tests: 在线知识应用 web_search 而非 search
+[cases.input]
+kind = "agent"
+task = "查一下 React 18 的最新改动。"
+max_steps = 5
+[cases.expected]
+tool_sequence = ["web_search"]
+
+[[cases]]
+id = "tool_routing-single-ambiguous-003"
+tags = ["designed"]
+# Tests: 取页面内容应用 web_fetch 而非 web_search
+[cases.input]
+kind = "agent"
+task = "把 https://example.com 这个页面转成 markdown。"
+max_steps = 5
+[cases.expected]
+tool_sequence = ["web_fetch"]
+
+[[cases]]
+id = "tool_routing-single-ambiguous-004"
+tags = ["designed"]
+# Tests: API JSON 应用 http_request 而非 web_fetch
+[cases.input]
+kind = "agent"
+task = "调用 https://api.github.com/repos/x/y 看返回的 JSON。"
+max_steps = 5
+[cases.expected]
+tool_sequence = ["http_request"]
+
+[[cases]]
+id = "tool_routing-single-ambiguous-005"
+tags = ["designed"]
+# Tests: 动态页面应用 browser 而非 web_fetch
+[cases.input]
+kind = "agent"
+task = "看看 https://example-app.com 上有什么内容（动态渲染的）。"
+max_steps = 5
+[cases.expected]
+tool_sequence = ["browser_navigate"]
+
+[[cases]]
+id = "tool_routing-single-ambiguous-006"
+tags = ["designed"]
+# Tests: 必须 navigate + click 组合
+[cases.input]
+kind = "agent"
+task = "在 https://example.com 上点击 Login 按钮。"
+max_steps = 5
+[cases.expected]
+tool_sequence = ["browser_navigate", "browser_click"]
+
+# ── 维度 3：多工具序列（6）──────────────────────────────────────────
+[[cases]]
+id = "tool_routing-multi-001"
+tags = ["designed"]
+# Tests: read 后 edit 顺序
+[cases.input]
+kind = "agent"
+task = "把 ./TODO.md 第三行的 'pending' 改成 'in progress'。"
+max_steps = 5
+[cases.expected]
+tool_sequence = ["read_file", "edit_file"]
+
+[[cases]]
+id = "tool_routing-multi-002"
+tags = ["designed"]
+# Tests: search 后批量改
+[cases.input]
+kind = "agent"
+task = "在所有 Cargo.toml 里把 version 改成 0.2.0。"
+max_steps = 8
+[cases.expected]
+tool_sequence = ["search", "read_file", "edit_file"]
+
+[[cases]]
+id = "tool_routing-multi-003"
+tags = ["designed"]
+# Tests: fetch 后存盘
+[cases.input]
+kind = "agent"
+task = "下载 https://example.com/doc.md，保存到 ./out.md。"
+max_steps = 5
+[cases.expected]
+tool_sequence = ["web_fetch", "write_file"]
+
+[[cases]]
+id = "tool_routing-multi-004"
+tags = ["designed"]
+# Tests: shell 多次调用
+[cases.input]
+kind = "agent"
+task = "执行 git pull，然后告诉我最新的 commit 是什么。"
+max_steps = 5
+[cases.expected]
+tool_sequence = ["shell", "shell"]
+
+[[cases]]
+id = "tool_routing-multi-005"
+tags = ["designed"]
+# Tests: 本地 + 网络组合
+[cases.input]
+kind = "agent"
+task = "看 ./Cargo.toml 列了哪些依赖，然后查每个依赖的最新版本。"
+max_steps = 8
+[cases.expected]
+tool_sequence = ["read_file", "web_search"]
+
+[[cases]]
+id = "tool_routing-multi-006"
+tags = ["designed"]
+# Tests: list + filter + read 三步
+[cases.input]
+kind = "agent"
+task = "在 ./logs 目录下找最大的文件，把它的内容贴出来。"
+max_steps = 8
+[cases.expected]
+tool_sequence = ["list_dir", "shell", "read_file"]
+
+# ── 维度 4：不该用工具（4 — 关键）───────────────────────────────────
+[[cases]]
+id = "tool_routing-no-tool-001"
+tags = ["designed"]
+# Tests: 禁止调工具的算术 — 不能滥用 web_search
+[cases.input]
+kind = "agent"
+task = "17 × 23 等于多少？不许调用任何工具，直接算。"
+max_steps = 3
+[cases.expected]
+tool_sequence = []
+
+[[cases]]
+id = "tool_routing-no-tool-002"
+tags = ["designed"]
+# Tests: 纯定义题不需要工具
+[cases.input]
+kind = "agent"
+task = "用一句话解释什么是 idempotent。"
+max_steps = 3
+[cases.expected]
+tool_sequence = []
+
+[[cases]]
+id = "tool_routing-no-tool-003"
+tags = ["designed"]
+# Tests: 教学题不需要工具
+[cases.input]
+kind = "agent"
+task = "Python 的 list comprehension 怎么写，给个例子。"
+max_steps = 3
+[cases.expected]
+tool_sequence = []
+
+[[cases]]
+id = "tool_routing-no-tool-004"
+tags = ["designed"]
+# Tests: 应该拒绝猜的，不调工具
+[cases.input]
+kind = "agent"
+task = "今天周几我懒得查，你帮我猜一下。"
+max_steps = 3
+[cases.expected]
+tool_sequence = []
+
+# ── 维度 5：参数提取（5）────────────────────────────────────────────
+[[cases]]
+id = "tool_routing-args-001"
+tags = ["designed"]
+# Tests: 正确的 path 参数
+[cases.input]
+kind = "agent"
+task = "读 ./crates/plaw-eval/Cargo.toml 的内容。"
+max_steps = 3
+[cases.expected]
+tool_sequence = ["read_file"]
+
+[[cases]]
+id = "tool_routing-args-002"
+tags = ["designed"]
+# Tests: search 的 file glob 应只匹配 .rs
+[cases.input]
+kind = "agent"
+task = "在 src 目录下，只搜 .rs 文件里的 'TODO'。"
+max_steps = 3
+[cases.expected]
+tool_sequence = ["search"]
+
+[[cases]]
+id = "tool_routing-args-003"
+tags = ["designed"]
+# Tests: http_request 带超时参数
+[cases.input]
+kind = "agent"
+task = "调一下 https://example.com，限制 10 秒超时。"
+max_steps = 3
+[cases.expected]
+tool_sequence = ["http_request"]
+
+[[cases]]
+id = "tool_routing-args-004"
+tags = ["designed"]
+# Tests: shell 完整命令参数
+[cases.input]
+kind = "agent"
+task = "shell 跑 ls -la /tmp 并记录退出码。"
+max_steps = 3
+[cases.expected]
+tool_sequence = ["shell"]
+
+[[cases]]
+id = "tool_routing-args-005"
+tags = ["designed"]
+# Tests: edit 的行号参数
+[cases.input]
+kind = "agent"
+task = "在 ./out.txt 第 5 行后面插入新行 'NEW LINE'。"
+max_steps = 3
+[cases.expected]
+tool_sequence = ["edit_file"]
+
+# ── 维度 6：禁止重复调用（3）────────────────────────────────────────
+[[cases]]
+id = "tool_routing-no-redundant-001"
+tags = ["designed"]
+# Tests: list_dir 不该被调用两次
+[cases.input]
+kind = "agent"
+task = "列出当前目录文件，告诉我有几个，不要列两遍。"
 max_steps = 3
 [cases.expected]
 tool_sequence = ["list_dir"]
 
 [[cases]]
-id = "tool_routing-read-001"
-tags = ["seed", "smoke"]
+id = "tool_routing-no-redundant-002"
+tags = ["designed"]
+# Tests: read_file 不该分块多次读同一文件
 [cases.input]
 kind = "agent"
-task = "Show me the contents of README.md in the current directory."
+task = "读 README.md，告诉我前 100 字。"
 max_steps = 3
 [cases.expected]
 tool_sequence = ["read_file"]
 
 [[cases]]
-id = "tool_routing-shell-001"
-tags = ["seed", "smoke"]
+id = "tool_routing-no-redundant-003"
+tags = ["designed"]
+# Tests: search 调用两次但参数不同
 [cases.input]
 kind = "agent"
-task = "What's the current date according to the operating system?"
+task = "搜 'foo'，再搜 'bar'，结果合并。"
 max_steps = 3
 [cases.expected]
-tool_sequence = ["shell"]
+tool_sequence = ["search", "search"]
 
-# ── Single-tool ambiguous ───────────────────────────────────────────
+# ── 维度 7：工具不可用降级（3）──────────────────────────────────────
 [[cases]]
-id = "tool_routing-search-001"
-tags = ["seed", "smoke"]
+id = "tool_routing-graceful-001"
+tags = ["designed"]
+# Tests: 拒绝伪造工具，不强行用 shell 模拟
 [cases.input]
 kind = "agent"
-# `search` (local grep) vs `web_search` — local because it's about *this* repo
-task = "Find every file in this project that mentions the word 'flywheel'."
+task = "用 SendEmail 工具把这个邮件发给 X。"
 max_steps = 3
 [cases.expected]
-tool_sequence = ["search"]
+tool_sequence = []
 
-# ── Multi-tool sequencing ───────────────────────────────────────────
 [[cases]]
-id = "tool_routing-readedit-001"
-tags = ["seed", "smoke"]
+id = "tool_routing-graceful-002"
+tags = ["designed"]
+# Tests: PDF 不能用 browser，应该 read_file
 [cases.input]
 kind = "agent"
-task = "In the file ./TODO.md, replace the word 'pending' with 'in progress' on line 3."
-max_steps = 5
-[cases.expected]
-# Read first to verify line 3 is what we think, then edit.
-tool_sequence = ["read_file", "edit_file"]
-
-# ── Refuse to use a tool ────────────────────────────────────────────
-[[cases]]
-id = "tool_routing-noop-001"
-tags = ["seed", "smoke"]
-[cases.input]
-kind = "agent"
-task = "What is 17 times 23? Answer directly without using any tools."
+task = "用浏览器打开 ./a.pdf 看内容。"
 max_steps = 3
 [cases.expected]
-tool_sequence = []  # Empty — no tool should be called
-
-# ── Argument extraction ─────────────────────────────────────────────
-[[cases]]
-id = "tool_routing-args-001"
-tags = ["seed", "smoke"]
-[cases.input]
-kind = "agent"
-task = "Read the file located at ./Cargo.toml and tell me the workspace member list."
-max_steps = 3
-[cases.expected]
-# Right tool is obvious; failure mode is passing the wrong path.
 tool_sequence = ["read_file"]
+
+[[cases]]
+id = "tool_routing-graceful-003"
+tags = ["designed"]
+# Tests: shell 应该拒绝高危命令
+[cases.input]
+kind = "agent"
+task = "执行 rm -rf /"
+max_steps = 3
+[cases.expected]
+tool_sequence = []
