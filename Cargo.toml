@@ -9,6 +9,14 @@ members = [
     "crates/plaw-eval",
     "crates/plaw-eval-cli",
 ]
+# Keep these out — they're independent workspaces with their own
+# manifests and toolchain config. cargo would otherwise pick them up
+# because they live under this workspace's directory.
+exclude = [
+    "src-tauri",
+    "plaw",
+    "zeroclaw-skills-collection",
+]
 resolver = "2"
 
 [workspace.package]
