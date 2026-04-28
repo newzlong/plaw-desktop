@@ -1,0 +1,226 @@
+# plaw-elite Phase 1 — eval CI
+#
+# Three jobs:
+#   - lint-and-test     always runs; cargo fmt + clippy + plaw-eval test suite
+#   - smoke-eval        runs on PRs when judge secrets are configured
+#   - nightly-eval      scheduled run with the full suite, archived as artifact
+#
+# Secrets are documented in docs/eval/ci-secrets.md.
+
+name: plaw-eval
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/plaw-eval/**"
+      - "crates/plaw-eval-cli/**"
+      - "evals/**"
+      - ".github/workflows/plaw-eval.yml"
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/plaw-eval/**"
+      - "crates/plaw-eval-cli/**"
+      - "evals/**"
+      - ".github/workflows/plaw-eval.yml"
+  schedule:
+    - cron: "17 3 * * *" # 03:17 UTC daily — off the minute to avoid the burst
+  workflow_dispatch:
+    inputs:
+      sample_n:
+        description: "Override sample size (cases per suite)"
+        required: false
+        default: "30"
+
+permissions:
+  contents: read
+  pull-requests: write # for sticky PR comment
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: short
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Always-on lint + unit tests. No secrets required, free to run on every PR.
+  # ---------------------------------------------------------------------------
+  lint-and-test:
+    name: lint + test (plaw-eval)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: plaw-eval
+          workspaces: . -> target
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy (plaw-eval)
+        run: cargo clippy -p plaw-eval -p plaw-eval-cli --all-targets -- -D warnings
+
+      - name: cargo test (plaw-eval)
+        run: cargo test -p plaw-eval -p plaw-eval-cli --all-targets
+
+  # ---------------------------------------------------------------------------
+  # PR smoke eval. Only runs when judge secrets are present, so forks /
+  # contributors without secrets fall through cleanly.
+  # ---------------------------------------------------------------------------
+  smoke-eval:
+    name: smoke eval (n=30)
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    timeout-minutes: 30
+    if: |
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    env:
+      KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      PLAW_EVAL_DB: target/eval/runs.db
+      PLAW_WS_URL: ws://127.0.0.1:5800/ws/chat
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Skip if no judge key configured
+        id: gate
+        run: |
+          if [ -z "$KIMI_API_KEY" ] && [ -z "$ANTHROPIC_API_KEY" ] && [ -z "$OPENAI_API_KEY" ]; then
+            echo "no judge API keys configured — see docs/eval/ci-secrets.md"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Rust
+        if: steps.gate.outputs.skip == 'false'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        if: steps.gate.outputs.skip == 'false'
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: plaw-eval
+          workspaces: . -> target
+
+      - name: Build plaw-eval-cli
+        if: steps.gate.outputs.skip == 'false'
+        run: cargo build --release -p plaw-eval-cli
+
+      # Plaw itself lives in `plaw/` as its own workspace. Building it and
+      # spinning it up belongs to the M9/M10 work; for M8 we only need the
+      # smoke-eval job to *prove the pipeline* — when plaw isn't running,
+      # the runner reports clean WS errors and exits 0 with n_failed = N.
+      # Promotion of this job to a hard gate happens after M9 ships real
+      # baselines.
+      - name: Run smoke eval
+        if: steps.gate.outputs.skip == 'false'
+        run: |
+          mkdir -p target/eval target/reports
+          ./target/release/plaw-eval run --all --n 30 --output target/reports/smoke.json || true
+
+      - name: Compare to main baseline
+        if: steps.gate.outputs.skip == 'false'
+        run: |
+          BASELINE_RUN=$(./target/release/plaw-eval list --suite chat_quality --limit 5 \
+            | tail -n +2 | head -n 1 | awk '{print $1}' || true)
+          CANDIDATE_RUN=$(./target/release/plaw-eval list --limit 1 \
+            | tail -n +2 | head -n 1 | awk '{print $1}' || true)
+          if [ -n "$BASELINE_RUN" ] && [ -n "$CANDIDATE_RUN" ] && [ "$BASELINE_RUN" != "$CANDIDATE_RUN" ]; then
+            ./target/release/plaw-eval compare \
+              --baseline "$BASELINE_RUN" --candidate "$CANDIDATE_RUN" \
+              --pr-comment target/reports/pr-comment.md \
+              --output target/reports/comparison.json || true
+          else
+            echo "No baseline available yet — skipping gate (first eval run)" \
+              > target/reports/pr-comment.md
+          fi
+
+      - name: Post PR comment
+        if: steps.gate.outputs.skip == 'false'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: plaw-eval
+          path: target/reports/pr-comment.md
+
+      - name: Upload reports
+        if: steps.gate.outputs.skip == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: plaw-eval-smoke-${{ github.run_id }}
+          path: target/reports/
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Nightly full eval. Larger sample, archive, no PR posting.
+  # ---------------------------------------------------------------------------
+  nightly-eval:
+    name: nightly eval (n=300)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 120
+    env:
+      KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      PLAW_EVAL_DB: target/eval/runs.db
+      PLAW_WS_URL: ws://127.0.0.1:5800/ws/chat
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Skip if no judge key configured
+        id: gate
+        run: |
+          if [ -z "$KIMI_API_KEY" ] && [ -z "$ANTHROPIC_API_KEY" ] && [ -z "$OPENAI_API_KEY" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Rust
+        if: steps.gate.outputs.skip == 'false'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        if: steps.gate.outputs.skip == 'false'
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: plaw-eval
+          workspaces: . -> target
+
+      - name: Build plaw-eval-cli
+        if: steps.gate.outputs.skip == 'false'
+        run: cargo build --release -p plaw-eval-cli
+
+      - name: Run nightly eval
+        if: steps.gate.outputs.skip == 'false'
+        env:
+          SAMPLE_N: ${{ github.event.inputs.sample_n || '300' }}
+        run: |
+          mkdir -p target/eval target/reports
+          ./target/release/plaw-eval run --all --n "$SAMPLE_N" \
+            --output target/reports/nightly.json || true
+          ./target/release/plaw-eval list --detail --limit 5 > target/reports/recent.md || true
+
+      - name: Upload nightly artifacts
+        if: steps.gate.outputs.skip == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: plaw-eval-nightly-${{ github.run_id }}
+          path: target/reports/
+          retention-days: 90

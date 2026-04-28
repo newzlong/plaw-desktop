@@ -57,11 +57,7 @@ pub struct BradleyTerryEstimate<I> {
 impl<I: Clone + Eq + std::hash::Hash> BradleyTerryEstimate<I> {
     /// Sorted list of (id, score) descending — the leaderboard view.
     pub fn ranking(&self) -> Vec<(I, f64)> {
-        let mut v: Vec<(I, f64)> = self
-            .scores
-            .iter()
-            .map(|(k, v)| (k.clone(), *v))
-            .collect();
+        let mut v: Vec<(I, f64)> = self.scores.iter().map(|(k, v)| (k.clone(), *v)).collect();
         v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         v
     }
@@ -115,7 +111,10 @@ where
 
     // Initialise parameters uniformly.
     let n = entrants.len();
-    let mut params: HashMap<I, f64> = entrants.iter().map(|k| (k.clone(), 1.0 / n as f64)).collect();
+    let mut params: HashMap<I, f64> = entrants
+        .iter()
+        .map(|k| (k.clone(), 1.0 / n as f64))
+        .collect();
 
     let mut converged = false;
     let mut iters = 0;
@@ -297,7 +296,10 @@ mod tests {
         let est = bradley_terry_mle(&cs, DEFAULT_MAX_ITERS, DEFAULT_TOLERANCE).unwrap();
         let a = est.scores["A"];
         let b = est.scores["B"];
-        assert!((a - b).abs() < 1e-3, "expected ≈ equal scores, got A={a}, B={b}");
+        assert!(
+            (a - b).abs() < 1e-3,
+            "expected ≈ equal scores, got A={a}, B={b}"
+        );
         assert!((a + b - 1.0).abs() < 1e-9);
     }
 

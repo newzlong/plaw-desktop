@@ -9,10 +9,12 @@ use anyhow::{anyhow, Result};
 /// Parse a semver string into `(major, minor, patch)`. Pre-release / build
 /// metadata are stripped. Returns an error on malformed input.
 pub fn parse_semver(version: &str) -> Result<(u32, u32, u32)> {
-    let core = version.split(|c| c == '-' || c == '+').next().unwrap_or("");
+    let core = version.split(['-', '+']).next().unwrap_or("");
     let parts: Vec<&str> = core.split('.').collect();
     if parts.len() < 2 {
-        return Err(anyhow!("malformed version '{version}': need at least major.minor"));
+        return Err(anyhow!(
+            "malformed version '{version}': need at least major.minor"
+        ));
     }
     let major: u32 = parts[0]
         .parse()
@@ -20,7 +22,9 @@ pub fn parse_semver(version: &str) -> Result<(u32, u32, u32)> {
     let minor: u32 = parts[1]
         .parse()
         .map_err(|e| anyhow!("minor component invalid in '{version}': {e}"))?;
-    let patch: u32 = parts.get(2).map_or(Ok(0), |s| s.parse())
+    let patch: u32 = parts
+        .get(2)
+        .map_or(Ok(0), |s| s.parse())
         .map_err(|e| anyhow!("patch component invalid in '{version}': {e}"))?;
     Ok((major, minor, patch))
 }

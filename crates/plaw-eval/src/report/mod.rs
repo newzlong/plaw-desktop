@@ -7,9 +7,8 @@ pub mod markdown;
 pub mod pr_comment;
 
 pub use gate::{
-    aggregate_and_compare, compare_in_memory, compare_runs, compare_runs_default,
-    ComparisonReport, GateVerdict, MetricComparison, MetricVerdict, PairedDiffSummary,
-    DEFAULT_EPSILON,
+    aggregate_and_compare, compare_in_memory, compare_runs, compare_runs_default, ComparisonReport,
+    GateVerdict, MetricComparison, MetricVerdict, PairedDiffSummary, DEFAULT_EPSILON,
 };
 pub use json::{
     render_aggregate as render_aggregate_json, render_comparison as render_comparison_json,

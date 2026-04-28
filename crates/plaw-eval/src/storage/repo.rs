@@ -12,8 +12,8 @@ use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::schema::{
-    AggregateReport, CaseResult, FlywheelEntry, JudgeCacheEntry, MetricAggregate, MetricScore,
-    Run, SCHEMA_SQL,
+    AggregateReport, CaseResult, FlywheelEntry, JudgeCacheEntry, MetricAggregate, MetricScore, Run,
+    SCHEMA_SQL,
 };
 
 /// Repository handle. Cheap to clone via `Arc` if multiple owners are needed.
@@ -152,8 +152,8 @@ impl EvalRepo {
 
     pub fn insert_case_result(&self, result: &CaseResult) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        let metric_json = serde_json::to_string(&result.metric_scores)
-            .context("serialising metric scores")?;
+        let metric_json =
+            serde_json::to_string(&result.metric_scores).context("serialising metric scores")?;
         conn.execute(
             "INSERT INTO case_results (run_id, case_id, case_cluster, plaw_response,
                                        plaw_trace_id, metric_scores, latency_ms,
@@ -186,8 +186,8 @@ impl EvalRepo {
         scores: &std::collections::HashMap<String, MetricScore>,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        let metric_json = serde_json::to_string(scores)
-            .context("serialising metric scores for update")?;
+        let metric_json =
+            serde_json::to_string(scores).context("serialising metric scores for update")?;
         conn.execute(
             "UPDATE case_results SET metric_scores = ?3 WHERE run_id = ?1 AND case_id = ?2",
             params![run_id, case_id, metric_json],
@@ -370,11 +370,7 @@ fn row_to_case_result(row: &rusqlite::Row<'_>) -> rusqlite::Result<CaseResult> {
     let metric_json: String = row.get(5)?;
     let metric_scores: std::collections::HashMap<String, MetricScore> =
         serde_json::from_str(&metric_json).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                5,
-                rusqlite::types::Type::Text,
-                Box::new(e),
-            )
+            rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(e))
         })?;
     Ok(CaseResult {
         run_id: row.get(0)?,
@@ -461,8 +457,10 @@ mod tests {
     fn round_trips_run_and_results() {
         let repo = EvalRepo::open_in_memory().unwrap();
         repo.insert_run(&sample_run()).unwrap();
-        repo.insert_case_result(&sample_result("run-1", "c1")).unwrap();
-        repo.insert_case_result(&sample_result("run-1", "c2")).unwrap();
+        repo.insert_case_result(&sample_result("run-1", "c1"))
+            .unwrap();
+        repo.insert_case_result(&sample_result("run-1", "c2"))
+            .unwrap();
         repo.update_run_finished("run-1", 200, 2, 0).unwrap();
 
         let run = repo.load_run("run-1").unwrap().unwrap();
@@ -525,7 +523,8 @@ mod tests {
         repo.flywheel_enqueue(&entry).unwrap();
         assert_eq!(repo.flywheel_list_pending(10).unwrap().len(), 1);
 
-        repo.flywheel_set_status("f1", "approved", Some(123)).unwrap();
+        repo.flywheel_set_status("f1", "approved", Some(123))
+            .unwrap();
         assert!(repo.flywheel_list_pending(10).unwrap().is_empty());
     }
 

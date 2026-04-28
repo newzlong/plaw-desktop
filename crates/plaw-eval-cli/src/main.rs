@@ -13,8 +13,7 @@ use plaw_eval::judges::{api_key_env_var, build_from_spec};
 use plaw_eval::metrics::score_run;
 use plaw_eval::report::{
     compare_runs, extract_failing_rows, render_aggregate_md, render_comparison_md,
-    render_pr_comment, write_aggregate_json, write_comparison_json, GateVerdict,
-    DEFAULT_EPSILON,
+    render_pr_comment, write_aggregate_json, write_comparison_json, GateVerdict, DEFAULT_EPSILON,
 };
 use plaw_eval::runner::{
     aggregate, execute, PlawClient, RunnerConfig, DEFAULT_AGGREGATE_ALPHA, DEFAULT_TIMEOUT,
@@ -270,7 +269,11 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        Command::List { limit, suite, detail } => cmd_list(&db_path, suite.as_deref(), limit, detail),
+        Command::List {
+            limit,
+            suite,
+            detail,
+        } => cmd_list(&db_path, suite.as_deref(), limit, detail),
         Command::Compare {
             baseline,
             candidate,
@@ -394,7 +397,11 @@ async fn cmd_run(
     }
 
     for (path, suite) in targets {
-        println!("running suite '{}' ({} cases)", suite.name, suite.cases.len());
+        println!(
+            "running suite '{}' ({} cases)",
+            suite.name,
+            suite.cases.len()
+        );
         let plaw = PlawClient::new(&ws);
         let plaw = if let Some(b) = ws_bearer {
             plaw.with_bearer(b)
@@ -460,7 +467,11 @@ async fn cmd_run(
 }
 
 fn targets_count_hint(suites: &[String], all: bool) -> usize {
-    if all { 2 } else { suites.len() }
+    if all {
+        2
+    } else {
+        suites.len()
+    }
 }
 
 fn file_stem(p: &Path) -> String {
@@ -492,7 +503,9 @@ fn cmd_list(db_path: &Path, suite: Option<&str>, limit: usize, detail: bool) -> 
             r.n_total,
             r.n_completed,
             r.n_failed,
-            r.finished_at.map(format_unix).unwrap_or_else(|| "(running)".into()),
+            r.finished_at
+                .map(format_unix)
+                .unwrap_or_else(|| "(running)".into()),
         );
     }
     if detail {
@@ -565,9 +578,7 @@ fn cmd_compare(
 fn cmd_power(effect: f64, sigma: f64, alpha: f64, power: f64) -> Result<()> {
     let n = required_sample_size(effect, sigma, alpha, power)
         .ok_or_else(|| anyhow!("invalid power-analysis inputs"))?;
-    println!(
-        "Required n = {n} for effect={effect} sigma={sigma} alpha={alpha} power={power}"
-    );
+    println!("Required n = {n} for effect={effect} sigma={sigma} alpha={alpha} power={power}");
     Ok(())
 }
 

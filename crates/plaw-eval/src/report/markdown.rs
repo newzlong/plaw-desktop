@@ -15,7 +15,10 @@ pub fn render_aggregate(report: &AggregateReport) -> String {
     let _ = writeln!(out);
     let _ = writeln!(out, "Run: `{}`", report.run_id);
     let _ = writeln!(out);
-    let _ = writeln!(out, "| Metric | n | mean | 95% CI | SE | clustered SE | clusters |");
+    let _ = writeln!(
+        out,
+        "| Metric | n | mean | 95% CI | SE | clustered SE | clusters |"
+    );
     let _ = writeln!(out, "|---|---:|---:|---|---:|---:|---:|");
 
     let mut keys: Vec<&String> = report.metrics.keys().collect();

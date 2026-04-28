@@ -68,8 +68,7 @@ impl Jury {
         if members.is_empty() {
             return Err(anyhow!("jury requires at least one member"));
         }
-        let distinct: std::collections::HashSet<_> =
-            members.iter().map(|m| m.family()).collect();
+        let distinct: std::collections::HashSet<_> = members.iter().map(|m| m.family()).collect();
         if distinct.len() < min_distinct_families {
             return Err(anyhow!(
                 "jury must include at least {} distinct families (got {} from {} members)",
@@ -78,24 +77,33 @@ impl Jury {
                 members.len()
             ));
         }
-        Ok(Self { members, aggregator })
+        Ok(Self {
+            members,
+            aggregator,
+        })
     }
 
     /// For ad-hoc use cases (single-judge sanity checks etc.) where the
     /// cross-family rule should be bypassed. Logs a warning so callers
     /// don't accidentally silence the safety net in production.
-    pub fn new_unchecked(
-        members: Vec<Arc<dyn JudgeClient>>,
-        aggregator: JuryAggregator,
-    ) -> Self {
-        if members.iter().map(|m| m.family()).collect::<std::collections::HashSet<_>>().len() < 2 {
+    pub fn new_unchecked(members: Vec<Arc<dyn JudgeClient>>, aggregator: JuryAggregator) -> Self {
+        if members
+            .iter()
+            .map(|m| m.family())
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            < 2
+        {
             tracing::warn!(
                 "Jury::new_unchecked: single-family jury created with {} members — \
                  self-preference bias is unmitigated",
                 members.len()
             );
         }
-        Self { members, aggregator }
+        Self {
+            members,
+            aggregator,
+        }
     }
 
     pub fn member_count(&self) -> usize {
@@ -182,9 +190,7 @@ fn aggregate_majority(members: &[JuryMemberRecord]) -> (PairwiseDecision, bool) 
 /// Confidence-weighted: confident verdicts (AWins/BWins/Tie) contribute 1.0,
 /// PositionInconsistent contributes 0.5 toward Tie. The verdict with the
 /// largest summed weight wins; ties between weight totals → inconclusive.
-fn aggregate_confidence_weighted(
-    members: &[JuryMemberRecord],
-) -> (PairwiseDecision, bool) {
+fn aggregate_confidence_weighted(members: &[JuryMemberRecord]) -> (PairwiseDecision, bool) {
     let mut a: f64 = 0.0;
     let mut b: f64 = 0.0;
     let mut tie: f64 = 0.0;
@@ -197,10 +203,14 @@ fn aggregate_confidence_weighted(
         }
     }
     let max = a.max(b).max(tie);
+    // Inconclusive when two or more buckets are tied at the top with at
+    // least one real (non-zero) vote. We test `tie > 0.0` instead of
+    // `b > 0.0` in the third clause to avoid the redundant comparison
+    // clippy flags when a == max && b == max already implies a == b.
     let inconclusive = (a == max && b == max && a > 0.0)
-        || (a == max && tie == max && a > 0.0)
-        || (b == max && tie == max && b > 0.0);
-    if a == max && a >= b {
+        || (a == max && tie == max && tie > 0.0)
+        || (b == max && tie == max && tie > 0.0);
+    if a == max {
         (PairwiseDecision::AWins, inconclusive)
     } else if b == max {
         (PairwiseDecision::BWins, inconclusive)
@@ -240,9 +250,8 @@ mod tests {
 
     #[test]
     fn unchecked_constructor_emits_warning_but_works() {
-        let members: Vec<Arc<dyn JudgeClient>> = vec![
-            mk(JudgeFamily::Kimi, "k1", vec!["[[1]]".into()]),
-        ];
+        let members: Vec<Arc<dyn JudgeClient>> =
+            vec![mk(JudgeFamily::Kimi, "k1", vec!["[[1]]".into()])];
         let jury = Jury::new_unchecked(members, JuryAggregator::Majority);
         assert_eq!(jury.member_count(), 1);
     }
@@ -252,9 +261,17 @@ mod tests {
         // Three members; two consistently pick a, one picks b.
         // Each member's dual-pass needs forward + swapped responses.
         let members: Vec<Arc<dyn JudgeClient>> = vec![
-            mk(JudgeFamily::Kimi, "k", vec!["[[1]]".into(), "[[2]]".into()]),       // → AWins
-            mk(JudgeFamily::Anthropic, "c", vec!["[[1]]".into(), "[[2]]".into()]),  // → AWins
-            mk(JudgeFamily::OpenAi, "g", vec!["[[2]]".into(), "[[1]]".into()]),     // → BWins
+            mk(JudgeFamily::Kimi, "k", vec!["[[1]]".into(), "[[2]]".into()]), // → AWins
+            mk(
+                JudgeFamily::Anthropic,
+                "c",
+                vec!["[[1]]".into(), "[[2]]".into()],
+            ), // → AWins
+            mk(
+                JudgeFamily::OpenAi,
+                "g",
+                vec!["[[2]]".into(), "[[1]]".into()],
+            ), // → BWins
         ];
         let jury = Jury::new(members, JuryAggregator::Majority, 3).unwrap();
         let verdict = jury.pairwise("Q?", "a", "b").await.unwrap();
@@ -266,8 +283,12 @@ mod tests {
     #[tokio::test]
     async fn majority_marks_inconclusive_on_split_vote() {
         let members: Vec<Arc<dyn JudgeClient>> = vec![
-            mk(JudgeFamily::Kimi, "k", vec!["[[1]]".into(), "[[2]]".into()]),    // AWins
-            mk(JudgeFamily::Anthropic, "c", vec!["[[2]]".into(), "[[1]]".into()]), // BWins
+            mk(JudgeFamily::Kimi, "k", vec!["[[1]]".into(), "[[2]]".into()]), // AWins
+            mk(
+                JudgeFamily::Anthropic,
+                "c",
+                vec!["[[2]]".into(), "[[1]]".into()],
+            ), // BWins
         ];
         let jury = Jury::new(members, JuryAggregator::Majority, 2).unwrap();
         let verdict = jury.pairwise("Q?", "a", "b").await.unwrap();
@@ -281,8 +302,16 @@ mod tests {
         // contributes 0.5 to Tie; AWins (2.0) still wins decisively.
         let members: Vec<Arc<dyn JudgeClient>> = vec![
             mk(JudgeFamily::Kimi, "k", vec!["[[1]]".into(), "[[2]]".into()]),
-            mk(JudgeFamily::Anthropic, "c", vec!["[[1]]".into(), "[[2]]".into()]),
-            mk(JudgeFamily::OpenAi, "g", vec!["[[1]]".into(), "[[1]]".into()]), // bias
+            mk(
+                JudgeFamily::Anthropic,
+                "c",
+                vec!["[[1]]".into(), "[[2]]".into()],
+            ),
+            mk(
+                JudgeFamily::OpenAi,
+                "g",
+                vec!["[[1]]".into(), "[[1]]".into()],
+            ), // bias
         ];
         let jury = Jury::new(members, JuryAggregator::ConfidenceWeighted, 3).unwrap();
         let verdict = jury.pairwise("Q?", "a", "b").await.unwrap();

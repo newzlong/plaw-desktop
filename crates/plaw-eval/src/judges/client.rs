@@ -218,10 +218,7 @@ impl JudgeClient for AnthropicClient {
         &self.model
     }
     async fn complete(&self, system: &str, user: &str) -> Result<JudgeCompletion> {
-        let url = format!(
-            "{}/v1/messages",
-            self.base_url.trim_end_matches('/')
-        );
+        let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
         let body = serde_json::json!({
             "model": self.model,
             "system": system,
@@ -291,7 +288,9 @@ struct AnthropicResponse {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicContentBlock {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     #[serde(other)]
     Other,
 }
@@ -327,7 +326,8 @@ impl JudgeClient for MockJudgeClient {
         &self.model
     }
     async fn complete(&self, _system: &str, _user: &str) -> Result<JudgeCompletion> {
-        let i = self.counter
+        let i = self
+            .counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let text = self
             .responses
@@ -348,7 +348,10 @@ mod tests {
 
     #[test]
     fn family_resolution_is_case_insensitive() {
-        assert_eq!(JudgeFamily::from_provider("anthropic"), JudgeFamily::Anthropic);
+        assert_eq!(
+            JudgeFamily::from_provider("anthropic"),
+            JudgeFamily::Anthropic
+        );
         assert_eq!(JudgeFamily::from_provider("Claude"), JudgeFamily::Anthropic);
         assert_eq!(JudgeFamily::from_provider("OPENAI"), JudgeFamily::OpenAi);
         assert_eq!(JudgeFamily::from_provider("kimi"), JudgeFamily::Kimi);
@@ -359,11 +362,8 @@ mod tests {
 
     #[tokio::test]
     async fn mock_client_rotates_through_responses() {
-        let mock = MockJudgeClient::new(
-            JudgeFamily::Kimi,
-            "kimi-k2.5",
-            vec!["A".into(), "B".into()],
-        );
+        let mock =
+            MockJudgeClient::new(JudgeFamily::Kimi, "kimi-k2.5", vec!["A".into(), "B".into()]);
         let r1 = mock.complete("sys", "u").await.unwrap();
         let r2 = mock.complete("sys", "u").await.unwrap();
         let r3 = mock.complete("sys", "u").await.unwrap();

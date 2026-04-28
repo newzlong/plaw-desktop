@@ -37,14 +37,12 @@ async fn spawn_mock(script: MockScript) -> SocketAddr {
                     Err(_) => return,
                 };
                 // Drain the inbound request frame.
-                if let Some(Ok(msg)) = ws.next().await {
-                    if let Message::Text(_) = msg {
-                        if !script.delay.is_zero() {
-                            tokio::time::sleep(script.delay).await;
-                        }
-                        for frame in script.frames.iter() {
-                            let _ = ws.send(Message::Text(frame.clone())).await;
-                        }
+                if let Some(Ok(Message::Text(_))) = ws.next().await {
+                    if !script.delay.is_zero() {
+                        tokio::time::sleep(script.delay).await;
+                    }
+                    for frame in script.frames.iter() {
+                        let _ = ws.send(Message::Text(frame.clone())).await;
                     }
                 }
                 let _ = ws.close(None).await;
@@ -123,8 +121,7 @@ fn minimal_suite(name: &str, n_cases: usize) -> Suite {
 #[tokio::test]
 async fn single_case_run_writes_results_to_sqlite() {
     let addr = spawn_mock(MockScript::ok("hello world")).await;
-    let plaw = PlawClient::new(format!("ws://{addr}"))
-        .with_timeout(Duration::from_secs(5));
+    let plaw = PlawClient::new(format!("ws://{addr}")).with_timeout(Duration::from_secs(5));
 
     let repo = Arc::new(EvalRepo::open_in_memory().unwrap());
     let cfg = RunnerConfig::new(minimal_suite("smoke", 1), plaw, repo.clone());
@@ -153,8 +150,7 @@ async fn single_case_run_writes_results_to_sqlite() {
 async fn errors_are_isolated_per_case_and_recorded() {
     // Server that always replies with an error event.
     let addr = spawn_mock(MockScript::error("simulated failure")).await;
-    let plaw = PlawClient::new(format!("ws://{addr}"))
-        .with_timeout(Duration::from_secs(5));
+    let plaw = PlawClient::new(format!("ws://{addr}")).with_timeout(Duration::from_secs(5));
     let repo = Arc::new(EvalRepo::open_in_memory().unwrap());
     let cfg = RunnerConfig::new(minimal_suite("err", 3), plaw, repo.clone());
 
@@ -174,8 +170,7 @@ async fn errors_are_isolated_per_case_and_recorded() {
 #[tokio::test]
 async fn concurrency_runs_multiple_cases_in_parallel() {
     let addr = spawn_mock(MockScript::ok("ok")).await;
-    let plaw = PlawClient::new(format!("ws://{addr}"))
-        .with_timeout(Duration::from_secs(5));
+    let plaw = PlawClient::new(format!("ws://{addr}")).with_timeout(Duration::from_secs(5));
     let repo = Arc::new(EvalRepo::open_in_memory().unwrap());
     let mut cfg = RunnerConfig::new(minimal_suite("concurrent", 12), plaw, repo.clone());
     cfg.concurrency = 4;
@@ -200,8 +195,7 @@ async fn cancellation_skips_remaining_cases() {
     // only the first batch (concurrency=2) is in flight; the rest get the
     // cancellation token and bail out immediately.
     let addr = spawn_mock(MockScript::ok_slow("ok", Duration::from_millis(200))).await;
-    let plaw = PlawClient::new(format!("ws://{addr}"))
-        .with_timeout(Duration::from_secs(5));
+    let plaw = PlawClient::new(format!("ws://{addr}")).with_timeout(Duration::from_secs(5));
     let repo = Arc::new(EvalRepo::open_in_memory().unwrap());
     let mut cfg = RunnerConfig::new(minimal_suite("cancel", 50), plaw, repo.clone());
     cfg.concurrency = 2;
@@ -232,8 +226,7 @@ async fn cancellation_skips_remaining_cases() {
 #[tokio::test]
 async fn sample_n_subsets_the_suite() {
     let addr = spawn_mock(MockScript::ok("ok")).await;
-    let plaw = PlawClient::new(format!("ws://{addr}"))
-        .with_timeout(Duration::from_secs(5));
+    let plaw = PlawClient::new(format!("ws://{addr}")).with_timeout(Duration::from_secs(5));
     let repo = Arc::new(EvalRepo::open_in_memory().unwrap());
     let mut cfg = RunnerConfig::new(minimal_suite("subset", 10), plaw, repo.clone());
     cfg.sample_n = Some(3);

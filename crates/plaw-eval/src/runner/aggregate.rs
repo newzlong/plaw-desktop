@@ -88,10 +88,7 @@ fn aggregate_one(obs: &[MetricObservation], alpha: f64) -> Option<MetricAggregat
     };
 
     // Cluster-robust SE when the cluster_id labels look meaningful.
-    let cluster_labels: Vec<String> = obs
-        .iter()
-        .filter_map(|o| o.cluster.clone())
-        .collect();
+    let cluster_labels: Vec<String> = obs.iter().filter_map(|o| o.cluster.clone()).collect();
     let (stderr_clustered, n_clusters) = if cluster_labels.len() == n {
         let n_clusters = count_clusters(&cluster_labels);
         if should_use_cluster_se(n, n_clusters) {
@@ -180,7 +177,12 @@ mod tests {
         let cases: Vec<_> = (0..30)
             .map(|i| {
                 let cluster = format!("topic-{}", i / 10);
-                case(&format!("c{i}"), Some(&cluster), "g_eval", (i as f64) / 30.0)
+                case(
+                    &format!("c{i}"),
+                    Some(&cluster),
+                    "g_eval",
+                    (i as f64) / 30.0,
+                )
             })
             .collect();
         let agg = aggregate_in_memory("r", &cases, 0.05);
@@ -221,7 +223,7 @@ mod tests {
         cases.push(case("c2", None, "tool_selection_f1", 0.5));
         let agg = aggregate_in_memory("r", &cases, 0.05);
         assert_eq!(agg.metrics.len(), 2);
-        for (_, m) in &agg.metrics {
+        for m in agg.metrics.values() {
             assert_eq!(m.n, 1);
             assert_eq!(m.ci_lower, m.mean); // n<2 fallback
             assert_eq!(m.ci_upper, m.mean);

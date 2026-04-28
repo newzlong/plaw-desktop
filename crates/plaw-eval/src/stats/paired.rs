@@ -25,8 +25,7 @@ impl PairedResult {
     /// `true` iff the CI excludes zero — i.e. the difference is significant
     /// at the given level.
     pub fn is_significant(&self) -> bool {
-        (self.ci.lower > 0.0 && self.ci.upper > 0.0)
-            || (self.ci.lower < 0.0 && self.ci.upper < 0.0)
+        (self.ci.lower > 0.0 && self.ci.upper > 0.0) || (self.ci.lower < 0.0 && self.ci.upper < 0.0)
     }
 }
 
@@ -35,11 +34,7 @@ impl PairedResult {
 /// `samples_a` and `samples_b` must have the same length, and entry `i` of
 /// each must correspond to the same eval case. Returns `None` when the
 /// inputs are mismatched, empty, or smaller than 2.
-pub fn paired_difference(
-    samples_a: &[f64],
-    samples_b: &[f64],
-    alpha: f64,
-) -> Option<PairedResult> {
+pub fn paired_difference(samples_a: &[f64], samples_b: &[f64], alpha: f64) -> Option<PairedResult> {
     if samples_a.len() != samples_b.len() || samples_a.len() < 2 {
         return None;
     }
@@ -50,11 +45,7 @@ pub fn paired_difference(
         .collect();
     let n = diffs.len();
     let mean = diffs.iter().sum::<f64>() / n as f64;
-    let var = diffs
-        .iter()
-        .map(|d| (d - mean).powi(2))
-        .sum::<f64>()
-        / (n as f64 - 1.0);
+    let var = diffs.iter().map(|d| (d - mean).powi(2)).sum::<f64>() / (n as f64 - 1.0);
     let se = (var / n as f64).sqrt();
     let ci = t_distribution_ci(mean, se, n, alpha)?;
     Some(PairedResult {
@@ -105,7 +96,7 @@ mod tests {
     fn rejects_mismatched_inputs() {
         assert!(paired_difference(&[1.0, 2.0], &[1.0], 0.05).is_none());
         assert!(paired_difference(&[1.0], &[1.0], 0.05).is_none());
-        assert!(paired_difference::<>(&[], &[], 0.05).is_none());
+        assert!(paired_difference(&[], &[], 0.05).is_none());
     }
 
     #[test]

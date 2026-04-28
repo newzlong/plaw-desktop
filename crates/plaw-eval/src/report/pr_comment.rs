@@ -19,10 +19,7 @@ use crate::storage::CaseResult;
 /// `(metric, case_id, baseline_score, candidate_score, judge)` tuples the
 /// caller has already filtered for relevance — the renderer doesn't
 /// re-aggregate.
-pub fn render(
-    report: &ComparisonReport,
-    failing_case_details: &[FailingCaseRow],
-) -> String {
+pub fn render(report: &ComparisonReport, failing_case_details: &[FailingCaseRow]) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "<!-- plaw-eval-comment -->");
     let _ = writeln!(out, "{}", render_comparison(report));
@@ -40,16 +37,18 @@ pub fn render(
             failing_case_details.len()
         );
         let _ = writeln!(out);
-        let _ = writeln!(
-            out,
-            "| Metric | Case | Baseline | Candidate | Δ | Judge |"
-        );
+        let _ = writeln!(out, "| Metric | Case | Baseline | Candidate | Δ | Judge |");
         let _ = writeln!(out, "|---|---|---:|---:|---:|---|");
         for r in failing_case_details {
             let _ = writeln!(
                 out,
                 "| `{}` | `{}` | {:.4} | {:.4} | {:+.4} | `{}` |",
-                r.metric, r.case_id, r.baseline_value, r.candidate_value, r.delta(), r.judge,
+                r.metric,
+                r.case_id,
+                r.baseline_value,
+                r.candidate_value,
+                r.delta(),
+                r.judge,
             );
         }
         let _ = writeln!(out, "</details>");

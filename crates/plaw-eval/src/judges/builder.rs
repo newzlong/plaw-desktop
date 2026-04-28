@@ -8,9 +8,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 
-use crate::judges::client::{
-    AnthropicClient, JudgeClient, JudgeFamily, OpenAiCompatClient,
-};
+use crate::judges::client::{AnthropicClient, JudgeClient, JudgeFamily, OpenAiCompatClient};
 use crate::suite::JudgeSpec;
 
 /// Convert a suite-level judge spec into a runtime-ready client. Picks
@@ -29,8 +27,8 @@ pub fn build_from_spec(spec: &JudgeSpec) -> Result<Arc<dyn JudgeClient>> {
 
     match provider.as_str() {
         "anthropic" | "claude" => {
-            let base_url =
-                std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| "https://api.anthropic.com".into());
+            let base_url = std::env::var("ANTHROPIC_BASE_URL")
+                .unwrap_or_else(|_| "https://api.anthropic.com".into());
             Ok(Arc::new(AnthropicClient::new(
                 family,
                 spec.model.clone(),
@@ -42,8 +40,8 @@ pub fn build_from_spec(spec: &JudgeSpec) -> Result<Arc<dyn JudgeClient>> {
         "kimi" | "moonshot" => {
             // Default to the Anthropic-compatible Kimi endpoint, matching
             // plaw's own provider config (CLAUDE.md).
-            let base_url = std::env::var("KIMI_BASE_URL")
-                .unwrap_or_else(|_| "https://api.moonshot.cn".into());
+            let base_url =
+                std::env::var("KIMI_BASE_URL").unwrap_or_else(|_| "https://api.moonshot.cn".into());
             Ok(Arc::new(AnthropicClient::new(
                 family,
                 spec.model.clone(),
@@ -53,8 +51,8 @@ pub fn build_from_spec(spec: &JudgeSpec) -> Result<Arc<dyn JudgeClient>> {
             )))
         }
         "openai" | "gpt" => {
-            let base_url =
-                std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com".into());
+            let base_url = std::env::var("OPENAI_BASE_URL")
+                .unwrap_or_else(|_| "https://api.openai.com".into());
             Ok(Arc::new(OpenAiCompatClient::new(
                 family,
                 spec.model.clone(),

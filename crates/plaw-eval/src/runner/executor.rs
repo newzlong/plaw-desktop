@@ -210,10 +210,13 @@ async fn run_one_case(
     let attempt = match plaw.send(&case.input).await {
         Ok(r) => Ok(r),
         Err(first_err) => {
-            tracing::warn!("case {} first attempt failed: {first_err}; retrying once", case.id);
-            plaw.send(&case.input).await.map_err(|e| {
-                anyhow::anyhow!("retry failed: {e} (first error: {first_err})")
-            })
+            tracing::warn!(
+                "case {} first attempt failed: {first_err}; retrying once",
+                case.id
+            );
+            plaw.send(&case.input)
+                .await
+                .map_err(|e| anyhow::anyhow!("retry failed: {e} (first error: {first_err})"))
         }
     };
 
@@ -279,7 +282,11 @@ fn sample_cases(cases: &[Case], n: Option<usize>, seed: Option<u64>) -> Vec<Case
         let j = i + (r % (cases.len() - i));
         indices.swap(i, j);
     }
-    indices.into_iter().take(want).map(|i| cases[i].clone()).collect()
+    indices
+        .into_iter()
+        .take(want)
+        .map(|i| cases[i].clone())
+        .collect()
 }
 
 fn now_unix() -> i64 {

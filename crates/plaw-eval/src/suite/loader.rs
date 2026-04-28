@@ -42,8 +42,8 @@ pub fn discover_suites(root: impl AsRef<Path>) -> Result<Vec<(PathBuf, Suite)>> 
     if !root.exists() {
         return Ok(out);
     }
-    for entry in fs::read_dir(root)
-        .with_context(|| format!("reading suite root {}", root.display()))?
+    for entry in
+        fs::read_dir(root).with_context(|| format!("reading suite root {}", root.display()))?
     {
         let entry = entry?;
         let path = entry.path();
@@ -174,11 +174,8 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let path = std::env::temp_dir().join(format!(
-            "plaw-eval-test-{}-{}",
-            std::process::id(),
-            n
-        ));
+        let path =
+            std::env::temp_dir().join(format!("plaw-eval-test-{}-{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path

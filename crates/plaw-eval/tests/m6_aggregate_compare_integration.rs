@@ -98,11 +98,15 @@ fn aggregate_then_gate_pipeline_pass() {
     assert!(md.contains("g_eval"));
 
     // Gate comparison should pass.
-    let report = plaw_eval::report::compare_runs_default(&repo, &baseline.id, &candidate.id)
-        .unwrap();
+    let report =
+        plaw_eval::report::compare_runs_default(&repo, &baseline.id, &candidate.id).unwrap();
     assert_eq!(report.verdict, GateVerdict::Pass);
     assert_eq!(report.paired_case_count, 30);
-    let g = report.metrics.iter().find(|m| m.metric == "g_eval").unwrap();
+    let g = report
+        .metrics
+        .iter()
+        .find(|m| m.metric == "g_eval")
+        .unwrap();
     assert_eq!(g.verdict, MetricVerdict::Pass);
     assert!(g.paired_diff.is_some());
     let paired = g.paired_diff.as_ref().unwrap();
@@ -135,8 +139,8 @@ fn aggregate_then_gate_pipeline_fail_with_pr_comment_details() {
         candidate_cases.push(c);
     }
 
-    let report = plaw_eval::report::compare_runs_default(&repo, &baseline.id, &candidate.id)
-        .unwrap();
+    let report =
+        plaw_eval::report::compare_runs_default(&repo, &baseline.id, &candidate.id).unwrap();
     assert_eq!(report.verdict, GateVerdict::Fail);
     let g = &report.metrics[0];
     assert_eq!(g.verdict, MetricVerdict::Fail);

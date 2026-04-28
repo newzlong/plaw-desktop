@@ -133,8 +133,8 @@ pub async fn compare_dual_pass(
 fn reconcile(forward: SinglePassVerdict, swapped: SinglePassVerdict) -> PairwiseDecision {
     use SinglePassVerdict::*;
     match (forward, swapped) {
-        (R1, R2) => PairwiseDecision::AWins,   // both passes pick a
-        (R2, R1) => PairwiseDecision::BWins,   // both passes pick b
+        (R1, R2) => PairwiseDecision::AWins, // both passes pick a
+        (R2, R1) => PairwiseDecision::BWins, // both passes pick b
         (Tie, Tie) => PairwiseDecision::Tie,
         (Unparseable, _) | (_, Unparseable) => PairwiseDecision::PositionInconsistent,
         // Any other combination = position bias.
@@ -208,19 +208,19 @@ mod tests {
             "kimi-k2.5",
             vec!["[[1]]".into(), "[[2]]".into()],
         );
-        let rec = compare_dual_pass(&judge, "Q?", "answer-a", "answer-b").await.unwrap();
+        let rec = compare_dual_pass(&judge, "Q?", "answer-a", "answer-b")
+            .await
+            .unwrap();
         assert_eq!(rec.decision, PairwiseDecision::AWins);
     }
 
     #[tokio::test]
     async fn dual_pass_detects_position_bias() {
         // Mock always returns [[1]] regardless of order → position bias.
-        let judge = MockJudgeClient::new(
-            JudgeFamily::Kimi,
-            "kimi-k2.5",
-            vec!["[[1]]".into()],
-        );
-        let rec = compare_dual_pass(&judge, "Q?", "answer-a", "answer-b").await.unwrap();
+        let judge = MockJudgeClient::new(JudgeFamily::Kimi, "kimi-k2.5", vec!["[[1]]".into()]);
+        let rec = compare_dual_pass(&judge, "Q?", "answer-a", "answer-b")
+            .await
+            .unwrap();
         assert_eq!(rec.decision, PairwiseDecision::PositionInconsistent);
     }
 
@@ -231,7 +231,9 @@ mod tests {
             "kimi-k2.5",
             vec!["[[T]]".into(), "[[T]]".into()],
         );
-        let rec = compare_dual_pass(&judge, "Q?", "answer-a", "answer-b").await.unwrap();
+        let rec = compare_dual_pass(&judge, "Q?", "answer-a", "answer-b")
+            .await
+            .unwrap();
         assert_eq!(rec.decision, PairwiseDecision::Tie);
     }
 }

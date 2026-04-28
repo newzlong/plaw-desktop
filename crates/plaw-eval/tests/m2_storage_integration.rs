@@ -92,9 +92,12 @@ fn template_suite_loads_and_round_trips_through_storage() {
 
     let stored_results = repo.load_case_results(&run.id).unwrap();
     assert_eq!(stored_results.len(), suite.cases.len());
-    assert!(stored_results
-        .iter()
-        .all(|r| r.metric_scores.get("g_eval").map(|s| s.value).unwrap_or(0.0) == 0.75));
+    assert!(stored_results.iter().all(|r| r
+        .metric_scores
+        .get("g_eval")
+        .map(|s| s.value)
+        .unwrap_or(0.0)
+        == 0.75));
 
     // 4. Quick summary should average to the constant we wrote.
     let agg = repo.quick_summary(&run.id).unwrap();

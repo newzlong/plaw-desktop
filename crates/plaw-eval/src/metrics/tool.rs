@@ -36,8 +36,7 @@ pub struct ToolAccuracySummary {
 /// that signal instead.
 pub fn selection_f1(actual: &[&str], expected: &[String]) -> (f64, f64, f64) {
     let actual_set: HashSet<&str> = actual.iter().copied().collect();
-    let expected_set: HashSet<&str> =
-        expected.iter().map(|s| s.as_str()).collect();
+    let expected_set: HashSet<&str> = expected.iter().map(|s| s.as_str()).collect();
     if actual_set.is_empty() && expected_set.is_empty() {
         return (1.0, 1.0, 1.0);
     }
@@ -90,7 +89,10 @@ pub fn redundant_call_rate(calls: &[(&str, &Value)]) -> f64 {
     let mut redundant = 0usize;
     for (name, args) in calls {
         // Canonicalise via serde_json::to_string for stable comparison.
-        let key = (name.to_string(), serde_json::to_string(args).unwrap_or_default());
+        let key = (
+            name.to_string(),
+            serde_json::to_string(args).unwrap_or_default(),
+        );
         if !seen.insert(key) {
             redundant += 1;
         }
@@ -196,7 +198,7 @@ mod tests {
 
     #[test]
     fn arg_validity_rejects_null_and_empty() {
-        let args = vec![
+        let args = [
             json!({"path": "/etc"}),
             json!(null),
             json!({}),

@@ -342,7 +342,9 @@ mod tests {
         let suite = suite_with_metrics(vec![]);
         let case = &suite.cases[0];
         let judge = MockJudgeClient::new(JudgeFamily::Kimi, "kimi-k2.5", vec![]);
-        let result = compute_metric(&spec, case, "anything", &judge).await.unwrap();
+        let result = compute_metric(&spec, case, "anything", &judge)
+            .await
+            .unwrap();
         assert!(result.is_none());
     }
 

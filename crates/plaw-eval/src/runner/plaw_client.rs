@@ -93,10 +93,9 @@ impl PlawClient {
                 Message::Text(text) => match serde_json::from_str::<PlawEvent>(&text) {
                     Ok(PlawEvent::Chunk { content }) => full_response.push_str(&content),
                     Ok(PlawEvent::Thinking { content }) => thinking.push(content),
-                    Ok(PlawEvent::ToolCall { name, args }) => tool_calls.push(ToolCallEvent {
-                        name,
-                        args,
-                    }),
+                    Ok(PlawEvent::ToolCall { name, args }) => {
+                        tool_calls.push(ToolCallEvent { name, args })
+                    }
                     Ok(PlawEvent::ToolResult { name, output }) => {
                         tool_results.push(ToolResultEvent { name, output })
                     }
@@ -147,7 +146,8 @@ impl PlawClient {
             .into_client_request()
             .context("invalid WS URL")?;
         if let Some(bearer) = &self.bearer {
-            let header_value = format!("Bearer {bearer}").parse()
+            let header_value = format!("Bearer {bearer}")
+                .parse()
                 .context("bearer token contains invalid header characters")?;
             req.headers_mut().insert("authorization", header_value);
         }
@@ -305,7 +305,10 @@ mod tests {
                       "usage":{"input_tokens":12,"output_tokens":3}}"#;
         let ev: PlawEvent = serde_json::from_str(raw).unwrap();
         match ev {
-            PlawEvent::Done { full_response, usage } => {
+            PlawEvent::Done {
+                full_response,
+                usage,
+            } => {
                 assert_eq!(full_response, "abc");
                 let u = usage.unwrap();
                 assert_eq!(u.input_tokens, 12);

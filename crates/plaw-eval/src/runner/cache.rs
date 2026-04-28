@@ -70,7 +70,8 @@ impl JudgeCache {
         if entry.is_some() {
             self.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         } else {
-            self.misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.misses
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         Ok(entry.map(|e| e.judge_response))
     }

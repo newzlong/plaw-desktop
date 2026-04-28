@@ -94,8 +94,8 @@ mod tests {
         // each cluster, so the cluster-robust SE is 0.
         let values = vec![0.0, 1.0, 2.0, 3.0]; // mean 1.5
         let clusters = vec!["a", "a", "b", "b"]; // (0+1) - 2*1.5 = -2; (2+3) - 2*1.5 = +2
-                                                  // cluster sums: a→-2, b→+2 ⇒ Σ = 4+4 = 8
-        // Var = (2/1) * 8 / 16 = 1.0 ⇒ SE = 1.0
+                                                 // cluster sums: a→-2, b→+2 ⇒ Σ = 4+4 = 8
+                                                 // Var = (2/1) * 8 / 16 = 1.0 ⇒ SE = 1.0
         let se = cluster_robust_se(&values, &clusters).unwrap();
         assert!(approx_eq(se, 1.0, 1e-12));
     }
@@ -111,8 +111,7 @@ mod tests {
         let se_clustered = cluster_robust_se(&values, &clusters).unwrap();
 
         let mean = values.iter().sum::<f64>() / 20.0;
-        let var_naive: f64 =
-            values.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (20.0 * 19.0);
+        let var_naive: f64 = values.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (20.0 * 19.0);
         let se_naive = var_naive.sqrt();
 
         assert!(se_clustered > 0.0);

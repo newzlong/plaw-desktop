@@ -308,7 +308,11 @@ mod tests {
         let report = compare_in_memory("base", &baseline, "cand", &candidate, 0.01, 0.05);
         assert_eq!(report.verdict, GateVerdict::Pass);
         assert_eq!(report.paired_case_count, 30);
-        let m = report.metrics.iter().find(|m| m.metric == "g_eval").unwrap();
+        let m = report
+            .metrics
+            .iter()
+            .find(|m| m.metric == "g_eval")
+            .unwrap();
         assert_eq!(m.verdict, MetricVerdict::Pass);
         assert!(m.paired_diff.is_some());
     }
