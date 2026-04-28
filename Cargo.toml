@@ -42,7 +42,7 @@ toml = "0.9"
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 
 # Logging

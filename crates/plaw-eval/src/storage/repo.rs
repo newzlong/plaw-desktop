@@ -176,6 +176,25 @@ impl EvalRepo {
         Ok(())
     }
 
+    /// Replace a case_result's `metric_scores` map. Used when a separate
+    /// scoring pass populates judge-derived metrics after the runner has
+    /// already recorded the raw response.
+    pub fn update_metric_scores(
+        &self,
+        run_id: &str,
+        case_id: &str,
+        scores: &std::collections::HashMap<String, MetricScore>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let metric_json = serde_json::to_string(scores)
+            .context("serialising metric scores for update")?;
+        conn.execute(
+            "UPDATE case_results SET metric_scores = ?3 WHERE run_id = ?1 AND case_id = ?2",
+            params![run_id, case_id, metric_json],
+        )?;
+        Ok(())
+    }
+
     pub fn load_case_results(&self, run_id: &str) -> Result<Vec<CaseResult>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
