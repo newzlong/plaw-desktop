@@ -33,6 +33,7 @@ impl EvalRepo {
             .with_context(|| format!("opening eval db at {}", path.display()))?;
         conn.execute_batch("PRAGMA foreign_keys = ON;").ok();
         conn.execute_batch(SCHEMA_SQL).context("applying schema")?;
+        apply_runtime_migrations(&conn);
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -43,6 +44,7 @@ impl EvalRepo {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("PRAGMA foreign_keys = ON;").ok();
         conn.execute_batch(SCHEMA_SQL).context("applying schema")?;
+        apply_runtime_migrations(&conn);
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -265,8 +267,9 @@ impl EvalRepo {
         conn.execute(
             "INSERT INTO flywheel_queue (id, trace_id, sampled_at, judge_score,
                                           review_status, reviewed_at,
-                                          promoted_to_suite, promoted_case_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                                          promoted_to_suite, promoted_case_id,
+                                          source_run_id, source_case_id, target_suite)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 entry.id,
                 entry.trace_id,
@@ -276,6 +279,9 @@ impl EvalRepo {
                 entry.reviewed_at,
                 entry.promoted_to_suite,
                 entry.promoted_case_id,
+                entry.source_run_id,
+                entry.source_case_id,
+                entry.target_suite,
             ],
         )?;
         Ok(())
@@ -285,7 +291,8 @@ impl EvalRepo {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, trace_id, sampled_at, judge_score, review_status,
-                    reviewed_at, promoted_to_suite, promoted_case_id
+                    reviewed_at, promoted_to_suite, promoted_case_id,
+                    source_run_id, source_case_id, target_suite
              FROM flywheel_queue WHERE review_status = 'pending'
              ORDER BY sampled_at DESC LIMIT ?1",
         )?;
@@ -293,6 +300,22 @@ impl EvalRepo {
             .query_map(params![limit as i64], row_to_flywheel)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// Lookup a single queue entry by id (for the promoter pipeline).
+    pub fn flywheel_get(&self, id: &str) -> Result<Option<FlywheelEntry>> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT id, trace_id, sampled_at, judge_score, review_status,
+                        reviewed_at, promoted_to_suite, promoted_case_id,
+                        source_run_id, source_case_id, target_suite
+                 FROM flywheel_queue WHERE id = ?1",
+                params![id],
+                row_to_flywheel,
+            )
+            .optional()?;
+        Ok(row)
     }
 
     pub fn flywheel_set_status(
@@ -305,6 +328,23 @@ impl EvalRepo {
         conn.execute(
             "UPDATE flywheel_queue SET review_status = ?2, reviewed_at = ?3 WHERE id = ?1",
             params![id, status, reviewed_at],
+        )?;
+        Ok(())
+    }
+
+    /// Stamp a queue entry with the suite + case id it was promoted to.
+    pub fn flywheel_record_promotion(
+        &self,
+        id: &str,
+        target_suite: &str,
+        promoted_case_id: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE flywheel_queue
+             SET promoted_to_suite = ?2, promoted_case_id = ?3, review_status = 'promoted'
+             WHERE id = ?1",
+            params![id, target_suite, promoted_case_id],
         )?;
         Ok(())
     }
@@ -397,7 +437,31 @@ fn row_to_flywheel(row: &rusqlite::Row<'_>) -> rusqlite::Result<FlywheelEntry> {
         reviewed_at: row.get(5)?,
         promoted_to_suite: row.get(6)?,
         promoted_case_id: row.get(7)?,
+        source_run_id: row.get(8)?,
+        source_case_id: row.get(9)?,
+        target_suite: row.get(10)?,
     })
+}
+
+/// Idempotent runtime migrations. We use `ALTER TABLE ADD COLUMN` plus
+/// duplicate-name tolerance because SQLite has no `ADD COLUMN IF NOT
+/// EXISTS`. Each call is cheap on already-migrated DBs.
+fn apply_runtime_migrations(conn: &Connection) {
+    let alters = [
+        "ALTER TABLE flywheel_queue ADD COLUMN source_run_id TEXT",
+        "ALTER TABLE flywheel_queue ADD COLUMN source_case_id TEXT",
+        "ALTER TABLE flywheel_queue ADD COLUMN target_suite TEXT",
+    ];
+    for stmt in alters {
+        if let Err(e) = conn.execute(stmt, []) {
+            // Existing column is the only expected error; anything else
+            // is a real schema mismatch and worth surfacing in the log.
+            let msg = e.to_string();
+            if !msg.contains("duplicate column name") {
+                tracing::warn!(error = %e, sql = stmt, "flywheel_queue migration skipped");
+            }
+        }
+    }
 }
 
 fn now_unix() -> i64 {
@@ -519,13 +583,29 @@ mod tests {
             reviewed_at: None,
             promoted_to_suite: None,
             promoted_case_id: None,
+            source_run_id: Some("run-1".into()),
+            source_case_id: Some("case-1".into()),
+            target_suite: Some("chat_quality".into()),
         };
         repo.flywheel_enqueue(&entry).unwrap();
         assert_eq!(repo.flywheel_list_pending(10).unwrap().len(), 1);
 
+        let loaded = repo.flywheel_get("f1").unwrap().unwrap();
+        assert_eq!(loaded.source_run_id.as_deref(), Some("run-1"));
+        assert_eq!(loaded.target_suite.as_deref(), Some("chat_quality"));
+
         repo.flywheel_set_status("f1", "approved", Some(123))
             .unwrap();
         assert!(repo.flywheel_list_pending(10).unwrap().is_empty());
+
+        repo.flywheel_record_promotion("f1", "chat_quality", "case-1-flywheel-001")
+            .unwrap();
+        let promoted = repo.flywheel_get("f1").unwrap().unwrap();
+        assert_eq!(promoted.review_status, "promoted");
+        assert_eq!(
+            promoted.promoted_case_id.as_deref(),
+            Some("case-1-flywheel-001")
+        );
     }
 
     #[test]

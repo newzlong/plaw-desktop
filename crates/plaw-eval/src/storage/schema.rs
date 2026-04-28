@@ -75,6 +75,12 @@ pub struct JudgeCacheEntry {
 }
 
 /// Production trace queued for review by the flywheel.
+///
+/// `trace_id` is the agnostic external identifier (Phase 3 will fill it
+/// from OTel). `source_run_id` / `source_case_id` are populated when the
+/// queue entry was sampled from an existing eval `case_results` row;
+/// `target_suite` records the operator's promotion intent so the
+/// promoter knows which `cases.toml` to append to.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlywheelEntry {
     pub id: String,
@@ -85,6 +91,12 @@ pub struct FlywheelEntry {
     pub reviewed_at: Option<i64>,
     pub promoted_to_suite: Option<String>,
     pub promoted_case_id: Option<String>,
+    #[serde(default)]
+    pub source_run_id: Option<String>,
+    #[serde(default)]
+    pub source_case_id: Option<String>,
+    #[serde(default)]
+    pub target_suite: Option<String>,
 }
 
 /// CREATE TABLE statements applied at repo open (idempotent).
@@ -133,7 +145,10 @@ CREATE TABLE IF NOT EXISTS flywheel_queue (
     review_status TEXT NOT NULL,
     reviewed_at INTEGER,
     promoted_to_suite TEXT,
-    promoted_case_id TEXT
+    promoted_case_id TEXT,
+    source_run_id TEXT,
+    source_case_id TEXT,
+    target_suite TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_runs_suite ON runs(suite_name, started_at);

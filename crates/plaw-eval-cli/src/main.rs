@@ -220,6 +220,57 @@ enum FlywheelAction {
         #[arg(value_parser = ["approve", "reject"])]
         verdict: String,
     },
+    /// Sample case results from a finished run into the queue.
+    Sample {
+        /// Source run id (use `latest` for the most recent finished run).
+        #[arg(long)]
+        run: String,
+
+        /// Suite to scope the `latest` lookup to.
+        #[arg(long)]
+        suite: Option<String>,
+
+        /// Sampling strategy. Default: `random`.
+        #[arg(long, default_value = "random",
+              value_parser = ["random", "failed", "low-score", "all"])]
+        strategy: String,
+
+        /// Sampling rate `[0, 1]` for the `random` strategy.
+        #[arg(long, default_value_t = 0.1)]
+        rate: f64,
+
+        /// Deterministic sampling seed for the `random` strategy.
+        #[arg(long, default_value_t = 0xC0FFEE_u64)]
+        seed: u64,
+
+        /// Metric name for the `low-score` strategy.
+        #[arg(long, default_value = "g_eval")]
+        metric: String,
+
+        /// Threshold for the `low-score` strategy.
+        #[arg(long, default_value_t = 0.5)]
+        threshold: f64,
+
+        /// Tag every queued entry with this target suite so promote knows
+        /// where to write.
+        #[arg(long)]
+        target_suite: Option<String>,
+    },
+    /// Promote an approved queue entry into the target suite TOML.
+    Promote {
+        /// Queue entry id to promote.
+        id: String,
+
+        /// Path to the target suite's cases.toml. Falls back to the
+        /// queue entry's `target_suite` field when omitted.
+        #[arg(long)]
+        suite_path: Option<PathBuf>,
+
+        /// Override the default `<suites_dir>/<target_suite>/cases.toml`
+        /// resolution by passing a name here.
+        #[arg(long)]
+        suite: Option<String>,
+    },
 }
 
 fn init_tracing(verbose: u8, quiet: bool) {
@@ -304,7 +355,7 @@ async fn main() -> Result<()> {
             review_status,
         } => cmd_promote(&db_path, &trace, judge_score, &review_status),
         Command::Cache { action } => cmd_cache(&db_path, action),
-        Command::Flywheel { action } => cmd_flywheel(&db_path, action),
+        Command::Flywheel { action } => cmd_flywheel(&db_path, &suites_dir, action),
         Command::Doctor => cmd_doctor(&db_path, &suites_dir, cli.ws_url.as_deref()),
     }
 }
@@ -324,6 +375,29 @@ fn resolve_ws_url(override_url: Option<&str>) -> String {
 fn open_repo(db_path: &Path) -> Result<EvalRepo> {
     EvalRepo::open(db_path)
         .with_context(|| format!("opening eval database at {}", db_path.display()))
+}
+
+/// Decide which `cases.toml` file to operate against during a flywheel
+/// promotion. Order of preference:
+///   1. Explicit `--suite-path` flag (operator knows best).
+///   2. `--suite <name>` flag → `<suites_dir>/<name>/cases.toml`.
+///   3. Queue entry's stored `target_suite` field.
+fn resolve_suite_path(
+    suite_path: Option<&Path>,
+    suite_name: Option<&str>,
+    queue_target: Option<&str>,
+    suites_dir: &Path,
+) -> Result<PathBuf> {
+    if let Some(p) = suite_path {
+        return Ok(p.to_path_buf());
+    }
+    let name = suite_name.or(queue_target).ok_or_else(|| {
+        anyhow!(
+            "no target suite specified — pass --suite-path, --suite, or set the queue \
+             entry's target_suite at sample time"
+        )
+    })?;
+    Ok(suites_dir.join(name).join("cases.toml"))
 }
 
 fn resolve_run_id(repo: &EvalRepo, raw: &str, suite: Option<&str>) -> Result<String> {
@@ -601,6 +675,9 @@ fn cmd_promote(
         reviewed_at: None,
         promoted_to_suite: None,
         promoted_case_id: None,
+        source_run_id: None,
+        source_case_id: None,
+        target_suite: None,
     };
     repo.flywheel_enqueue(&entry)?;
     println!("queued trace {trace_id} as flywheel entry {id} ({review_status})");
@@ -627,7 +704,7 @@ fn cmd_cache(db_path: &Path, action: CacheAction) -> Result<()> {
 
 // ---------- flywheel ----------
 
-fn cmd_flywheel(db_path: &Path, action: FlywheelAction) -> Result<()> {
+fn cmd_flywheel(db_path: &Path, suites_dir: &Path, action: FlywheelAction) -> Result<()> {
     let repo = open_repo(db_path)?;
     match action {
         FlywheelAction::ListPending { limit } => {
@@ -636,16 +713,20 @@ fn cmd_flywheel(db_path: &Path, action: FlywheelAction) -> Result<()> {
                 println!("(no pending traces)");
                 return Ok(());
             }
-            println!("{:<36}  {:<24}  judge  status   sampled", "id", "trace_id");
+            println!(
+                "{:<36}  {:<24}  judge  status   target          sampled",
+                "id", "trace_id"
+            );
             for p in pending {
                 println!(
-                    "{:<36}  {:<24}  {:>5}  {:<8} {}",
+                    "{:<36}  {:<24}  {:>5}  {:<8} {:<15} {}",
                     p.id,
                     truncate(&p.trace_id, 24),
                     p.judge_score
                         .map(|s| format!("{s:.2}"))
                         .unwrap_or_else(|| "—".into()),
                     p.review_status,
+                    truncate(p.target_suite.as_deref().unwrap_or("—"), 15),
                     format_unix(p.sampled_at),
                 );
             }
@@ -659,6 +740,58 @@ fn cmd_flywheel(db_path: &Path, action: FlywheelAction) -> Result<()> {
             let now = chrono::Utc::now().timestamp();
             repo.flywheel_set_status(&id, status, Some(now))?;
             println!("flywheel entry {id} → {status}");
+        }
+        FlywheelAction::Sample {
+            run,
+            suite,
+            strategy,
+            rate,
+            seed,
+            metric,
+            threshold,
+            target_suite,
+        } => {
+            let run_id = resolve_run_id(&repo, &run, suite.as_deref())?;
+            let strategy = match strategy.as_str() {
+                "random" => plaw_eval::flywheel::SampleStrategy::Random { rate, seed },
+                "failed" => plaw_eval::flywheel::SampleStrategy::FailedOnly,
+                "low-score" => plaw_eval::flywheel::SampleStrategy::LowScore {
+                    metric: metric.clone(),
+                    threshold,
+                },
+                "all" => plaw_eval::flywheel::SampleStrategy::All,
+                _ => unreachable!("clap validated this"),
+            };
+            let summary =
+                plaw_eval::flywheel::sample_run(&repo, &run_id, strategy, target_suite.as_deref())?;
+            println!(
+                "sampled {} of {} cases from run {} into the flywheel queue",
+                summary.queued, summary.total_cases, summary.run_id
+            );
+        }
+        FlywheelAction::Promote {
+            id,
+            suite_path,
+            suite,
+        } => {
+            let entry = repo
+                .flywheel_get(&id)?
+                .ok_or_else(|| anyhow!("flywheel entry '{id}' not found"))?;
+            let resolved_path = resolve_suite_path(
+                suite_path.as_deref(),
+                suite.as_deref(),
+                entry.target_suite.as_deref(),
+                suites_dir,
+            )?;
+            let result = plaw_eval::flywheel::promote(&repo, &id, &resolved_path)?;
+            println!(
+                "promoted entry {} → {}::{} ({} bytes appended to {})",
+                result.queue_id,
+                resolved_path.display(),
+                result.new_case_id,
+                result.appended_bytes,
+                result.target_suite_path,
+            );
         }
     }
     Ok(())
