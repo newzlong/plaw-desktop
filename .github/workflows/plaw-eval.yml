@@ -76,6 +76,43 @@ jobs:
       - name: cargo test (plaw-eval)
         run: cargo test -p plaw-eval -p plaw-eval-cli --all-targets
 
+      # Coverage runs in CI rather than locally because Windows toolchains
+      # don't ship llvm-tools-preview reliably. Threshold lives in the
+      # workflow so changes show up in PR diff.
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: cargo llvm-cov (plaw-eval)
+        run: |
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov -p plaw-eval -p plaw-eval-cli --all-targets \
+            --lcov --output-path lcov.info
+          cargo llvm-cov report -p plaw-eval -p plaw-eval-cli \
+            --summary-only > coverage-summary.txt
+          cat coverage-summary.txt
+          cargo llvm-cov report -p plaw-eval -p plaw-eval-cli \
+            --json --summary-only > coverage-summary.json
+
+      - name: Enforce coverage floor (75%)
+        run: |
+          PCT=$(jq '.data[0].totals.lines.percent' coverage-summary.json)
+          printf 'Total line coverage: %.2f%%\n' "$PCT"
+          awk -v pct="$PCT" 'BEGIN { exit !(pct+0 >= 75.0) }' || {
+            echo "::error::Coverage ${PCT}% is below the 75% floor"
+            exit 1
+          }
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: plaw-eval-coverage-${{ github.run_id }}
+          path: |
+            lcov.info
+            coverage-summary.txt
+          retention-days: 30
+
   # ---------------------------------------------------------------------------
   # PR smoke eval. Only runs when judge secrets are present, so forks /
   # contributors without secrets fall through cleanly.
