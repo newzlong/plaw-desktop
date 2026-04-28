@@ -1,0 +1,112 @@
+# chat_quality — single-turn general chat
+# See README.md for the testing thesis and design checklist.
+# All cases here are tagged "seed" — placeholder smoke tests, not the
+# designed gate-quality cases. M9 work replaces these with ≥ 30 cases
+# tagged "designed".
+
+name = "chat_quality"
+version = "1.0.0"
+description = "General single-turn chat quality — factual, reasoning, constraint-following, refusal."
+
+[default_judge]
+model = "kimi-k2.5"
+provider = "kimi"
+temperature = 0.0
+mode = { kind = "pairwise", dual_pass = true }
+
+[[metrics]]
+name = "g_eval"
+[metrics.params]
+dimension = "overall_quality"
+scale = 5
+
+[[metrics]]
+name = "keyword_coverage"
+[metrics.params]
+case_insensitive = true
+
+# ── Factual recall ──────────────────────────────────────────────────
+[[cases]]
+id = "chat_quality-factual-001"
+tags = ["seed", "smoke"]
+cluster_id = "factual-capitals"
+[cases.input]
+kind = "chat"
+messages = [{ role = "user", content = "What is the capital of Japan?" }]
+[cases.expected]
+answer_keywords = ["Tokyo"]
+
+[[cases]]
+id = "chat_quality-factual-002"
+tags = ["seed", "smoke"]
+cluster_id = "factual-science"
+[cases.input]
+kind = "chat"
+messages = [{ role = "user", content = "What gas do plants absorb during photosynthesis?" }]
+[cases.expected]
+answer_keywords = ["carbon dioxide", "CO2"]
+
+# ── Arithmetic / logic ──────────────────────────────────────────────
+[[cases]]
+id = "chat_quality-math-001"
+tags = ["seed", "smoke"]
+cluster_id = "math-arith"
+[cases.input]
+kind = "chat"
+messages = [{ role = "user", content = "What is 17 times 23?" }]
+[cases.expected]
+answer = "391"
+answer_keywords = ["391"]
+
+[[cases]]
+id = "chat_quality-logic-001"
+tags = ["seed", "smoke"]
+cluster_id = "math-logic"
+[cases.input]
+kind = "chat"
+messages = [{ role = "user", content = "If all roses are flowers and some flowers fade quickly, can we conclude that some roses fade quickly?" }]
+[cases.expected]
+answer_keywords = ["no", "cannot", "doesn't follow"]
+
+# ── Following constraints ───────────────────────────────────────────
+[[cases]]
+id = "chat_quality-constraint-001"
+tags = ["seed", "smoke"]
+[cases.input]
+kind = "chat"
+messages = [{ role = "user", content = "Explain TCP in exactly one sentence." }]
+[cases.expected]
+# Hand-graded by judge — keyword check is a coarse safety net.
+answer_keywords = ["TCP", "protocol"]
+
+# ── Honest "I don't know" ───────────────────────────────────────────
+[[cases]]
+id = "chat_quality-unknowable-001"
+tags = ["seed", "smoke"]
+[cases.input]
+kind = "chat"
+messages = [{ role = "user", content = "What did I have for breakfast yesterday?" }]
+[cases.expected]
+# Should acknowledge it has no way to know — refusal-keywords overlap.
+answer_keywords = ["don't know", "no way to know", "can't", "cannot"]
+
+# ── Style / register ────────────────────────────────────────────────
+[[cases]]
+id = "chat_quality-style-001"
+tags = ["seed", "smoke"]
+[cases.input]
+kind = "chat"
+messages = [{ role = "user", content = "Write a one-line professional bio for a software engineer named Lin who works on distributed systems." }]
+[cases.expected]
+answer_keywords = ["Lin", "distributed systems"]
+
+# ── Concision ───────────────────────────────────────────────────────
+[[cases]]
+id = "chat_quality-concision-001"
+tags = ["seed", "smoke"]
+[cases.input]
+kind = "chat"
+messages = [{ role = "user", content = "What does 'idempotent' mean?" }]
+[cases.expected]
+# Define correctly without hedging preamble. Judge handles the "no preamble" half.
+answer_keywords = ["same", "result"]

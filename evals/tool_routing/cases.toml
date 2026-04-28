@@ -1,0 +1,97 @@
+# tool_routing — agent must pick the correct tool(s)
+# All cases here are "seed" smoke tests. M9 work replaces with ≥ 30
+# designed cases. See README.md for tool surface and design checklist.
+
+name = "tool_routing"
+version = "1.0.0"
+description = "Agent tool selection and argument quality on simple prompts."
+
+[default_judge]
+model = "kimi-k2.5"
+provider = "kimi"
+temperature = 0.0
+mode = { kind = "score", scale = 5 }
+
+[[metrics]]
+name = "tool_call_accuracy"
+[metrics.params]
+# Compares actual tool sequence against expected.tool_sequence
+mode = "ordered"
+
+# ── Single-tool obvious ─────────────────────────────────────────────
+[[cases]]
+id = "tool_routing-list-001"
+tags = ["seed", "smoke"]
+[cases.input]
+kind = "agent"
+task = "List the files in the current directory."
+max_steps = 3
+[cases.expected]
+tool_sequence = ["list_dir"]
+
+[[cases]]
+id = "tool_routing-read-001"
+tags = ["seed", "smoke"]
+[cases.input]
+kind = "agent"
+task = "Show me the contents of README.md in the current directory."
+max_steps = 3
+[cases.expected]
+tool_sequence = ["read_file"]
+
+[[cases]]
+id = "tool_routing-shell-001"
+tags = ["seed", "smoke"]
+[cases.input]
+kind = "agent"
+task = "What's the current date according to the operating system?"
+max_steps = 3
+[cases.expected]
+tool_sequence = ["shell"]
+
+# ── Single-tool ambiguous ───────────────────────────────────────────
+[[cases]]
+id = "tool_routing-search-001"
+tags = ["seed", "smoke"]
+[cases.input]
+kind = "agent"
+# `search` (local grep) vs `web_search` — local because it's about *this* repo
+task = "Find every file in this project that mentions the word 'flywheel'."
+max_steps = 3
+[cases.expected]
+tool_sequence = ["search"]
+
+# ── Multi-tool sequencing ───────────────────────────────────────────
+[[cases]]
+id = "tool_routing-readedit-001"
+tags = ["seed", "smoke"]
+[cases.input]
+kind = "agent"
+task = "In the file ./TODO.md, replace the word 'pending' with 'in progress' on line 3."
+max_steps = 5
+[cases.expected]
+# Read first to verify line 3 is what we think, then edit.
+tool_sequence = ["read_file", "edit_file"]
+
+# ── Refuse to use a tool ────────────────────────────────────────────
+[[cases]]
+id = "tool_routing-noop-001"
+tags = ["seed", "smoke"]
+[cases.input]
+kind = "agent"
+task = "What is 17 times 23? Answer directly without using any tools."
+max_steps = 3
+[cases.expected]
+tool_sequence = []  # Empty — no tool should be called
+
+# ── Argument extraction ─────────────────────────────────────────────
+[[cases]]
+id = "tool_routing-args-001"
+tags = ["seed", "smoke"]
+[cases.input]
+kind = "agent"
+task = "Read the file located at ./Cargo.toml and tell me the workspace member list."
+max_steps = 3
+[cases.expected]
+# Right tool is obvious; failure mode is passing the wrong path.
+tool_sequence = ["read_file"]

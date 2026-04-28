@@ -1,0 +1,43 @@
+# rag_grounded_qa — RAG faithfulness + relevancy
+# STUB. See README.md for why this suite is intentionally minimal.
+# Do not gate on these results.
+
+name = "rag_grounded_qa"
+version = "1.0.0"
+description = "RAG suite (stub) — needs corpus + retrieval-API design before real cases."
+
+[default_judge]
+model = "kimi-k2.5"
+provider = "kimi"
+temperature = 0.0
+mode = { kind = "pairwise", dual_pass = true }
+
+[[metrics]]
+name = "g_eval"
+[metrics.params]
+dimension = "faithfulness_proxy"
+scale = 5
+
+# Seed: smoke test of the rag input codepath. Real cases land when
+# the corpus + retrieval API design is resolved.
+[[cases]]
+id = "rag_grounded_qa-stub-001"
+tags = ["seed", "stub"]
+[cases.input]
+kind = "rag"
+question = "According to the document, what is the capital of France?"
+ground_truth_doc = "Paris is the capital and most populous city of France. It serves as the political, cultural, and economic center of the country."
+[cases.expected]
+answer_keywords = ["Paris"]
+
+[[cases]]
+id = "rag_grounded_qa-stub-002"
+tags = ["seed", "stub", "ood"]
+[cases.input]
+kind = "rag"
+# Out-of-distribution: question can't be answered from the doc.
+# Expected behavior: acknowledge that the doc doesn't say.
+question = "According to the document, when was Paris founded?"
+ground_truth_doc = "Paris is the capital and most populous city of France. It serves as the political, cultural, and economic center of the country."
+[cases.expected]
+answer_keywords = ["doesn't say", "not specified", "no information", "doesn't mention"]

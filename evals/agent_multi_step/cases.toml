@@ -1,0 +1,78 @@
+# agent_multi_step — plan-following across tool calls
+# All cases here are "seed" smoke tests. M9 work replaces with ≥ 30
+# designed cases. See README.md for difficulty buckets and design
+# checklist.
+
+name = "agent_multi_step"
+version = "1.0.0"
+description = "Multi-step agent tasks with checkable end-state."
+
+[default_judge]
+model = "kimi-k2.5"
+provider = "kimi"
+temperature = 0.0
+mode = { kind = "score", scale = 5 }
+
+[[metrics]]
+name = "tool_call_accuracy"
+[metrics.params]
+mode = "ordered_with_skips_allowed"
+
+# ── Simple 2-3 step ─────────────────────────────────────────────────
+[[cases]]
+id = "agent_multi_step-simple-001"
+tags = ["seed", "smoke"]
+[cases.input]
+kind = "agent"
+task = "List the files in the current directory, then read the first .md file you find."
+max_steps = 5
+[cases.expected]
+tool_sequence = ["list_dir", "read_file"]
+
+[[cases]]
+id = "agent_multi_step-simple-002"
+tags = ["seed", "smoke"]
+[cases.input]
+kind = "agent"
+task = "Search for files containing the word 'TODO', then count how many you found."
+max_steps = 5
+[cases.expected]
+tool_sequence = ["search"]
+final_state = { task_summary_includes_count = true }
+
+# ── Medium 4-6 step ─────────────────────────────────────────────────
+[[cases]]
+id = "agent_multi_step-medium-001"
+tags = ["seed", "smoke"]
+[cases.input]
+kind = "agent"
+task = "Find all Cargo.toml files under ./crates, then for each one report the package name."
+max_steps = 8
+[cases.expected]
+# Multiple read_file calls expected; allow flexibility in order.
+tool_sequence = ["list_dir", "read_file", "read_file"]
+
+# ── Branching ───────────────────────────────────────────────────────
+[[cases]]
+id = "agent_multi_step-branch-001"
+tags = ["seed", "smoke"]
+[cases.input]
+kind = "agent"
+task = "Look at ./Cargo.toml. If it's a workspace manifest, list the workspace members. If it's a regular package, just report the package name."
+max_steps = 5
+[cases.expected]
+tool_sequence = ["read_file"]
+final_state = { branch_taken = "workspace_or_package" }
+
+# ── Resumable / idempotent ──────────────────────────────────────────
+[[cases]]
+id = "agent_multi_step-idempotent-001"
+tags = ["seed", "smoke"]
+[cases.input]
+kind = "agent"
+# Should NOT call list_dir twice — second call is wasted.
+task = "List files in the current directory and tell me how many there are. Don't list them twice."
+max_steps = 4
+[cases.expected]
+tool_sequence = ["list_dir"]
+final_state = { redundant_calls = 0 }
