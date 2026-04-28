@@ -40,6 +40,7 @@ on:
 permissions:
   contents: read
   pull-requests: write # for sticky PR comment
+  security-events: write # for SARIF upload to Code Scanning
 
 env:
   CARGO_TERM_COLOR: always
@@ -182,7 +183,8 @@ jobs:
             ./target/release/plaw-eval compare \
               --baseline "$BASELINE_RUN" --candidate "$CANDIDATE_RUN" \
               --pr-comment target/reports/pr-comment.md \
-              --output target/reports/comparison.json || true
+              --output target/reports/comparison.json \
+              --sarif target/reports/comparison.sarif || true
           else
             echo "No baseline available yet — skipping gate (first eval run)" \
               > target/reports/pr-comment.md
@@ -194,6 +196,13 @@ jobs:
         with:
           header: plaw-eval
           path: target/reports/pr-comment.md
+
+      - name: Upload SARIF to Code Scanning
+        if: steps.gate.outputs.skip == 'false' && hashFiles('target/reports/comparison.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: target/reports/comparison.sarif
+          category: plaw-eval
 
       - name: Upload reports
         if: steps.gate.outputs.skip == 'false'

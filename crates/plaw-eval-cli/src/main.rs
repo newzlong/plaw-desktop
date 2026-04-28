@@ -8,12 +8,14 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{TimeZone, Utc};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 use plaw_eval::judges::{api_key_env_var, build_from_spec};
 use plaw_eval::metrics::score_run;
 use plaw_eval::report::{
     compare_runs, extract_failing_rows, render_aggregate_md, render_comparison_md,
-    render_pr_comment, write_aggregate_json, write_comparison_json, GateVerdict, DEFAULT_EPSILON,
+    render_pr_comment, write_aggregate_json, write_comparison_json, write_comparison_sarif,
+    GateVerdict, DEFAULT_EPSILON,
 };
 use plaw_eval::runner::{
     aggregate, execute, PlawClient, RunnerConfig, DEFAULT_AGGREGATE_ALPHA, DEFAULT_TIMEOUT,
@@ -143,6 +145,10 @@ enum Command {
         /// Write a JSON comparison report to this path.
         #[arg(long)]
         output: Option<PathBuf>,
+
+        /// Write a SARIF 2.1.0 report to this path (for GitHub Code Scanning).
+        #[arg(long)]
+        sarif: Option<PathBuf>,
     },
 
     /// Compute the sample size needed to detect an effect.
@@ -193,6 +199,18 @@ enum Command {
 
     /// Diagnose the local environment (API keys, plaw endpoint, DB).
     Doctor,
+
+    /// Generate a shell completion script.
+    ///
+    /// Examples:
+    ///   plaw-eval completion bash > /etc/bash_completion.d/plaw-eval
+    ///   plaw-eval completion zsh  > ~/.zfunc/_plaw-eval
+    ///   plaw-eval completion fish > ~/.config/fish/completions/plaw-eval.fish
+    ///   plaw-eval completion powershell | Out-String | Invoke-Expression
+    Completion {
+        /// Shell flavor to emit.
+        shell: Shell,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -333,6 +351,7 @@ async fn main() -> Result<()> {
             alpha,
             pr_comment,
             output,
+            sarif,
         } => cmd_compare(
             &db_path,
             &baseline,
@@ -342,6 +361,7 @@ async fn main() -> Result<()> {
             alpha,
             pr_comment.as_deref(),
             output.as_deref(),
+            sarif.as_deref(),
         ),
         Command::Power {
             effect,
@@ -357,7 +377,15 @@ async fn main() -> Result<()> {
         Command::Cache { action } => cmd_cache(&db_path, action),
         Command::Flywheel { action } => cmd_flywheel(&db_path, &suites_dir, action),
         Command::Doctor => cmd_doctor(&db_path, &suites_dir, cli.ws_url.as_deref()),
+        Command::Completion { shell } => cmd_completion(shell),
     }
+}
+
+fn cmd_completion(shell: Shell) -> Result<()> {
+    let mut cmd = Cli::command();
+    let bin = cmd.get_name().to_string();
+    clap_complete::generate(shell, &mut cmd, bin, &mut std::io::stdout());
+    Ok(())
 }
 
 // ---------- helpers ----------
@@ -615,6 +643,7 @@ fn cmd_compare(
     alpha: f64,
     pr_comment_path: Option<&Path>,
     output: Option<&Path>,
+    sarif_path: Option<&Path>,
 ) -> Result<()> {
     let repo = open_repo(db_path)?;
     let baseline_id = resolve_run_id(&repo, baseline_raw, suite)?;
@@ -638,6 +667,11 @@ fn cmd_compare(
     if let Some(path) = output {
         write_comparison_json(&report, path)?;
         println!("wrote JSON comparison to {}", path.display());
+    }
+
+    if let Some(path) = sarif_path {
+        write_comparison_sarif(&report, path)?;
+        println!("wrote SARIF report to {}", path.display());
     }
 
     if matches!(report.verdict, GateVerdict::Fail) {
