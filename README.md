@@ -287,6 +287,24 @@ Plaw 内置多层安全：PromptGuard 注入检测、外部内容扫描、反死
 - [marked](https://marked.js.org/) — Markdown 渲染
 - [Lucide](https://lucide.dev/) — 图标库
 
+## Plaw Elite — 严谨度路线图
+
+Plaw 在做一个长期工程：把自己打磨成桌面 AI agent 的参考实现。完整的设计、调研、阶段计划存在 [`.kiro/specs/plaw-elite/`](.kiro/specs/plaw-elite/)。
+
+**Phase 1: Eval Foundation** 已完成核心实装。每次代码改动都能被科学评估，不靠感觉判断"是更好还是更差"。
+
+- [`plaw-eval`](crates/plaw-eval/) crate — Anthropic 级统计严谨度（95% CI、cluster-robust SE、paired diff、Bradley-Terry MLE）+ 多 judge cross-family jury + G-Eval / 工具调用 / 关键词覆盖等指标。
+- [`plaw-eval` CLI](crates/plaw-eval-cli/) — `run / list / compare / power / promote / cache / flywheel / doctor`。
+- GitHub Actions [workflow](.github/workflows/plaw-eval.yml) — PR 触发的 smoke eval（n=30）+ 每日 nightly（n=300），全部统计严谨地比对 baseline。
+- 完整方法论文档：
+  - [methodology.md](docs/eval/methodology.md) — 为什么每个指标这么算
+  - [suite-design.md](docs/eval/suite-design.md) — 怎么设计好 case
+  - [judge-selection.md](docs/eval/judge-selection.md) — 怎么选 judge
+  - [troubleshooting.md](docs/eval/troubleshooting.md) — 常见问题
+  - [ci-secrets.md](docs/eval/ci-secrets.md) — CI 密钥配置
+
+后续阶段（Phase 2: Substance Rewrite，Phase 3: Observability）见 [`.kiro/specs/plaw-elite/01-roadmap.md`](.kiro/specs/plaw-elite/01-roadmap.md)。
+
 ## License
 
 MIT
