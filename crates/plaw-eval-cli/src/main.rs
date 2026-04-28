@@ -395,9 +395,31 @@ fn resolve_db_path(override_path: Option<PathBuf>) -> PathBuf {
 }
 
 fn resolve_ws_url(override_url: Option<&str>) -> String {
-    override_url
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "ws://127.0.0.1:5800/ws/chat".into())
+    if let Some(s) = override_url {
+        return s.to_string();
+    }
+    // plaw-desktop allocates a dynamic port at startup and writes it to
+    // `plaw-data/port-state.json`. Look there before falling back.
+    if let Some(port) = read_plaw_desktop_port() {
+        return format!("ws://127.0.0.1:{port}/ws/chat");
+    }
+    "ws://127.0.0.1:5800/ws/chat".into()
+}
+
+fn read_plaw_desktop_port() -> Option<u16> {
+    // Walk up from cwd looking for `plaw-data/port-state.json`. The dev
+    // build writes it to `<repo>/plaw-data/`, the bundled build to the
+    // exe's neighbour. We check the cwd's siblings in both cases.
+    let cwd = std::env::current_dir().ok()?;
+    for dir in std::iter::once(cwd.as_path()).chain(cwd.ancestors().skip(1)) {
+        let p = dir.join("plaw-data").join("port-state.json");
+        if p.exists() {
+            let content = std::fs::read_to_string(&p).ok()?;
+            let v: serde_json::Value = serde_json::from_str(&content).ok()?;
+            return v.get("port").and_then(|x| x.as_u64()).map(|n| n as u16);
+        }
+    }
+    None
 }
 
 fn open_repo(db_path: &Path) -> Result<EvalRepo> {

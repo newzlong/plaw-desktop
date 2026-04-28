@@ -7,8 +7,10 @@ version = "1.0.0"
 description = "Agent tool selection and argument quality on simple prompts."
 
 [default_judge]
-model = "kimi-k2.5"
-provider = "kimi"
+# 与 plaw-desktop 默认 provider 一致（Kimi Coder API + k2p5 模型）。
+# 使用环境变量 KIMI_API_KEY 提供 API key。
+model = "k2p5"
+provider = "kimi-coder"
 temperature = 0.0
 mode = { kind = "score", scale = 5 }
 

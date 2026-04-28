@@ -7,8 +7,12 @@ version = "1.0.0"
 description = "General single-turn chat quality — factual, reasoning, constraint-following, refusal."
 
 [default_judge]
-model = "kimi-k2.5"
-provider = "kimi"
+# 与 plaw-desktop 默认 provider 一致（Kimi Coder API + k2p5 模型）。
+# 使用环境变量 KIMI_API_KEY 提供 API key。
+# 注意：自我评估偏见的缓解需要在 jury 里加入 Anthropic / OpenAI 等
+# cross-family judge —— 见 docs/eval/judge-selection.md。
+model = "k2p5"
+provider = "kimi-coder"
 temperature = 0.0
 mode = { kind = "pairwise", dual_pass = true }
 

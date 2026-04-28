@@ -50,6 +50,19 @@ pub fn build_from_spec(spec: &JudgeSpec) -> Result<Arc<dyn JudgeClient>> {
                 spec.temperature,
             )))
         }
+        "kimi-coder" | "kimi_coder" | "kimicoder" => {
+            // Kimi Coder API — what plaw-desktop uses by default with
+            // model `k2p5`. Anthropic-compatible wire protocol.
+            let base_url = std::env::var("KIMI_CODER_BASE_URL")
+                .unwrap_or_else(|_| "https://api.kimi.com/coding".into());
+            Ok(Arc::new(AnthropicClient::new(
+                family,
+                spec.model.clone(),
+                base_url,
+                api_key,
+                spec.temperature,
+            )))
+        }
         "openai" | "gpt" => {
             let base_url = std::env::var("OPENAI_BASE_URL")
                 .unwrap_or_else(|_| "https://api.openai.com".into());
@@ -84,7 +97,7 @@ pub fn build_from_spec(spec: &JudgeSpec) -> Result<Arc<dyn JudgeClient>> {
             )))
         }
         other => Err(anyhow!(
-            "unknown judge provider '{other}'. Supported: anthropic, openai, kimi, deepseek, qwen"
+            "unknown judge provider '{other}'. Supported: anthropic, openai, kimi, kimi-coder, deepseek, qwen"
         )),
     }
 }
@@ -96,6 +109,7 @@ pub fn api_key_env_var(provider: &str) -> &'static str {
         "anthropic" | "claude" => "ANTHROPIC_API_KEY",
         "openai" | "gpt" => "OPENAI_API_KEY",
         "kimi" | "moonshot" => "KIMI_API_KEY",
+        "kimi-coder" | "kimi_coder" | "kimicoder" => "KIMI_API_KEY",
         "deepseek" => "DEEPSEEK_API_KEY",
         "qwen" | "alibaba" | "tongyi" => "DASHSCOPE_API_KEY",
         _ => "PLAW_EVAL_API_KEY",
