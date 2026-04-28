@@ -681,6 +681,12 @@ fn cmd_compare(
         let candidate_cases = repo.load_case_results(&candidate_id)?;
         let rows = extract_failing_rows(&report, &baseline_cases, &candidate_cases, 10);
         let body = render_pr_comment(&report, &rows);
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating parent dir for {}", path.display()))?;
+            }
+        }
         std::fs::write(path, body)
             .with_context(|| format!("writing PR comment to {}", path.display()))?;
         println!("wrote PR comment to {}", path.display());

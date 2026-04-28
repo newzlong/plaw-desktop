@@ -53,6 +53,7 @@ fn case_result(run_id: &str, case_id: &str, cluster: Option<&str>, score: f64) -
         tokens_out: 10,
         cache_read_tokens: 0,
         error: None,
+        tool_calls: Vec::new(),
     }
 }
 
@@ -191,6 +192,7 @@ fn rendering_handles_metric_present_only_in_one_run() {
             tokens_out: 0,
             cache_read_tokens: 0,
             error: None,
+            tool_calls: Vec::new(),
         })
         .unwrap();
 
@@ -215,6 +217,7 @@ fn rendering_handles_metric_present_only_in_one_run() {
             tokens_out: 0,
             cache_read_tokens: 0,
             error: None,
+            tool_calls: Vec::new(),
         })
         .unwrap();
     }

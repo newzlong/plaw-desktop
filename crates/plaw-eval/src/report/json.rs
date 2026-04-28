@@ -19,18 +19,29 @@ pub fn render_comparison(report: &ComparisonReport) -> Result<String> {
     serde_json::to_string_pretty(report).context("serialising comparison report")
 }
 
-/// Write a pretty JSON aggregate report to disk.
+/// Write a pretty JSON aggregate report to disk. Creates parent
+/// directories as needed.
 pub fn write_aggregate(report: &AggregateReport, path: impl AsRef<Path>) -> Result<()> {
     let body = render_aggregate(report)?;
-    std::fs::write(&path, body)
-        .with_context(|| format!("writing aggregate report to {}", path.as_ref().display()))
+    write_with_mkdir(path.as_ref(), &body, "aggregate")
 }
 
-/// Write a pretty JSON comparison report to disk.
+/// Write a pretty JSON comparison report to disk. Creates parent
+/// directories as needed.
 pub fn write_comparison(report: &ComparisonReport, path: impl AsRef<Path>) -> Result<()> {
     let body = render_comparison(report)?;
-    std::fs::write(&path, body)
-        .with_context(|| format!("writing comparison report to {}", path.as_ref().display()))
+    write_with_mkdir(path.as_ref(), &body, "comparison")
+}
+
+fn write_with_mkdir(path: &Path, body: &str, kind: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating parent dir for {}", path.display()))?;
+        }
+    }
+    std::fs::write(path, body)
+        .with_context(|| format!("writing {kind} report to {}", path.display()))
 }
 
 #[cfg(test)]

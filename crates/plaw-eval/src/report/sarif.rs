@@ -19,11 +19,17 @@ pub fn render_comparison(report: &ComparisonReport) -> Result<String> {
     serde_json::to_string_pretty(&sarif).context("serialising SARIF report")
 }
 
-/// Write a SARIF JSON report to disk.
+/// Write a SARIF JSON report to disk. Creates parent directories as needed.
 pub fn write_comparison(report: &ComparisonReport, path: impl AsRef<Path>) -> Result<()> {
     let body = render_comparison(report)?;
-    std::fs::write(&path, body)
-        .with_context(|| format!("writing SARIF report to {}", path.as_ref().display()))
+    let p = path.as_ref();
+    if let Some(parent) = p.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating parent dir for {}", p.display()))?;
+        }
+    }
+    std::fs::write(p, body).with_context(|| format!("writing SARIF report to {}", p.display()))
 }
 
 fn build_sarif(report: &ComparisonReport) -> Value {

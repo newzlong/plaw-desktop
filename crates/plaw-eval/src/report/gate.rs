@@ -296,6 +296,7 @@ mod tests {
             tokens_out: 0,
             cache_read_tokens: 0,
             error: None,
+            tool_calls: Vec::new(),
         }
     }
 

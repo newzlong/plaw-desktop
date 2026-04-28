@@ -19,8 +19,9 @@ use crate::judges::client::JudgeClient;
 use crate::metrics::{
     g_eval::{score as g_eval_score, GEvalConfig},
     keywords::{coverage as keyword_coverage, KeywordConfig},
+    tool::summarise as tool_summarise,
 };
-use crate::storage::{EvalRepo, MetricScore};
+use crate::storage::{EvalRepo, MetricScore, RecordedToolCall};
 use crate::suite::{Case, CaseInput, ChatRole, MetricSpec, Suite};
 
 /// Apply every metric in `suite.metrics` to every successful case_result
@@ -52,7 +53,7 @@ pub async fn score_run(
         };
         let mut scored: HashMap<String, MetricScore> = HashMap::new();
         for spec in &suite.metrics {
-            match compute_metric(spec, case, &r.plaw_response, judge).await {
+            match compute_metric(spec, case, &r.plaw_response, &r.tool_calls, judge).await {
                 Ok(Some(score)) => {
                     scored.insert(spec.name.clone(), score);
                     total += 1;
@@ -83,9 +84,46 @@ pub async fn compute_metric(
     spec: &MetricSpec,
     case: &Case,
     response_text: &str,
+    tool_calls: &[RecordedToolCall],
     judge: &dyn JudgeClient,
 ) -> Result<Option<MetricScore>> {
     match spec.name.as_str() {
+        "tool_call_accuracy" => {
+            let expected = case
+                .expected
+                .as_ref()
+                .map(|e| e.tool_sequence.clone())
+                .unwrap_or_default();
+            // No expected_tool_sequence + no actual calls → trivially correct,
+            // but uninformative. Skip rather than dilute the metric mean.
+            if expected.is_empty() && tool_calls.is_empty() {
+                return Ok(None);
+            }
+            let names: Vec<String> = tool_calls.iter().map(|t| t.name.clone()).collect();
+            let args: Vec<serde_json::Value> = tool_calls.iter().map(|t| t.args.clone()).collect();
+            let s = tool_summarise(&names, &args, &expected);
+            // Composite scalar: mean of selection_f1 and (1 − redundant_rate),
+            // with arg_validity acting as a penalty when low. This matches
+            // the framing in docs/eval/methodology.md §10.
+            let composite = (s.selection_f1 * 0.6
+                + (1.0 - s.redundant_call_rate) * 0.2
+                + s.arg_validity_rate * 0.2)
+                .clamp(0.0, 1.0);
+            Ok(Some(MetricScore {
+                value: composite,
+                raw: json!({
+                    "selection_precision": s.selection_precision,
+                    "selection_recall": s.selection_recall,
+                    "selection_f1": s.selection_f1,
+                    "arg_validity_rate": s.arg_validity_rate,
+                    "redundant_call_rate": s.redundant_call_rate,
+                    "n_calls": s.n_calls,
+                    "expected": expected,
+                    "actual": names,
+                }),
+                judge_model: "deterministic".into(),
+            }))
+        }
         "g_eval" => {
             let cfg = parse_g_eval_params(spec)?;
             let question = question_text(&case.input);
@@ -237,6 +275,7 @@ mod tests {
             tokens_out: 0,
             cache_read_tokens: 0,
             error: None,
+            tool_calls: Vec::new(),
         }
     }
 
@@ -309,7 +348,7 @@ mod tests {
         suite.cases[0].expected = Some(CaseExpected::default());
         let case = &suite.cases[0];
         let judge = MockJudgeClient::new(JudgeFamily::Kimi, "kimi-k2.5", vec![]);
-        let result = compute_metric(&suite.metrics[0], case, "Paris", &judge)
+        let result = compute_metric(&suite.metrics[0], case, "Paris", &[], &judge)
             .await
             .unwrap();
         assert!(result.is_none());
@@ -324,10 +363,16 @@ mod tests {
         }]);
         let case = &suite.cases[0];
         let judge = MockJudgeClient::new(JudgeFamily::Kimi, "kimi-k2.5", vec![]);
-        let score = compute_metric(&suite.metrics[0], case, "Paris is the capital.", &judge)
-            .await
-            .unwrap()
-            .unwrap();
+        let score = compute_metric(
+            &suite.metrics[0],
+            case,
+            "Paris is the capital.",
+            &[],
+            &judge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!((score.value - 1.0).abs() < 1e-12);
         assert_eq!(score.judge_model, "deterministic");
     }
@@ -342,7 +387,7 @@ mod tests {
         let suite = suite_with_metrics(vec![]);
         let case = &suite.cases[0];
         let judge = MockJudgeClient::new(JudgeFamily::Kimi, "kimi-k2.5", vec![]);
-        let result = compute_metric(&spec, case, "anything", &judge)
+        let result = compute_metric(&spec, case, "anything", &[], &judge)
             .await
             .unwrap();
         assert!(result.is_none());

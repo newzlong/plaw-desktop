@@ -156,11 +156,14 @@ impl EvalRepo {
         let conn = self.conn.lock().unwrap();
         let metric_json =
             serde_json::to_string(&result.metric_scores).context("serialising metric scores")?;
+        let tool_calls_json =
+            serde_json::to_string(&result.tool_calls).context("serialising tool calls")?;
         conn.execute(
             "INSERT INTO case_results (run_id, case_id, case_cluster, plaw_response,
                                        plaw_trace_id, metric_scores, latency_ms,
-                                       tokens_in, tokens_out, cache_read_tokens, error)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                                       tokens_in, tokens_out, cache_read_tokens, error,
+                                       tool_calls)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 result.run_id,
                 result.case_id,
@@ -173,6 +176,7 @@ impl EvalRepo {
                 result.tokens_out,
                 result.cache_read_tokens,
                 result.error,
+                tool_calls_json,
             ],
         )?;
         Ok(())
@@ -202,7 +206,7 @@ impl EvalRepo {
         let mut stmt = conn.prepare(
             "SELECT run_id, case_id, case_cluster, plaw_response, plaw_trace_id,
                     metric_scores, latency_ms, tokens_in, tokens_out,
-                    cache_read_tokens, error
+                    cache_read_tokens, error, tool_calls
              FROM case_results WHERE run_id = ?1",
         )?;
         let rows = stmt
@@ -412,6 +416,15 @@ fn row_to_case_result(row: &rusqlite::Row<'_>) -> rusqlite::Result<CaseResult> {
         serde_json::from_str(&metric_json).map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(e))
         })?;
+    // tool_calls column was added later; fall back to "[]" when the
+    // column is missing on legacy DBs.
+    let tool_calls_json: String = row
+        .get::<_, String>(11)
+        .unwrap_or_else(|_| "[]".to_string());
+    let tool_calls: Vec<crate::storage::RecordedToolCall> = serde_json::from_str(&tool_calls_json)
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(11, rusqlite::types::Type::Text, Box::new(e))
+        })?;
     Ok(CaseResult {
         run_id: row.get(0)?,
         case_id: row.get(1)?,
@@ -424,6 +437,7 @@ fn row_to_case_result(row: &rusqlite::Row<'_>) -> rusqlite::Result<CaseResult> {
         tokens_out: row.get::<_, i64>(8)? as u32,
         cache_read_tokens: row.get::<_, i64>(9)? as u32,
         error: row.get(10)?,
+        tool_calls,
     })
 }
 
@@ -451,6 +465,7 @@ fn apply_runtime_migrations(conn: &Connection) {
         "ALTER TABLE flywheel_queue ADD COLUMN source_run_id TEXT",
         "ALTER TABLE flywheel_queue ADD COLUMN source_case_id TEXT",
         "ALTER TABLE flywheel_queue ADD COLUMN target_suite TEXT",
+        "ALTER TABLE case_results ADD COLUMN tool_calls TEXT NOT NULL DEFAULT '[]'",
     ];
     for stmt in alters {
         if let Err(e) = conn.execute(stmt, []) {
@@ -458,7 +473,7 @@ fn apply_runtime_migrations(conn: &Connection) {
             // is a real schema mismatch and worth surfacing in the log.
             let msg = e.to_string();
             if !msg.contains("duplicate column name") {
-                tracing::warn!(error = %e, sql = stmt, "flywheel_queue migration skipped");
+                tracing::warn!(error = %e, sql = stmt, "schema migration skipped");
             }
         }
     }
@@ -514,6 +529,7 @@ mod tests {
             tokens_out: 10,
             cache_read_tokens: 0,
             error: None,
+            tool_calls: Vec::new(),
         }
     }
 

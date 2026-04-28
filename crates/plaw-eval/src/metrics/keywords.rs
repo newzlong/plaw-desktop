@@ -62,26 +62,44 @@ fn contains_whole_word(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return false;
     }
-    let bytes = haystack.as_bytes();
-    let n = needle.as_bytes();
-    if n.len() > bytes.len() {
+    if needle.len() > haystack.len() {
         return false;
     }
-    'outer: for i in 0..=bytes.len() - n.len() {
-        if &bytes[i..i + n.len()] != n {
+    // Walk match positions on str, then check the *char* before and after
+    // (not the raw byte) so multi-byte UTF-8 doesn't get mistaken for a
+    // letter. For CJK the chars are non-alphanumeric so whole_word
+    // degenerates to substring matching as advertised.
+    for (i, _) in haystack.match_indices(needle) {
+        // Boundary check uses *ASCII* alphanumeric only. CJK / accented
+        // letters / etc. are alphabetic in Unicode but for our purposes
+        // they're word boundaries (CJK has none, accented runs of Latin
+        // are rare in keyword cases). Using is_ascii_alphanumeric keeps
+        // English whole-word semantics while letting CJK pass through.
+        let before_ok = if i == 0 {
+            true
+        } else {
+            !haystack[..i]
+                .chars()
+                .next_back()
+                .map(|c| c.is_ascii_alphanumeric())
+                .unwrap_or(false)
+        };
+        if !before_ok {
             continue;
         }
-        // Boundary checks. We use the alphanumeric-ASCII heuristic; for
-        // CJK this devolves to substring matching, which is fine since
-        // CJK has no word boundaries anyway.
-        if i > 0 && (bytes[i - 1] as char).is_alphanumeric() {
-            continue 'outer;
+        let after_idx = i + needle.len();
+        let after_ok = if after_idx >= haystack.len() {
+            true
+        } else {
+            !haystack[after_idx..]
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_alphanumeric())
+                .unwrap_or(false)
+        };
+        if after_ok {
+            return true;
         }
-        let after = i + n.len();
-        if after < bytes.len() && (bytes[after] as char).is_alphanumeric() {
-            continue 'outer;
-        }
-        return true;
     }
     false
 }
@@ -138,6 +156,18 @@ mod tests {
         };
         let kws = vec!["北京".to_string()];
         assert_eq!(coverage("我来自北京。", &kws, &cfg), 1.0);
+    }
+
+    #[test]
+    fn cjk_works_with_whole_word_too() {
+        // Regression: byte-level boundary check used to mistake CJK
+        // continuation bytes for Latin letters and reject every CJK
+        // match. Boundary check is now char-aware.
+        let cfg = KeywordConfig::default(); // whole_word = true
+        let kws = vec!["不能".to_string()];
+        assert_eq!(coverage("不能。这是一个经典问题。", &kws, &cfg), 1.0);
+        let kws2 = vec!["量子".to_string()];
+        assert_eq!(coverage("量子力学是描述微观粒子的理论。", &kws2, &cfg), 1.0);
     }
 
     #[test]

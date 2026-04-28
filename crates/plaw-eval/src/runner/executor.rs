@@ -221,21 +221,32 @@ async fn run_one_case(
     };
 
     let cr = match attempt {
-        Ok(response) => CaseResult {
-            run_id: run_id.into(),
-            case_id: case.id.clone(),
-            case_cluster: case.cluster_id.clone(),
-            plaw_response: response.text,
-            plaw_trace_id: None,
-            // Metric scores are populated by M5 once metrics land. M3 just
-            // captures the response and timing.
-            metric_scores: HashMap::new(),
-            latency_ms: response.latency_ms,
-            tokens_in: response.usage.input_tokens,
-            tokens_out: response.usage.output_tokens,
-            cache_read_tokens: response.usage.cache_read_input_tokens,
-            error: None,
-        },
+        Ok(response) => {
+            let tool_calls = response
+                .tool_calls
+                .iter()
+                .map(|t| crate::storage::RecordedToolCall {
+                    name: t.name.clone(),
+                    args: t.args.clone(),
+                })
+                .collect();
+            CaseResult {
+                run_id: run_id.into(),
+                case_id: case.id.clone(),
+                case_cluster: case.cluster_id.clone(),
+                plaw_response: response.text,
+                plaw_trace_id: None,
+                // Metric scores are populated by M5 once metrics land. M3 just
+                // captures the response and timing.
+                metric_scores: HashMap::new(),
+                latency_ms: response.latency_ms,
+                tokens_in: response.usage.input_tokens,
+                tokens_out: response.usage.output_tokens,
+                cache_read_tokens: response.usage.cache_read_input_tokens,
+                error: None,
+                tool_calls,
+            }
+        }
         Err(err) => CaseResult {
             run_id: run_id.into(),
             case_id: case.id.clone(),
@@ -248,6 +259,7 @@ async fn run_one_case(
             tokens_out: 0,
             cache_read_tokens: 0,
             error: Some(format!("{err:#}")),
+            tool_calls: Vec::new(),
         },
     };
 

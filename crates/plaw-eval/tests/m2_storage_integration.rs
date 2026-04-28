@@ -78,6 +78,7 @@ fn template_suite_loads_and_round_trips_through_storage() {
             tokens_out: 50,
             cache_read_tokens: 0,
             error: None,
+            tool_calls: Vec::new(),
         })
         .unwrap();
     }

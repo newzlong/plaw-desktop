@@ -177,6 +177,7 @@ mod tests {
                 } else {
                     None
                 },
+                tool_calls: Vec::new(),
             };
             repo.insert_case_result(&cr).unwrap();
         }

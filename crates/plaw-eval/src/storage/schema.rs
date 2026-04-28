@@ -22,7 +22,7 @@ pub struct Run {
 }
 
 /// Per-case outcome captured during a run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CaseResult {
     pub run_id: String,
     pub case_id: String,
@@ -35,6 +35,18 @@ pub struct CaseResult {
     pub tokens_out: u32,
     pub cache_read_tokens: u32,
     pub error: Option<String>,
+    /// Ordered list of tool calls plaw made during this case.
+    /// Stored as JSON for forward compatibility with new fields.
+    #[serde(default)]
+    pub tool_calls: Vec<RecordedToolCall>,
+}
+
+/// Subset of plaw's tool_call event we persist for offline metric scoring.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RecordedToolCall {
+    pub name: String,
+    #[serde(default)]
+    pub args: serde_json::Value,
 }
 
 /// Score returned by a single metric for a single case.
@@ -127,6 +139,7 @@ CREATE TABLE IF NOT EXISTS case_results (
     tokens_out INTEGER NOT NULL,
     cache_read_tokens INTEGER NOT NULL,
     error TEXT,
+    tool_calls TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (run_id, case_id),
     FOREIGN KEY (run_id) REFERENCES runs(id)
 );

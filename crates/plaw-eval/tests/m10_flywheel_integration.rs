@@ -85,6 +85,7 @@ fn seed_run(repo: &EvalRepo, run_id: &str, case_id: &str, score: f64) {
         tokens_out: 0,
         cache_read_tokens: 0,
         error: None,
+        tool_calls: Vec::new(),
     })
     .unwrap();
 }

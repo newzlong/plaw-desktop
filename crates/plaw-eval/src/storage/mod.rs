@@ -5,6 +5,6 @@ pub mod schema;
 
 pub use repo::EvalRepo;
 pub use schema::{
-    AggregateReport, CaseResult, FlywheelEntry, JudgeCacheEntry, MetricAggregate, MetricScore, Run,
-    SCHEMA_SQL,
+    AggregateReport, CaseResult, FlywheelEntry, JudgeCacheEntry, MetricAggregate, MetricScore,
+    RecordedToolCall, Run, SCHEMA_SQL,
 };
