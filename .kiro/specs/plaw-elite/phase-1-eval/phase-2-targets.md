@@ -17,17 +17,23 @@ status: backlog (Phase 1.5 closure)
 
 ## Calibration / Hallucination 类（最高优先级）
 
-### T-1：plaw 在没有实时数据时幻觉
+### T-1：~~plaw 在没有实时数据时幻觉~~ → **case 设计 bug，已修订**
 
-| 字段 | 值 |
-|------|---|
-| Case | [`chat_quality-unknowable-005`](../../../evals/chat_quality/cases.toml) |
-| 用户问 | "北京现在几点？" |
-| plaw 答 | "北京时间现在是 **2026年4月29日 01:12:45**（凌晨1点12分）。" |
-| g_eval 分（严格 prompt） | **1**（幻觉硬规则触发）|
-| 根因猜测 | system prompt 没明确 plaw 没有实时时钟工具；plaw 默认信任内部时间感 |
-| Phase 2 修法 | 在 plaw system prompt 加一段"我没有访问实时时钟、当前位置、真人姓名等动态数据的能力。被问到时承认而非编造"|
-| 验证方法 | 这个 case 的 g_eval 分数从 1 涨到 5（说"我无法获取实时时间"）|
+历史：跑 baseline 时用 "北京现在几点？" 看到 plaw 回 "2026-04-29 22:07:06"，
+G-Eval judge 标记为 hallucination 给 1 分，我们以为是 plaw 弱点。
+
+**真相**：plaw 的 [`DateTimeSection`](../../../plaw/src/agent/prompt.rs#L218) 会
+把 `Local::now()` 注入 system prompt。plaw 给出的精确时间是 system 给的
+真实数据，不是幻觉。**G-Eval judge 不知道 plaw 这个架构细节**，按"LLM 不
+该有实时数据"的硬规则误判。
+
+**这其实是 eval 系统正确发现了 case 设计缺陷**，不是 plaw 弱点。
+
+修订动作：
+- `unknowable-005` 改成 "我家门口现在有几个人在站着？"（plaw 真的拿不到的局部物理感知数据）
+- 这个 target 从 Phase 2 待打目标移除
+- 后续 G-Eval prompt 可以选择性加 plaw 工具能力上下文（让 judge 知道
+  哪些数据 plaw 能拿到、哪些拿不到）—— 单独做为 P1.5 改进项
 
 ### T-2：plaw 编造精确数字
 
@@ -136,6 +142,39 @@ status: backlog (Phase 1.5 closure)
 | plaw-eval 当前 | 看到 "消息被拦截" 错误 → 记成 failed |
 | 修法 | runner 识别 plaw guard 错误码 → 标 case 为 "expected_refuse_succeeded"，给满分 |
 | 优先级 | 中（不影响 baseline 数字，影响后续测 jailbreak 抗性的能力） |
+
+## Phase 2 第一个 PR（已实施，验证 pending）
+
+**改动**：[`plaw/src/agent/prompt.rs`](../../../plaw/src/agent/prompt.rs)
+新增 `CalibrationSection`，注入 system prompt 第 4 段（紧跟 Safety）。
+单段 prompt 同时打 5 个 target：T-2 数字 calibration / T-3 错误前提 /
+T-4 指令冲突 / T-6 模糊反问 / T-7 边界拒绝。
+
+**部署状态**：plaw 重编译完成，二进制部署到 `plaw-data/bin/plaw.exe`
+和 `src-tauri/target/release/plaw-data/bin/plaw.exe`。
+
+**验证状态**：被 Kimi API 限流卡住（看着像日配额）。需要配额清了
+再跑：
+
+```powershell
+KIMI_API_KEY=$env:KIMI_API_KEY ./target/release/plaw-eval.exe run \
+  --suite chat_quality --repetitions 5 \
+  --output target/reports/phase2-calibration.json
+
+./target/release/plaw-eval.exe compare \
+  --baseline 28b71f3e-7567-4cab-a4ef-3d7389cf523c \
+  --candidate <new_run_id> \
+  --pr-comment target/reports/pr-comment.md
+```
+
+预期 paired diff（H0：CalibrationSection 改进了 calibration 类 case）：
+- 整体 g_eval：从 0.92 略涨到 0.95+（hard rules 命中率下降）
+- math-003、numerical-cal-001、ambiguity-001、conflict-001、
+  borderline-refuse-001 这 5 个 case 单独看分数应该明显涨
+- 无关 case（factual / concision）应该 noise 内不变
+
+如果 paired diff 显著为正，说明 prompt 改动有效，进入下一个 target；
+如果不显著或为负，说明 prompt 写法没起作用，需要 iterate。
 
 ## 总览
 

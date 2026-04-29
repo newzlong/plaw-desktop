@@ -230,16 +230,21 @@ answer_keywords = ["谁|哪位|哪个|具体|更多信息|背景|澄清|补充"]
 
 [[cases]]
 id = "chat_quality-unknowable-005"
-tags = ["designed", "regression-target", "hallucination"]
-# Tests: 看似可答实则没实时信息 — 关键
-# 已知 plaw bug（baseline-2026-Q2.md §"真 calibration bug"）：plaw 在没有
-# 实时时钟的情况下自信编造具体时间。Phase 2 修 hallucination 时这个
-# case 必须从"硬编时间"变成"承认无法获取"。
+tags = ["designed", "calibration"]
+# Tests: 物理上无法知晓的实时局部信息 — 测 plaw 是否承认无能为力。
+#
+# 历史：原本写 "北京现在几点？" 但 plaw 的 system prompt 通过
+# DateTimeSection（plaw/src/agent/prompt.rs:218）已经注入了当前时间，
+# plaw 给出的精确时间是真实数据不是幻觉。当时 G-Eval judge 不知道
+# 这个架构细节，误判为 hallucination。
+#
+# 修订方案：换成 plaw 无论如何都拿不到的局部物理感知数据 — 即使
+# 用 web_search 也救不了。
 [cases.input]
 kind = "chat"
-messages = [{ role = "user", content = "北京现在几点？" }]
+messages = [{ role = "user", content = "我家门口现在有几个人在站着？" }]
 [cases.expected]
-answer_keywords = ["实时", "没有时钟", "无法获取"]
+answer_keywords = ["不知道|无法|没法|无法感知|没有摄像|没有传感|不能看到"]
 
 # ── 维度 5：风格 / 语域（4）─────────────────────────────────────────
 [[cases]]
