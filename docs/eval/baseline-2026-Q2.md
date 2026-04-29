@@ -2,50 +2,75 @@
 title: Plaw Baseline — 2026-Q2
 date: 2026-04-29
 runs:
-  chat_quality_kimi_n30: "9545af14-eda3-47dd-98d1-8c953edbc5d3"
-  tool_routing_kimi_n30: "d4494973-cce7-4a9f-bb6a-0053051cbafd"
+  chat_quality_kimi_n30_v1: "9545af14-eda3-47dd-98d1-8c953edbc5d3"
+  tool_routing_kimi_n30_v1: "d4494973-cce7-4a9f-bb6a-0053051cbafd"
   chat_quality_deepseek_n30: "82c27c1f-4b4c-4ea6-900b-3d5f3c8eeebf"
-  chat_quality_kimi_full: "d0c11231-9706-4728-9754-3c9a5febc18a"
-  tool_routing_kimi_full: "8de3e2a4-e0a8-48e4-8040-8a3e5f6b134b"
+  chat_quality_kimi_n30_v2: "d0c11231-9706-4728-9754-3c9a5febc18a"
+  tool_routing_kimi_n30_v2: "8de3e2a4-e0a8-48e4-8040-8a3e5f6b134b"
+  chat_quality_kimi_oversampled: "28b71f3e-7567-4cab-a4ef-3d7389cf523c"  # 30 unique × 10 reps = 300
+  tool_routing_kimi_oversampled: "642b6812-1d26-4ad6-accb-1a32369c1833"   # 32 unique × 10 reps = 320
 plaw_version: "live dev mode (commit n/a — captured before commit metadata wiring)"
 default_judge: kimi-coder/k2p5 (api.kimi.com/coding)
 cross_family_judge: deepseek/deepseek-v4-pro (api.deepseek.com)
-sample_n: 30 per suite (--n 300 hit the per-suite cap; oversampling is a backlog item)
+sample: 30/32 unique cases × 10 repetitions = 300/320 obs per suite
 ---
 
 # Plaw Baseline — 2026-Q2
 
-**Status**：smoke baseline + cross-family check 完成，n=300 完整 baseline 跑出来后会更新本文档。
+**Status**：✅ 完整 baseline 已跑（30/32 unique × 10 reps × 2 suites = 620 obs，cluster-robust SE 启用）。Phase 2 启动后用本文档的数字当对照。
 
-## 数字
+## 锁定的数字 (n=300/320, 10 reps, cluster SE)
 
-### chat_quality（同 vs 跨 family judge 对照）
+| Suite | Metric | n | mean | 95% CI | clustered SE | clusters |
+|-------|--------|---:|-----:|--------|---:|---:|
+| chat_quality | g_eval | 300 | **0.9218** | [0.87, 0.97] | 0.0240 | 30 |
+| chat_quality | keyword_coverage | 300 | **0.7728** | [0.67, 0.87] | 0.0500 | 30 |
+| tool_routing | tool_call_accuracy | 263 | **0.7362** | [0.66, 0.81] | 0.0374 | 28 |
 
-| Judge | Family | g_eval mean | g_eval CI | keyword_coverage |
-|-------|--------|------:|----------|-----------------:|
-| kimi-coder/k2p5 | Kimi（同 plaw） | 0.9034 | [0.83, 0.98] | 0.5278 |
-| deepseek/v4-pro | DeepSeek（cross） | 0.9008 | [0.80, 0.99] | 0.4778 |
-| **差值** | — | **−0.003** | 重叠 | −0.05（noise） |
+> tool_routing 中 4 个 case `expected = []` 且 plaw 没调工具 → 视为信号一致跳过，所以 n=263 < 320。28 clusters 而不是 32 同因。
 
-### tool_routing
+## 数字演进史
 
-| Run | n | mean | 95% CI |
-|---|---:|---:|---|
-| smoke (n=30) | 24 | 0.7150 | [0.63, 0.80] |
-| full attempt | 27 | 0.7245 | [0.65, 0.80] |
+为了让后续读者理解 baseline 是怎么来的（以及哪些是设计 bug、哪些是真信号），保留三轮对照：
 
-数字稳定（差值 ~0.01，CI 完全重叠），证明 plaw 在 tool_routing 上的行为有可重复性。
+### 1. 跨 family judge 对照（n=30）
 
-### 第二次 chat_quality
+| Judge | Family | g_eval | keyword_coverage |
+|-------|--------|---:|---:|
+| kimi-coder/k2p5 | Kimi（同 plaw） | 0.9034 | 0.5278 |
+| deepseek/v4-pro | DeepSeek（cross） | 0.9008 | 0.4778 |
+| **差值** | — | **−0.003** | −0.05（noise） |
 
-| Run | g_eval | keyword_coverage |
-|---|---:|---:|
-| smoke (n=30) | 0.9034 | 0.5278 |
-| full attempt | 0.9571 | 0.5111 |
+→ self-preference 偏见**未检出**。问题在 G-Eval prompt 偏宽容，不在 family。
 
-g_eval 浮动 +5pp 是单次 plaw + judge 的 noise 体现，CI 仍重叠。**这恰恰是 n=300 该解决的问题** —— 真做了 repeatability，CI 应该缩到 ±2pp 内。下面 §"已知工具缺口"说明为什么这次没能跑成。
+### 2. 修复后的两次 n=30（一致性检查）
+
+| Run | g_eval | keyword_coverage | tool_call_accuracy |
+|---|---:|---:|---:|
+| 跑 1 (4-29 上午) | 0.9034 | 0.5278 | 0.7150 |
+| 跑 2 (4-29 下午) | 0.9571 | 0.5111 | 0.7245 |
+| 差值 | +5pp（noise）| 0.5（noise）| +1pp（noise）|
+
+→ 单次 noise 很大，必须靠重复采样收紧。
+
+### 3. 完整 oversampled (n=300/320, 10 reps) ⭐ baseline 锁定
+
+见上面"锁定的数字"表。CI 稳定，cluster SE 启用。
 
 ## 关键发现
+
+### 0. 锁定的差距：g_eval 0.92 vs keyword_coverage 0.77
+
+n=300 的对比：
+
+| 信号 | mean | 95% CI |
+|---|---:|---|
+| g_eval | 0.9218 | [0.87, 0.97] |
+| keyword_coverage | 0.7728 | [0.67, 0.87] |
+| **差距** | **+14pp** | CI 几乎不重叠（0.87 vs 0.87 边界） |
+
+**这是统计显著的差距，不是 noise**。证明 G-Eval judge 比机械关键词覆盖**系统性高估** plaw 的回答质量约 14 pp。
+Phase 2 评估 prompt 改动时**优先盯 keyword_coverage**，g_eval 当辅助。
 
 ### 1. 偏见来源不是 self-preference，是 judge prompt 太宽松
 
@@ -119,19 +144,15 @@ cases.toml 已对齐到 plaw 实际名。**待办**：更新 CLAUDE.md 反映真
 
 **建议**：cases.toml 加个 `applicable_metrics: ["g_eval"]` 字段，按 case 选 metric，不让所有 case 都跑所有 metric。
 
-## 已知工具缺口
+## 历史工具缺口（已修）
 
-### `--n` 实际是"最多 N 个 case"，不是"每 case 跑 N 次"
+### ~~`--n` 实际是"最多 N 个 case"~~ → 已加 `--repetitions`（commit `175ce3f`）
 
-跑 5b 时发现 `--n 300` 实际等于 n=30（被 suite 大小 32 / 30 cap 住）。
-[crates/plaw-eval/src/runner/executor.rs](../../crates/plaw-eval/src/runner/executor.rs)
-的 `sample_n` 是单次取样上限，没实现"每 case 重复 K 次跑"的语义。
+原本 `--n 300` 被 suite 大小 cap 住。现在两个 flag 各司其职：
+- `--n K`：取最多 K 个 unique case
+- `--repetitions K`：每个 case 跑 K 次（cluster_id 自动设为 base case id）
 
-这意味着：
-- 看不到 pass^k 的 repeatability 信号（同 case 跑 10 次有几次过）
-- CI 没法从 n=30 那种宽幅（0.83-0.98）收紧到 0.95-0.99 那种锁紧水平
-
-**修法**：executor 加一个 `repetitions: usize` 参数，每个 case 跑 K 次。每次结果作为独立观察值进 stats。是 Phase 1.5 工程项。
+本次 baseline 用 `--repetitions 10` 跑出 620 总观察值，cluster-robust SE 自动启用。
 
 ## 已做（截至本次更新）
 
