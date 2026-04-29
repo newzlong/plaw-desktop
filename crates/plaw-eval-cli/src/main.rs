@@ -22,7 +22,7 @@ use plaw_eval::runner::{
 };
 use plaw_eval::stats::required_sample_size;
 use plaw_eval::storage::{EvalRepo, FlywheelEntry};
-use plaw_eval::suite::{discover_suites, load_suite};
+use plaw_eval::suite::{discover_suites, load_suite, JudgeMode, JudgeSpec};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
@@ -394,6 +394,25 @@ fn resolve_db_path(override_path: Option<PathBuf>) -> PathBuf {
     override_path.unwrap_or_else(|| PathBuf::from("plaw-data/.plaw/eval/runs.db"))
 }
 
+/// Parse a `--judge provider:model` override into a [`JudgeSpec`].
+/// Mode defaults to score(scale=5) — the suite's mode isn't preserved
+/// because the override is meant for ad-hoc cross-family comparison runs
+/// (G-Eval / score work for any single judge).
+fn parse_judge_override(s: &str) -> Result<JudgeSpec> {
+    let (provider, model) = s
+        .split_once(':')
+        .ok_or_else(|| anyhow!("--judge must be 'provider:model', got '{s}'"))?;
+    if provider.is_empty() || model.is_empty() {
+        return Err(anyhow!("--judge provider and model must be non-empty"));
+    }
+    Ok(JudgeSpec {
+        model: model.to_string(),
+        provider: provider.to_string(),
+        temperature: 0.0,
+        mode: JudgeMode::Score { scale: 5 },
+    })
+}
+
 fn resolve_ws_url(override_url: Option<&str>) -> String {
     if let Some(s) = override_url {
         return s.to_string();
@@ -481,10 +500,14 @@ async fn cmd_run(
     suites: Vec<String>,
     all: bool,
     n: Option<usize>,
-    _judge_override: Option<&str>, // CLI override hook; honoured in M11+
+    judge_override: Option<&str>,
     seed: Option<u64>,
     output: Option<&Path>,
 ) -> Result<()> {
+    let judge_spec_override = judge_override
+        .map(parse_judge_override)
+        .transpose()
+        .context("parsing --judge override")?;
     let repo = Arc::new(open_repo(db_path)?);
     let ws = resolve_ws_url(ws_url);
 
@@ -534,18 +557,25 @@ async fn cmd_run(
         }
         .with_timeout(DEFAULT_TIMEOUT);
 
-        // Build the judge from the suite's default_judge spec (CLI override
-        // for swapping models will be wired in M11; the spec is authoritative
-        // for now).
-        let judge = build_from_spec(&suite.default_judge)
-            .with_context(|| format!("building judge for suite '{}'", suite.name))?;
+        // CLI override (--judge provider:model) wins over the suite's
+        // default_judge. Useful for cross-family comparison runs:
+        //   plaw-eval run --suite chat_quality --judge anthropic:claude-haiku-4-5
+        let effective_judge_spec = judge_spec_override
+            .clone()
+            .unwrap_or_else(|| suite.default_judge.clone());
+        let judge = build_from_spec(&effective_judge_spec).with_context(|| {
+            format!(
+                "building judge for suite '{}' (provider={}, model={})",
+                suite.name, effective_judge_spec.provider, effective_judge_spec.model
+            )
+        })?;
 
         let mut cfg = RunnerConfig::new(suite.clone(), plaw, repo.clone());
         cfg.cancel = cancel.clone();
         cfg.show_progress = true;
         cfg.sample_n = n;
         cfg.sample_seed = seed;
-        cfg.model_version = suite.default_judge.model.clone();
+        cfg.model_version = effective_judge_spec.model.clone();
 
         let summary = execute(cfg).await?;
         println!(

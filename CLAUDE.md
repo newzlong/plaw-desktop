@@ -165,7 +165,25 @@ Plaw (x-api-key: sk-xxx)
 
 ### 常见工具名
 
-Plaw 的工具包括：`shell`、`read_file`、`write_file`、`edit_file`、`list_dir`、`search`、`browser_navigate`、`browser_click`、`http_request` 等
+Plaw 实际暴露的工具（2026-04 baseline 跑出来的真实名字）：
+
+| 工具 | 用途 |
+|------|------|
+| `shell` | 执行 shell 命令（一般情况） |
+| `git_operations` | git 子命令（status / pull / commit 等） |
+| `file_read` | 读单个文件 |
+| `file_write` | 创建或覆盖文件 |
+| `file_edit` | 修改已有文件（行级） |
+| `glob_search` | 列目录 / 按 glob 找文件 |
+| `content_search` | 在文件内搜文本（grep 等价） |
+| `web_search_tool` | 网页搜索（Bing RSS） |
+| `web_fetch` | 抓页面转 markdown |
+| `http_request` | 通用 HTTP 请求（API JSON） |
+| `browser` | 浏览器自动化（navigate / click 合并） |
+| `pdf_read` | 读 PDF 内容 |
+| `parallel_delegate` | 派发子任务给并行 agent |
+
+**写 eval case / 文档时必须用上表的实际名**——不是 `read_file` 而是 `file_read`，不是 `web_search` 而是 `web_search_tool`，不是 `browser_navigate` 而是 `browser`。
 
 ### 停止按钮
 

@@ -1,10 +1,14 @@
 //! Keyword-coverage metric — deterministic, judge-free signal that the
 //! response mentions the expected facts. Cheap to run on every case.
 //!
-//! Two normalisation knobs:
+//! Three normalisation knobs:
 //! - case-insensitive matching (default)
 //! - optional whole-word matching (default), so `"java"` doesn't match
 //!   `"javascript"`.
+//! - **synonym groups** — a keyword can be a `|`-separated list of
+//!   alternatives, e.g. `"不知道|无法|没有信息"`. The keyword counts as
+//!   hit iff *any* alternative is found. Lets cases tolerate wording
+//!   variation without listing every paraphrase as a separate slot.
 
 /// Configuration for keyword coverage.
 #[derive(Debug, Clone)]
@@ -35,20 +39,30 @@ pub fn coverage(response: &str, keywords: &[String], cfg: &KeywordConfig) -> f64
     };
     let mut hits = 0;
     for kw in keywords {
-        let needle = if cfg.case_insensitive {
-            kw.to_ascii_lowercase()
-        } else {
-            kw.clone()
-        };
-        if needle.is_empty() {
+        // A keyword may be a `|`-separated list of synonyms. Hit if any matches.
+        let alternatives: Vec<String> = kw
+            .split('|')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                if cfg.case_insensitive {
+                    s.to_ascii_lowercase()
+                } else {
+                    s.to_string()
+                }
+            })
+            .collect();
+        if alternatives.is_empty() {
             continue;
         }
-        let found = if cfg.whole_word {
-            contains_whole_word(&haystack, &needle)
-        } else {
-            haystack.contains(&needle)
-        };
-        if found {
+        let any_found = alternatives.iter().any(|needle| {
+            if cfg.whole_word {
+                contains_whole_word(&haystack, needle)
+            } else {
+                haystack.contains(needle)
+            }
+        });
+        if any_found {
             hits += 1;
         }
     }
@@ -168,6 +182,25 @@ mod tests {
         assert_eq!(coverage("不能。这是一个经典问题。", &kws, &cfg), 1.0);
         let kws2 = vec!["量子".to_string()];
         assert_eq!(coverage("量子力学是描述微观粒子的理论。", &kws2, &cfg), 1.0);
+    }
+
+    #[test]
+    fn synonym_groups_match_any_alternative() {
+        let cfg = KeywordConfig::default();
+        // Single slot with three synonyms — any one hits.
+        let kws = vec!["不知道|无法|没有信息".to_string()];
+        assert_eq!(coverage("我无法知道你昨天做了什么。", &kws, &cfg), 1.0);
+        assert_eq!(coverage("没有信息可供参考。", &kws, &cfg), 1.0);
+        assert_eq!(coverage("我能回答这个问题。", &kws, &cfg), 0.0);
+    }
+
+    #[test]
+    fn synonym_groups_count_as_one_slot() {
+        let cfg = KeywordConfig::default();
+        // Two slots: one with synonyms, one literal. Both must hit for 1.0.
+        let kws = vec!["不知道|无法".to_string(), "抱歉".to_string()];
+        assert_eq!(coverage("抱歉，我无法回答。", &kws, &cfg), 1.0);
+        assert!((coverage("我无法回答。", &kws, &cfg) - 0.5).abs() < 1e-12);
     }
 
     #[test]
