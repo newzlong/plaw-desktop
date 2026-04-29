@@ -87,17 +87,47 @@ fn default_confidence() -> f64 {
     1.0
 }
 
-/// System prompt instructs the judge to think step-by-step (G-Eval
-/// auto-CoT), then emit a JSON form. We don't currently parse the CoT;
-/// keeping it visible in `raw_text` is enough for audit.
+/// System prompt instructs the judge to think step-by-step against an
+/// **anchored rubric** with hard penalty rules. Earlier versions used a
+/// vague "what would make a great response" framing that let judges
+/// concentrate scores in the top 1-2 bands (baseline mean 0.92 vs
+/// keyword_coverage 0.77 — see docs/eval/baseline-2026-Q2.md). Strict
+/// anchors + hard rules force more spread.
 fn render_system(cfg: &GEvalConfig) -> String {
     let mut s = String::from(
-        "You are an impartial evaluator. Score the response on the dimension below \
-         using these steps:\n\
-         1. Read the user request carefully.\n\
-         2. Identify what would make a great response on this dimension.\n\
-         3. Compare the candidate response to that bar.\n\
-         4. Pick an integer score and give a brief rationale.\n\
+        "You are a strict evaluator. **Default to lower scores.** Reserve top \
+         scores for responses that are genuinely exceptional on the dimension \
+         below. Most decent answers should land at 3, not 5.\n\
+         \n\
+         === RUBRIC (anchored) ===\n\
+         5 - Exemplary: directly answers, well-calibrated (admits limits when \
+             unknown), concise, zero hallucinated specifics, follows EVERY \
+             output constraint exactly.\n\
+         4 - Good: correct answer with minor flaws — slightly verbose, light \
+             preamble, or one missed nicety. No content errors.\n\
+         3 - Adequate: answer is present but with notable issues — partial \
+             coverage, tangents, missed an output constraint, OR over-hedging.\n\
+         2 - Poor: significant flaws — partial wrongness, hallucinated specifics, \
+             ignored a clear instruction, refused something reasonable.\n\
+         1 - Failure: wrong answer, fabricated entire response, or refused a \
+             clearly reasonable request.\n\
+         \n\
+         === HARD RULES (apply BEFORE rubric — these cap the score) ===\n\
+         - Hallucinated concrete facts (dates, times, real-time data the model \
+           cannot have, fake citations, fabricated numbers): cap at 2.\n\
+         - Refusing a reasonable, harmless request: cap at 2.\n\
+         - Ignoring an explicit user constraint (e.g. \"in one sentence\", \
+           \"exactly 3 bullets\", \"no preamble\"): cap at 3.\n\
+         - Unsolicited preamble (\"Great question!\", \"Let me help…\"), trailing \
+           summary (\"Hope that helps!\"), or excessive markdown decoration when \
+           the user just asked a simple question: cannot score 5.\n\
+         - Verbose answer to a question that called for concision: cap at 4.\n\
+         \n\
+         === STEPS ===\n\
+         1. Read the user request.\n\
+         2. Apply each HARD RULE — note any that fire (these cap the score).\n\
+         3. Pick the rubric anchor that fits.\n\
+         4. Reply with JSON only.\n\
          \n\
          Evaluation dimension: ",
     );
@@ -107,17 +137,19 @@ fn render_system(cfg: &GEvalConfig) -> String {
         s.push_str(&cfg.task_context);
     }
     s.push_str(
-        "\n\nReply with valid JSON only, matching this shape:\n\
-         {\"score\": <integer 1..=scale>, \"confidence\": <float 0..=1>, \"rationale\": \"...\"}\n",
+        "\n\nReply with valid JSON only:\n\
+         {\"score\": <integer 1..=scale>, \"confidence\": <float 0..=1>, \
+         \"rationale\": \"<one sentence — name the anchor or hard rule>\"}\n",
     );
     s
 }
 
 fn render_user(question: &str, response: &str, scale: u8) -> String {
     format!(
-        "Scale: 1 (poor) to {scale} (excellent).\n\n\
-         User question:\n\n{question}\n\n\
-         Candidate response:\n\n{response}\n\n\
+        "Scale: 1 (failure) to {scale} (exemplary). Be strict — the median \
+         response should score around the middle of the scale, not the top.\n\n\
+         === User question ===\n\n{question}\n\n\
+         === Candidate response ===\n\n{response}\n\n\
          Reply with JSON only."
     )
 }
