@@ -101,6 +101,7 @@ fn minimal_suite(name: &str, n_cases: usize) -> Suite {
             cluster_id: None,
             source: "authored".into(),
             promoted_at: None,
+            metrics: None,
         })
         .collect();
     Suite {

@@ -39,6 +39,12 @@ pub struct Case {
     /// Optional ISO-8601 timestamp set when the case was promoted.
     #[serde(default)]
     pub promoted_at: Option<String>,
+    /// Per-case metric whitelist. When `None` (default) every metric in the
+    /// suite is applied; when `Some(vec)` only those metrics run for this
+    /// case. Useful when a case is only meaningful under one metric — e.g.
+    /// a creative-writing case shouldn't be scored on keyword_coverage.
+    #[serde(default)]
+    pub metrics: Option<Vec<String>>,
 }
 
 fn default_source() -> String {

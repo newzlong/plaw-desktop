@@ -57,6 +57,13 @@ pub async fn score_run(
         };
         let mut scored: HashMap<String, MetricScore> = HashMap::new();
         for spec in &suite.metrics {
+            // Per-case metric whitelist — when set, only listed metrics run.
+            // Cases with the field unset (legacy) get every suite metric.
+            if let Some(allowed) = case.metrics.as_ref() {
+                if !allowed.iter().any(|m| m == &spec.name) {
+                    continue;
+                }
+            }
             match compute_metric(spec, case, &r.plaw_response, &r.tool_calls, judge).await {
                 Ok(Some(score)) => {
                     scored.insert(spec.name.clone(), score);
@@ -262,6 +269,7 @@ mod tests {
                 cluster_id: None,
                 source: "authored".into(),
                 promoted_at: None,
+                metrics: None,
             }],
         }
     }

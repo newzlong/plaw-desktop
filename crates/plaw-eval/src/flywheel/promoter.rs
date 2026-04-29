@@ -163,6 +163,7 @@ fn build_promoted_case(
         cluster_id: None,
         source: "flywheel".into(),
         promoted_at: Some(now),
+        metrics: None,
     }
 }
 

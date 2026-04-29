@@ -368,6 +368,7 @@ mod tests {
             cluster_id: None,
             source: "authored".into(),
             promoted_at: None,
+            metrics: None,
         }
     }
 
