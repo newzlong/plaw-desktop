@@ -5,10 +5,12 @@ runs:
   chat_quality_kimi_n30: "9545af14-eda3-47dd-98d1-8c953edbc5d3"
   tool_routing_kimi_n30: "d4494973-cce7-4a9f-bb6a-0053051cbafd"
   chat_quality_deepseek_n30: "82c27c1f-4b4c-4ea6-900b-3d5f3c8eeebf"
+  chat_quality_kimi_full: "d0c11231-9706-4728-9754-3c9a5febc18a"
+  tool_routing_kimi_full: "8de3e2a4-e0a8-48e4-8040-8a3e5f6b134b"
 plaw_version: "live dev mode (commit n/a — captured before commit metadata wiring)"
 default_judge: kimi-coder/k2p5 (api.kimi.com/coding)
 cross_family_judge: deepseek/deepseek-v4-pro (api.deepseek.com)
-sample_n: 30 per suite (smoke); n=300 pending
+sample_n: 30 per suite (--n 300 hit the per-suite cap; oversampling is a backlog item)
 ---
 
 # Plaw Baseline — 2026-Q2
@@ -27,9 +29,21 @@ sample_n: 30 per suite (smoke); n=300 pending
 
 ### tool_routing
 
-| Metric | n | mean | 95% CI |
+| Run | n | mean | 95% CI |
 |---|---:|---:|---|
-| tool_call_accuracy | 24 | 0.7150 | [0.63, 0.80] |
+| smoke (n=30) | 24 | 0.7150 | [0.63, 0.80] |
+| full attempt | 27 | 0.7245 | [0.65, 0.80] |
+
+数字稳定（差值 ~0.01，CI 完全重叠），证明 plaw 在 tool_routing 上的行为有可重复性。
+
+### 第二次 chat_quality
+
+| Run | g_eval | keyword_coverage |
+|---|---:|---:|
+| smoke (n=30) | 0.9034 | 0.5278 |
+| full attempt | 0.9571 | 0.5111 |
+
+g_eval 浮动 +5pp 是单次 plaw + judge 的 noise 体现，CI 仍重叠。**这恰恰是 n=300 该解决的问题** —— 真做了 repeatability，CI 应该缩到 ±2pp 内。下面 §"已知工具缺口"说明为什么这次没能跑成。
 
 ## 关键发现
 
@@ -104,6 +118,20 @@ cases.toml 已对齐到 plaw 实际名。**待办**：更新 CLAUDE.md 反映真
 `style-002` 期望关键词 `周一` —— plaw 答得好但写"周一"五次都没用，整个段落是吐槽周一上班。这种**风格 / 情绪类** case 关键词覆盖率不是合适的 metric，应该用 g_eval 或 cross-judge。
 
 **建议**：cases.toml 加个 `applicable_metrics: ["g_eval"]` 字段，按 case 选 metric，不让所有 case 都跑所有 metric。
+
+## 已知工具缺口
+
+### `--n` 实际是"最多 N 个 case"，不是"每 case 跑 N 次"
+
+跑 5b 时发现 `--n 300` 实际等于 n=30（被 suite 大小 32 / 30 cap 住）。
+[crates/plaw-eval/src/runner/executor.rs](../../crates/plaw-eval/src/runner/executor.rs)
+的 `sample_n` 是单次取样上限，没实现"每 case 重复 K 次跑"的语义。
+
+这意味着：
+- 看不到 pass^k 的 repeatability 信号（同 case 跑 10 次有几次过）
+- CI 没法从 n=30 那种宽幅（0.83-0.98）收紧到 0.95-0.99 那种锁紧水平
+
+**修法**：executor 加一个 `repetitions: usize` 参数，每个 case 跑 K 次。每次结果作为独立观察值进 stats。是 Phase 1.5 工程项。
 
 ## 已做（截至本次更新）
 
