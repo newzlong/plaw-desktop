@@ -88,6 +88,11 @@ enum Command {
         #[arg(long)]
         n: Option<usize>,
 
+        /// Repeat each sampled case this many times. Engages cluster-robust
+        /// SE because repeats of the same case are correlated. Default 1.
+        #[arg(long, default_value_t = 1)]
+        repetitions: usize,
+
         /// Override the judge model (provider:model, e.g. `kimi:kimi-k2.5`).
         #[arg(long)]
         judge: Option<String>,
@@ -320,6 +325,7 @@ async fn main() -> Result<()> {
             suite,
             all,
             n,
+            repetitions,
             judge,
             seed,
             output,
@@ -332,6 +338,7 @@ async fn main() -> Result<()> {
                 suite,
                 all,
                 n,
+                repetitions,
                 judge.as_deref(),
                 seed,
                 output.as_deref(),
@@ -500,6 +507,7 @@ async fn cmd_run(
     suites: Vec<String>,
     all: bool,
     n: Option<usize>,
+    repetitions: usize,
     judge_override: Option<&str>,
     seed: Option<u64>,
     output: Option<&Path>,
@@ -575,6 +583,7 @@ async fn cmd_run(
         cfg.show_progress = true;
         cfg.sample_n = n;
         cfg.sample_seed = seed;
+        cfg.repetitions = repetitions.max(1);
         cfg.model_version = effective_judge_spec.model.clone();
 
         let summary = execute(cfg).await?;

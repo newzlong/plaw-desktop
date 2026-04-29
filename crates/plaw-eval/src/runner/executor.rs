@@ -52,6 +52,10 @@ pub struct RunnerConfig {
     pub sample_n: Option<usize>,
     pub sample_seed: Option<u64>,
     pub show_progress: bool,
+    /// Number of times each sampled case is run. Defaults to 1.
+    /// `repetitions > 1` engages the cluster-robust SE pathway because
+    /// repeats of the same case are correlated (cluster_id = base case id).
+    pub repetitions: usize,
 }
 
 impl RunnerConfig {
@@ -68,7 +72,22 @@ impl RunnerConfig {
             sample_n: None,
             sample_seed: None,
             show_progress: false,
+            repetitions: 1,
         }
+    }
+}
+
+/// Suffix appended to a base case id when the runner repeats a case.
+/// Format: `<base>#<rep_index>`. `score_run` strips this back off when
+/// looking up the original suite [`Case`].
+pub const REPETITION_SEP: char = '#';
+
+/// Recover the base case id from one that may carry a `#<n>` repetition
+/// suffix. Idempotent for ids with no suffix.
+pub fn strip_repetition_suffix(case_id: &str) -> &str {
+    match case_id.rsplit_once(REPETITION_SEP) {
+        Some((head, tail)) if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) => head,
+        _ => case_id,
     }
 }
 
@@ -78,8 +97,9 @@ pub async fn execute(cfg: RunnerConfig) -> Result<RunSummary> {
     let started_at = now_unix();
     let run_id = uuid::Uuid::new_v4().to_string();
 
-    // 1. Pick the cases we'll run.
-    let cases = sample_cases(&cfg.suite.cases, cfg.sample_n, cfg.sample_seed);
+    // 1. Pick the cases we'll run, then expand by repetitions.
+    let sampled = sample_cases(&cfg.suite.cases, cfg.sample_n, cfg.sample_seed);
+    let cases = expand_by_repetitions(&sampled, cfg.repetitions.max(1));
 
     // 2. Record the run header.
     let run = Run {
@@ -301,6 +321,27 @@ fn sample_cases(cases: &[Case], n: Option<usize>, seed: Option<u64>) -> Vec<Case
         .collect()
 }
 
+/// Expand each sampled case into `repetitions` copies. Each copy carries
+/// a unique `id` (`<base>#<idx>`) so the SQLite primary key (run_id, case_id)
+/// stays valid; `cluster_id` is forced to the base id so the aggregator
+/// engages cluster-robust SE for repeated observations of the same case.
+fn expand_by_repetitions(cases: &[Case], k: usize) -> Vec<Case> {
+    if k <= 1 {
+        return cases.to_vec();
+    }
+    let mut out = Vec::with_capacity(cases.len() * k);
+    for c in cases {
+        let cluster = c.cluster_id.clone().unwrap_or_else(|| c.id.clone());
+        for r in 0..k {
+            let mut clone = c.clone();
+            clone.id = format!("{}{}{}", c.id, REPETITION_SEP, r);
+            clone.cluster_id = Some(cluster.clone());
+            out.push(clone);
+        }
+    }
+    out
+}
+
 fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -335,6 +376,53 @@ mod tests {
         let cs: Vec<Case> = (0..5).map(|i| make_case(&format!("c{i}"), "x")).collect();
         let s = sample_cases(&cs, None, Some(42));
         assert_eq!(s.len(), 5);
+    }
+
+    #[test]
+    fn strip_repetition_suffix_handles_repeated_and_plain_ids() {
+        assert_eq!(strip_repetition_suffix("foo"), "foo");
+        assert_eq!(strip_repetition_suffix("foo#0"), "foo");
+        assert_eq!(strip_repetition_suffix("foo#42"), "foo");
+        // Non-numeric tail is not a rep suffix — leave it alone.
+        assert_eq!(strip_repetition_suffix("foo#bar"), "foo#bar");
+        assert_eq!(strip_repetition_suffix("foo#"), "foo#");
+        // Multi-segment id: only strip the trailing #digits.
+        assert_eq!(strip_repetition_suffix("group#a#3"), "group#a");
+    }
+
+    #[test]
+    fn expand_by_repetitions_clones_each_case_k_times() {
+        let cs = vec![make_case("a", "x"), make_case("b", "y")];
+        let expanded = expand_by_repetitions(&cs, 3);
+        assert_eq!(expanded.len(), 6);
+        let ids: Vec<&str> = expanded.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["a#0", "a#1", "a#2", "b#0", "b#1", "b#2"]);
+        // cluster_id = base case id so cluster SE engages.
+        assert!(expanded.iter().all(|c| c.cluster_id.is_some()));
+        assert_eq!(expanded[0].cluster_id.as_deref(), Some("a"));
+        assert_eq!(expanded[3].cluster_id.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn expand_by_repetitions_preserves_explicit_cluster_ids() {
+        // If the case already declared its own cluster (multi-turn dialog),
+        // keep it — the user's grouping is more meaningful than per-id.
+        let mut c = make_case("a", "x");
+        c.cluster_id = Some("turn-1".into());
+        let expanded = expand_by_repetitions(&[c], 2);
+        assert_eq!(expanded.len(), 2);
+        assert!(expanded
+            .iter()
+            .all(|c| c.cluster_id.as_deref() == Some("turn-1")));
+    }
+
+    #[test]
+    fn expand_by_repetitions_k_one_is_passthrough() {
+        let cs = vec![make_case("a", "x")];
+        let expanded = expand_by_repetitions(&cs, 1);
+        assert_eq!(expanded.len(), 1);
+        // No suffix appended.
+        assert_eq!(expanded[0].id, "a");
     }
 
     #[test]

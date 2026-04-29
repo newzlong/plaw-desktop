@@ -21,6 +21,7 @@ use crate::metrics::{
     keywords::{coverage as keyword_coverage, KeywordConfig},
     tool::summarise as tool_summarise,
 };
+use crate::runner::executor::strip_repetition_suffix;
 use crate::storage::{EvalRepo, MetricScore, RecordedToolCall};
 use crate::suite::{Case, CaseInput, ChatRole, MetricSpec, Suite};
 
@@ -47,7 +48,10 @@ pub async fn score_run(
         if r.error.is_some() {
             continue;
         }
-        let Some(case) = case_lookup.get(r.case_id.as_str()) else {
+        // Repetitions store ids as `<base>#<idx>`; the suite still keys by
+        // base id, so strip the suffix before lookup.
+        let lookup_id = strip_repetition_suffix(&r.case_id);
+        let Some(case) = case_lookup.get(lookup_id) else {
             warn!(case_id = %r.case_id, "case not found in suite; skipping");
             continue;
         };
