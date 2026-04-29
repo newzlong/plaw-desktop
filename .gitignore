@@ -39,3 +39,7 @@ src-tauri/plaw_probe_*.json
 # Build artifacts
 src-tauri/target/
 plaw/target/
+
+# Stray dotnet-suggest sentinel file — Windows env var %USERPROFILE% doesn't
+# expand in bash so it gets created as a literal directory name at repo root.
+%USERPROFILE%/
