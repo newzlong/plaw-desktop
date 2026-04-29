@@ -2,36 +2,56 @@
 title: Plaw Baseline — 2026-Q2
 date: 2026-04-29
 runs:
-  chat_quality: "9545af14-eda3-47dd-98d1-8c953edbc5d3"
-  tool_routing: "d4494973-cce7-4a9f-bb6a-0053051cbafd"
+  chat_quality_kimi_n30: "9545af14-eda3-47dd-98d1-8c953edbc5d3"
+  tool_routing_kimi_n30: "d4494973-cce7-4a9f-bb6a-0053051cbafd"
+  chat_quality_deepseek_n30: "82c27c1f-4b4c-4ea6-900b-3d5f3c8eeebf"
 plaw_version: "live dev mode (commit n/a — captured before commit metadata wiring)"
-judge: kimi-coder/k2p5 (api.kimi.com/coding)
-sample_n: 30 per suite
+default_judge: kimi-coder/k2p5 (api.kimi.com/coding)
+cross_family_judge: deepseek/deepseek-v4-pro (api.deepseek.com)
+sample_n: 30 per suite (smoke); n=300 pending
 ---
 
 # Plaw Baseline — 2026-Q2
 
-**Status**：smoke baseline，n=30。下一步是用 cross-family judge（Anthropic）跑 n=300 验证 self-preference 偏见有多大。
+**Status**：smoke baseline + cross-family check 完成，n=300 完整 baseline 跑出来后会更新本文档。
 
 ## 数字
 
-| Suite | Metric | n | mean | 95% CI | 说明 |
-|-------|--------|---:|-----:|--------|------|
-| chat_quality | g_eval | 30 | 0.9034 | [0.83, 0.98] | judge 给的整体分数 — 同 family 偏高，**信号被污染** |
-| chat_quality | keyword_coverage | 30 | 0.5278 | [0.38, 0.67] | 机械关键词命中 — **信号干净** |
-| tool_routing | tool_call_accuracy | 24 | 0.7150 | [0.63, 0.80] | F1 + redundancy + arg validity 复合分 |
+### chat_quality（同 vs 跨 family judge 对照）
+
+| Judge | Family | g_eval mean | g_eval CI | keyword_coverage |
+|-------|--------|------:|----------|-----------------:|
+| kimi-coder/k2p5 | Kimi（同 plaw） | 0.9034 | [0.83, 0.98] | 0.5278 |
+| deepseek/v4-pro | DeepSeek（cross） | 0.9008 | [0.80, 0.99] | 0.4778 |
+| **差值** | — | **−0.003** | 重叠 | −0.05（noise） |
+
+### tool_routing
+
+| Metric | n | mean | 95% CI |
+|---|---:|---:|---|
+| tool_call_accuracy | 24 | 0.7150 | [0.63, 0.80] |
 
 ## 关键发现
 
-### 1. judge 的自我偏好膨胀
+### 1. 偏见来源不是 self-preference，是 judge prompt 太宽松
 
-`g_eval = 0.90` vs `keyword_coverage = 0.53` 在同一批响应上，差距 0.37 几乎全部来自：
+跨 family 对比：kimi-coder 给 0.9034，deepseek-v4-pro 给 0.9008，**差值 −0.003**（统计上等价）。
 
-- judge 是 plaw 同 family（kimi-coder 评 kimi-coder）—— Liu 2024 [arXiv:2410.02736](https://arxiv.org/abs/2410.02736) 报告这种情况下偏好方向能差 5-10pp
-- judge 看 plaw 的 markdown 排版漂亮就给高分，不严格检查内容覆盖
-- keyword_coverage 是确定性的，没有偏袒空间
+这跟 [Liu 2024 (arXiv:2410.02736)](https://arxiv.org/abs/2410.02736) 报告的 5-10pp self-preference 偏见**不一致**。可能的解释：
 
-**可信度排序**：keyword_coverage > tool_call_accuracy > g_eval。Phase 2 改动用 g_eval 单独跑数字时务必加 cross-family judge 复核。
+1. **G-Eval CoT prompt 让 judge 都偏向给高分** — 两个 judge 用同一个评分模板，都收敛到"看起来 OK = 4-5 分"
+2. **Judge 区分度不足** — 单 judge 对"好" vs "超好"分不开
+3. **测试 case 难度不够** — 大部分 case 是基础对话，所有 judge 都觉得 plaw 答得不错
+
+`g_eval = 0.90` vs `keyword_coverage = 0.53` 的 0.37 差距**不能**被 cross-family judge 修复 —— 换个 judge 也是 0.90。
+
+**真正的修法**：
+- 改 G-Eval prompt 用更严格的评分维度（精度、简洁性、引用、calibration）
+- 加更难的 case（adversarial / 长 context / 复杂推理）
+- 用 pairwise 而非 score —— 让 judge 强制选 A vs B，没法都打 5 分
+
+**可信度排序**（基于这次发现）：keyword_coverage > tool_call_accuracy > g_eval。
+**Phase 2 改动**：盯 keyword_coverage 和 tool_call_accuracy 的变化，g_eval 当辅助信号。
 
 ### 2. plaw 的真实 calibration bug
 
@@ -85,16 +105,24 @@ cases.toml 已对齐到 plaw 实际名。**待办**：更新 CLAUDE.md 反映真
 
 **建议**：cases.toml 加个 `applicable_metrics: ["g_eval"]` 字段，按 case 选 metric，不让所有 case 都跑所有 metric。
 
-## 下一步
+## 已做（截至本次更新）
+
+- ✅ **关键词放宽（OR 组）** —— `keyword_coverage` 从 0.53 估到 0.78（离线重算）。`evals/chat_quality/cases.toml` 用 `|` 分隔同义词。
+- ✅ **更新 CLAUDE.md 工具表** —— 跟 plaw 实际工具名对齐（13 个真实工具）。
+- ✅ **`unknowable-005` 标 regression-target** —— `tags = ["regression-target", "hallucination"]`，Phase 2 修 hallucination 时这个 case 是必盯指标。
+- ✅ **Cross-family judge 比较** —— DeepSeek vs Kimi 几乎一致，证明偏差不在 family，在 judge prompt（见 §1）。
+- ✅ **`--judge` CLI override** —— 可以一行命令切换 judge：
+  `plaw-eval run --suite X --judge "deepseek:deepseek-v4-pro"`
+
+## 下一步（Phase 2 启动前）
 
 按重要程度排：
 
-1. **加 cross-family judge**（高）— 当前 self-preference 污染严重。下次跑 baseline 加个 Anthropic Claude 当 jury 第二票。
-2. **关键词放宽**（中）— 用 `\|` OR 组扩同义词，重新跑 chat_quality。
-3. **case-level metric whitelist**（中）— 让 style/refuse 类只跑 g_eval。
-4. **更新 CLAUDE.md 工具表**（低）— 跟 plaw 实际暴露的名字对齐。
-5. **`unknowable-005` 单独追**（高）— 这是发现的真 calibration bug，Phase 2 修 hallucination 时优先处理。
-6. **跑 n=300 完整 baseline**（中）— 当前 n=30 只是 smoke，CI 太宽。完整 baseline 才能锁数字给 Phase 2 当 gate。
+1. **改 G-Eval prompt** —— 让 judge 拉开分布。引入精度 / 简洁 / calibration / 引用维度。这是 Phase 1.5 关键工程项。
+2. **跑 n=300 完整 baseline**（进行中）—— 收紧 CI，给 repeatability 信号。
+3. **加更难的 case** —— 当前 case 太基础，judge 一律给高分。需要长 context / 多步推理 / 对抗样本。
+4. **case-level metric whitelist** —— 让 style/refuse 类只跑 g_eval；factual/math 类只跑 keyword。避免 metric 污染。
+5. **`unknowable-005` Phase 2 攻坚目标** —— 真 hallucination bug。
 
 ## 成本回顾
 
