@@ -163,6 +163,13 @@ cases.toml 已对齐到 plaw 实际名。**待办**：更新 CLAUDE.md 反映真
 - ✅ **`--judge` CLI override** —— 可以一行命令切换 judge：
   `plaw-eval run --suite X --judge "deepseek:deepseek-v4-pro"`
 
+## Phase 2 待打目标
+
+跑 baseline 时发现的 plaw 弱点全部登记在
+[`.kiro/specs/plaw-elite/phase-1-eval/phase-2-targets.md`](../../.kiro/specs/plaw-elite/phase-1-eval/phase-2-targets.md)，
+每个目标关联具体 case_id，给出根因猜测和修法。Phase 2 启动后**逐个目标
+攻克 + 重新跑 baseline + 看分数变化**就能验证改进。
+
 ## 下一步（Phase 2 启动前）
 
 按重要程度排：
