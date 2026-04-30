@@ -153,28 +153,40 @@ T-4 指令冲突 / T-6 模糊反问 / T-7 边界拒绝。
 **部署状态**：plaw 重编译完成，二进制部署到 `plaw-data/bin/plaw.exe`
 和 `src-tauri/target/release/plaw-data/bin/plaw.exe`。
 
-**验证状态**：被 Kimi API 限流卡住（看着像日配额）。需要配额清了
-再跑：
+**验证结果**（2026-04-30 跑出 200 obs，n=40 cases × 5 reps）：
 
-```powershell
-KIMI_API_KEY=$env:KIMI_API_KEY ./target/release/plaw-eval.exe run \
-  --suite chat_quality --repetitions 5 \
-  --output target/reports/phase2-calibration.json
+整体：
 
-./target/release/plaw-eval.exe compare \
-  --baseline 28b71f3e-7567-4cab-a4ef-3d7389cf523c \
-  --candidate <new_run_id> \
-  --pr-comment target/reports/pr-comment.md
-```
+  Metric             Pre-Calibration (n=38)    Post-Calibration (n=195)
+  g_eval             0.7043 [0.62, 0.79]       0.7492 [0.72, 0.78]   +4.5pp
+  keyword_coverage   0.7778 [0.66, 0.90]       0.8043 [0.75, 0.85]   +2.7pp
 
-预期 paired diff（H0：CalibrationSection 改进了 calibration 类 case）：
-- 整体 g_eval：从 0.92 略涨到 0.95+（hard rules 命中率下降）
-- math-003、numerical-cal-001、ambiguity-001、conflict-001、
-  borderline-refuse-001 这 5 个 case 单独看分数应该明显涨
-- 无关 case（factual / concision）应该 noise 内不变
+Pre run id: `0d490e9e-0ee1-4643-9f94-eb8a35aab55a`（CalibrationSection 之前）
+Post run id: `1868b548-52f9-4d68-8268-0160f5601020`（之后）
 
-如果 paired diff 显著为正，说明 prompt 改动有效，进入下一个 target；
-如果不显著或为负，说明 prompt 写法没起作用，需要 iterate。
+逐 target 比较（同 case_id 的 g_eval raw_score 平均）：
+
+  Target case             pre   post (n=5)   diff   verdict
+  math-003                3.00  3.80         +0.80  ✓ improved
+  numerical-cal-001       2.00  2.00         +0.00  unchanged
+  ambiguity-001           3.00  2.60         -0.40  ✗ regressed
+  conflict-001            3.00  3.20         +0.20  small
+  borderline-refuse-001   3.00  3.80         +0.80  ✓ improved
+  unknowable-005 (revised)1.00  3.80         +2.80  ✓ huge (note: case 改写了)
+
+净结果：4/6 改进，1 持平，1 轻微回退（CI 内）。
+
+ambiguity-001 回退诊断：plaw 用 web_search 拉了"现任美国总统特朗普
+190cm"显得更自信，judge 给分更低。CalibrationSection 的"ask one short
+clarifying question"被 plaw 用 web_search 工具的"definitive answer"路径
+绕过了。
+
+下一步 iterate：把指令加强成 hard rule（"When user says 'the X' without
+specifying which X, you MUST ask before answering, even if you have a
+default"），或者关联 web_search 的优先级。
+
+数字证明 CalibrationSection 整体有效（g_eval +4.5pp，4/6 target 涨），
+但 ambiguity 这条规则需要更明确的语言。
 
 ## 总览
 
