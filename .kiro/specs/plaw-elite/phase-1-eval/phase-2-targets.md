@@ -119,16 +119,17 @@ G-Eval judge 标记为 hallucination 给 1 分，我们以为是 plaw 弱点。
 
 ## plaw 工具层 bug（不是 prompt 能修的）
 
-### T-9：plaw 的 web_search 没 fail-fast
+### T-9：plaw 的 web_search 没 fail-fast ✓ 已修
 
 | 字段 | 值 |
 |------|---|
 | Case | [`chat_quality-adversarial-fakecitation-001`](../../../evals/chat_quality/cases.toml) |
 | 用户问 | "Smith 等人 2024 Nature 量子重力论文结论是？"（论文不存在）|
-| 行为 | plaw 反复重试 web_search 直到 300s 超时 |
-| 影响 | 永远拿不到响应；浪费 5 分钟 + N 次 web 调用 |
-| 根因 | `plaw/src/tools/web_search` 没"重试 N 次仍空 → fail-fast"逻辑 |
-| Phase 2 修法 | plaw web_search 工具改：连续 3 次返回空 → 主动放弃，告诉 agent "找不到" |
+| 修前行为 | plaw 反复重试 web_search 直到 300s 超时 |
+| 修后行为 | web_search 用 3 次后主动切换路径；总耗时 35.3s；正确给"找不到，可能原因 1/2/3"的有用响应 |
+| 根因 | `plaw/src/agent/loop_.rs` 的 anti-loop per-tool 上限对 web_search_tool 是 6（太宽松）|
+| 修法 | 加 `TIGHT_LOOP_TOOLS` 常数对 web_search_tool 上限设 3，其他工具不变。**不是** "连续 N 次返回空"（Bing 不返回 empty，返回 garbage），而是直接降 anti-loop 上限。|
+| 验证 | 直连 WS 单 case 测试：原 300s → 35.3s（8.5x 提速），web_search calls 从 6+ 降到 3 |
 
 ## plaw-eval 自身需要修的（不是 plaw 弱点）
 

@@ -56,6 +56,13 @@ const DEFAULT_MAX_TOOL_ITERATIONS: usize = usize::MAX;
 /// Prevents adversarial web content from inducing the AI into fetch/search/browser loops.
 const MAX_SAME_TOOL_PER_TURN: usize = 6;
 
+/// Tighter per-turn cap for tools where adversarial / non-existent queries
+/// (fake citations, hallucinated papers) cause the agent to retry many
+/// rephrasings before giving up. 3 is enough to try a few variations.
+const TIGHT_LOOP_TOOLS: &[(&str, usize)] = &[
+    ("web_search_tool", 3),
+];
+
 /// Tools exempt from per-turn frequency limits.
 /// Browser automation naturally requires many sequential calls (open → snapshot → click → wait → ...).
 /// File operations (reading/writing multiple files) are also normal in complex tasks.
@@ -1222,8 +1229,12 @@ pub(crate) async fn run_tool_call_loop(
             let count = tool_call_counts.entry(tool_name.clone()).or_insert(0);
             *count += 1;
             let is_exempt = ANTI_LOOP_EXEMPT_TOOLS.contains(&tool_name.as_str());
-            if !is_exempt && *count > MAX_SAME_TOOL_PER_TURN {
-                let per_tool_limit = MAX_SAME_TOOL_PER_TURN;
+            let tight_limit = TIGHT_LOOP_TOOLS
+                .iter()
+                .find(|(n, _)| *n == tool_name)
+                .map(|(_, lim)| *lim);
+            let per_tool_limit = tight_limit.unwrap_or(MAX_SAME_TOOL_PER_TURN);
+            if !is_exempt && *count > per_tool_limit {
                 let anti_loop_msg = format!(
                     "Anti-loop protection: tool '{}' has been called {} times this turn (limit {}). \
                      Skipping further calls. Summarize what you have so far and present results to the user.",
