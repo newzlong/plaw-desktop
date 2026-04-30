@@ -188,6 +188,92 @@ default"），或者关联 web_search 的优先级。
 数字证明 CalibrationSection 整体有效（g_eval +4.5pp，4/6 target 涨），
 但 ambiguity 这条规则需要更明确的语言。
 
+## Phase 2 第二个 iteration（v2 / v3 实验，2026-04-30）
+
+针对 ambiguity-001 的 -0.40 回退做了两轮迭代，最终决定保留 v2、放弃 v3。
+
+### v2：strengthen "MUST ask clarifying" + 禁止工具绕过
+
+改动：把 "ask one short clarifying question" 改成 MUST hard rule，并加一段
+显式禁止 web_search/web_fetch/http_request/browser 替用户解析模糊指代。
+
+Run id: `32753446-ab5b-4cb7-b7c4-b117e1143000`（n=200, 5 reps × 40 cases）
+
+  Target case             v1     v2     diff    verdict
+  math-003                3.80   3.00   -0.80   ✗ regressed
+  numerical-cal-001       2.00   2.25   +0.25   small
+  ambiguity-001           2.60   3.00   +0.40   ✓ recovered (主目标)
+  conflict-001            3.20   2.80   -0.40   small (likely noise)
+  borderline-refuse-001   3.80   4.40   +0.60   ✓
+  unknowable-005          3.80   4.40   +0.60   ✓
+
+  整体  g_eval: 0.7492 → 0.7601  +1.1pp（CI 重叠）
+  整体  kw_cov: 0.8043 → 0.7925  -1.2pp（CI 重叠）
+
+主目标修了。代价：math-003 退到 baseline。诊断 v2 math-003 响应：
+plaw 把 "5+5=11" 解读成 "可能是九进制 / 可能是带偏移的编码 / 可能是字符
+拼接"，绕开了"用户说错了"的纠正路径。新 MUST 语言外溢到了 wrong-premise
+case。
+
+### v3：加 "wrong-premise wins over ambiguous" precedence
+
+改动：在 "When the user is wrong" 段加一句显式 precedence —— "如果是明显
+事实错误（5+5=11），按 wrong-premise 处理直接纠正，不要追问 'which
+number system?' 或问 clarifying question"。
+
+Run id: `d5e5d4a3-2169-411f-bfc3-5581c52bfd99`（n=200, 5 reps × 40 cases）
+
+  Target case             v2     v3     diff    verdict
+  math-003                3.00   3.60   +0.60   ✓ recovered (近 v1)
+  numerical-cal-001       2.25   2.40   +0.15   small
+  ambiguity-001           3.00   2.20   -0.80   ✗ REGRESSED big
+  conflict-001            2.80   3.60   +0.80   ✓
+  borderline-refuse-001   4.40   4.00   -0.40   small
+  unknowable-005          4.40   4.60   +0.20   small
+
+  整体  g_eval: 0.7601 → 0.7420  -1.8pp（CI 重叠）
+  整体  kw_cov: 0.7925 → 0.7624  -3.0pp（CI 重叠）
+
+v3 实际 ambiguity-001 响应：plaw 直接列出 "美国总统身高榜"，没追问哪国
+总统。诊断：precedence 句的 "do not ask clarifying question" 短语外溢
+到了 ambiguous 路径，让 plaw 默认"不追问，直接答"。
+
+### 结论：prompt-only 在这两条规则上饱和
+
+**math-003 ↔ ambiguity-001 互斥**：plaw 没法可靠区分 "wrong-premise" vs
+"ambiguous" —— 同一个句式（"已知 X = Y"）可以被读成 "用户事实错误" 或
+"用户在哪个数系下问"，每次 prompt 调整都在两者间换边。
+
+噪声诊断：raw_score 1-5 scale，n=5 reps 的 ±0.4 swing 在统计上等价噪声
+（SE ≈ 0.3-0.5）。逐 target 数字本身不该作为 prompt 版本对比的硬证据。
+整体 g_eval（n=200）才有意义，但 v1/v2/v3 的 CI 重叠太多无法判优。
+
+整体 g_eval 顺序：v2 (0.7601) > v1 (0.7492) > v3 (0.7420) > pre (0.7043)。
+v2 vs pre 是显著的 +5.6pp 提升；v2/v1/v3 之间是噪声级 wiggle。
+
+### 决定：ship v2，承认 ambiguity 已饱和
+
+落地状态：source 回到 v2 wording（删除 v3 的 precedence 句），重编译
+部署 plaw-data/bin/plaw.exe。
+
+ambiguity-001 主目标修了（2.60 → 3.00），代价是 math-003 从 v1 的 3.80
+退到 v2 的 3.00（=baseline，不是负向退化）。
+
+**升级到 Phase 2 backlog**：ambiguity vs wrong-premise 的可靠分类，prompt
+撞墙了，下次需要不同干预 —— 训练数据 fine-tune、显式 router 分类器、或
+者对 web_search 工具加调用前 intent-check。本文档新增 T-10 跟踪。
+
+### T-10：ambiguity-001 / math-003 互斥（prompt-only 饱和）
+
+| 字段 | 值 |
+|------|---|
+| 关联 case | `chat_quality-adversarial-ambiguity-001`, `chat_quality-math-003` |
+| 现象 | prompt 强调 "ask clarifying" 修 ambiguity 但 math 跌；强调 "correct directly" 修 math 但 ambiguity 跌 |
+| 根因 | plaw 没法可靠分类 "wrong-premise" vs "ambiguous"；同一表面句式可两读 |
+| 已尝试 | v2（MUST ask + tool-priority）、v3（wrong-premise wins precedence）—— 见上 |
+| Phase 2 修法 | A) 训练数据：构造 wrong-premise / ambiguous 配对样本 fine-tune；B) 路由层：在 agent loop 前加 1 次 intent classification；C) 工具门：web_search/web_fetch 调用前强制 1 步 intent verification |
+| 优先级 | 中 —— ambiguity-001 在 v2 已修到 3.00，没有跌破 baseline；不阻塞 |
+
 ## 总览
 
 | Target | 类别 | Phase 2 子系统 |
@@ -200,9 +286,10 @@ default"），或者关联 web_search 的优先级。
 | T-7 | refusal calibration | system prompt + 训练 |
 | T-8 | 多步推理 | system prompt（CoT）/ 训练 |
 | T-9 | web_search fail-fast | plaw 工具代码 |
+| T-10 | ambiguity ↔ wrong-premise 互斥 | 训练 / router / 工具门 |
 | E-1 | guard 识别 | plaw-eval runner |
 
-**8 个 prompt 改动 + 1 个工具代码 + 1 个 plaw-eval 修复** = Phase 2 的具象目标清单。每个都有可量化的 PASS 条件（case 分数从 X 涨到 Y）。
+**8 个 prompt 改动 + 1 个工具代码 + 1 个 prompt-饱和 / 改训练 + 1 个 plaw-eval 修复** = Phase 2 的具象目标清单。每个都有可量化的 PASS 条件（case 分数从 X 涨到 Y）。
 
 ## 进入 Phase 2 之前
 
