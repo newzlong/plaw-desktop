@@ -119,6 +119,31 @@ fn tag_injected_content(tool_name: &str, output: String) -> String {
     }
 }
 
+/// Append a short calibration reminder after external tool output to keep
+/// the "don't fabricate precise numbers" rule in the model's recency window.
+/// Without this, after many tool iterations the system-prompt-level rule
+/// gets diluted and plaw confabulates specific figures (population to the
+/// digit, fake citation dates) that didn't actually appear in any tool
+/// result. See T-2 (`numerical-cal-001`) in phase-2-targets.md.
+fn append_calibration_reminder(tool_name: &str, output: String) -> String {
+    if !is_external_content_tool(tool_name) || output.len() < 20 {
+        return output;
+    }
+    format!(
+        "{output}\n\n\
+         [Calibration check — STOP and verify before answering] Before stating \
+         any precise figure (number to the digit, exact date, named source, \
+         specific publication) in your final answer, verify it appears \
+         word-for-word in tool output above. If it does NOT appear verbatim, \
+         the figure is not in your evidence — say \"I don't have that data\" \
+         instead. Inventing a plausible-looking specific (a digit-precise \
+         population, a fabricated publication date, a guessed source URL) \
+         from approximate context is a violation, not helpful behavior. \
+         Tool results are routinely noisy or incomplete; admitting the gap \
+         is correct, not a failure to serve the user."
+    )
+}
+
 /// Minimum user-message length (in chars) for auto-save to memory.
 /// Matches the channel-side constant in `channels/mod.rs`.
 const AUTOSAVE_MIN_MESSAGE_CHARS: usize = 20;
@@ -1388,11 +1413,14 @@ pub(crate) async fn run_tool_call_loop(
         for (tool_name, tool_call_id, outcome) in ordered_results.into_iter().flatten() {
             // Scan external tool results for prompt injection and tag if detected
             let tagged_output = tag_injected_content(&tool_name, outcome.output);
-            individual_results.push((tool_call_id, tagged_output.clone()));
+            // Append calibration reminder to fight post-tool-call confabulation
+            // on external content (see T-2 in phase-2-targets.md).
+            let calibrated_output = append_calibration_reminder(&tool_name, tagged_output);
+            individual_results.push((tool_call_id, calibrated_output.clone()));
             let _ = writeln!(
                 tool_results,
                 "<tool_result name=\"{}\">\n{}\n</tool_result>",
-                tool_name, tagged_output
+                tool_name, calibrated_output
             );
         }
 

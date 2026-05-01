@@ -276,6 +276,24 @@ ambiguity-001 主目标修了（2.60 → 3.00），代价是 math-003 从 v1 的
 | Phase 2 修法 | A) 训练数据：构造 wrong-premise / ambiguous 配对样本 fine-tune；B) 路由层：在 agent loop 前加 1 次 intent classification；C) 工具门：web_search/web_fetch 调用前强制 1 步 intent verification |
 | 优先级 | 中 —— ambiguity-001 在 v2 已修到 3.00，没有跌破 baseline；不阻塞 |
 
+## T-2 修复记录（2026-04-30）
+
+直连 WS 测 numerical-cal-001 × 5 reps：
+
+| 阶段 | 编造率 | 备注 |
+|------|---:|------|
+| v2 baseline (无 reminder) | 4/5 (80%) | 编造 "139,804 + 2026年3月12日发布" |
+| T-2 reminder v1（温和） | 2/5 (40%) | "verbatim 引用 tool output" |
+| T-2 reminder v2（强化） | 2/5 (40%) | 加 STOP / violation 措辞，**未再降** |
+
+**实现**：`plaw/src/agent/loop_.rs` 加 `append_calibration_reminder()`，在 external tool（web_search/web_fetch/browser/http_request/content_search）输出末尾追加 ~100 token 校准提示，进入 plaw 的 recency window。
+
+**关联模式**：编造的 reps 都是 **low web_calls (4-11)**；refused 的 reps 都是 **high web_calls (8-14)**。reminder 在迭代越多时密度越高，calibration 信号越强。
+
+**为什么 v2 强化没起效**：剩余 40% 编造的核心是 plaw 对 "139,804" 这个数字有强 prior（雷克雅未克实际人口约 139k 在训练数据），并自信地包装成 "2026年3月12日发布"。**真正的幻觉是 DATE / ATTRIBUTION，不是数字本身**——而 reminder 的 "verbatim quote" 检验在 stale data 上技术性通过。
+
+**结论**：T-2 进入 Phase 3 backlog。真正修法是 grounding/citation 层 + tool result freshness metadata —— 见 `MEMORY.md` 的 phase3_architecture_gaps。Phase 2 reminder 是部分修复（80% → 40% real lift），ship 但不 close T-2。
+
 ## 总览
 
 | Target | 类别 | Phase 2 子系统 |
@@ -287,6 +305,7 @@ ambiguity-001 主目标修了（2.60 → 3.00），代价是 math-003 从 v1 的
 | T-6 | 模糊请求反问 | system prompt |
 | T-7 | refusal calibration | system prompt + 训练 |
 | T-8 | 多步推理 | system prompt（CoT）/ 训练 |
+| T-2 | post-tool-use confabulation | per-tool calibration reminder (部分) + grounding 层 (Phase 3) |
 | T-9 | web_search fail-fast | plaw 工具代码 |
 | T-10 | ambiguity ↔ wrong-premise 互斥 | 训练 / router / 工具门 |
 | E-1 | guard 识别 | plaw-eval runner |
