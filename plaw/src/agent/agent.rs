@@ -553,6 +553,23 @@ impl Agent {
             _ => stamped_user_message,
         };
 
+        // Phase 3 L1-6: optionally inject the intent-classification scaffold.
+        // Default-off so the byte-for-byte legacy path is preserved on the
+        // common ~95% (FactualLookup / TaskRequest) even with the flag on.
+        let enriched = if self.config.intent_routing_enabled {
+            let router = crate::agent::intent::HybridRouter::new();
+            let (intent, scaffold) =
+                crate::agent::intent::apply_intent_scaffold(&router, user_message, "").await;
+            tracing::debug!(intent = intent.as_str(), "intent classified");
+            if scaffold.is_empty() {
+                enriched
+            } else {
+                format!("{scaffold}\n\n{enriched}")
+            }
+        } else {
+            enriched
+        };
+
         self.history
             .push(ConversationMessage::Chat(ChatMessage::user(enriched)));
 
@@ -951,5 +968,116 @@ mod tests {
         assert_eq!(response, "classified");
         let seen = seen_models.lock();
         assert_eq!(seen.as_slice(), &["hint:fast".to_string()]);
+    }
+
+    /// Build a minimal Agent with the given AgentConfig override, ready to
+    /// `.turn()`. Used by the L1-6 intent-routing tests below.
+    fn build_agent_with_config(cfg: crate::config::AgentConfig) -> Agent {
+        let provider = Box::new(MockProvider {
+            responses: Mutex::new(vec![crate::providers::ChatResponse {
+                text: Some("ok".into()),
+                tool_calls: vec![],
+                usage: None,
+                reasoning_content: None,
+            }]),
+        });
+        let memory_cfg = crate::config::MemoryConfig {
+            backend: "none".into(),
+            ..crate::config::MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> = Arc::from(
+            crate::memory::create_memory(&memory_cfg, std::path::Path::new("/tmp"), None)
+                .expect("memory creation should succeed with valid config"),
+        );
+        let observer: Arc<dyn Observer> = Arc::from(crate::observability::NoopObserver {});
+        Agent::builder()
+            .provider(provider)
+            .tools(vec![Box::new(MockTool)])
+            .memory(mem)
+            .observer(observer)
+            .tool_dispatcher(Box::new(NativeToolDispatcher))
+            .workspace_dir(std::path::PathBuf::from("/tmp"))
+            .config(cfg)
+            .build()
+            .expect("agent builder should succeed with valid config")
+    }
+
+    /// Pull the persisted user-turn text from history. The L1-6 wiring
+    /// prepends scaffold to the user-turn content; tests assert on this.
+    fn first_user_turn_content(agent: &Agent) -> String {
+        for msg in agent.history() {
+            if let ConversationMessage::Chat(c) = msg {
+                if c.role == "user" {
+                    return c.content.clone();
+                }
+            }
+        }
+        panic!("expected at least one user turn in history")
+    }
+
+    #[tokio::test]
+    async fn intent_routing_off_leaves_user_turn_untouched() {
+        // Default config has intent_routing_enabled=false. Turn with a
+        // would-be-classified message and verify the user-turn content
+        // contains no scaffold marker.
+        let cfg = crate::config::AgentConfig::default();
+        assert!(!cfg.intent_routing_enabled);
+        let mut agent = build_agent_with_config(cfg);
+        let _ = agent.turn("已知 5+5=11, 那么 5+6=?").await.unwrap();
+        let user_content = first_user_turn_content(&agent);
+        assert!(
+            !user_content.contains("## Intent:"),
+            "scaffold must not leak when flag is off, got: {user_content}"
+        );
+        // The original message text still made it through.
+        assert!(user_content.contains("已知 5+5=11"));
+    }
+
+    #[tokio::test]
+    async fn intent_routing_on_injects_wrong_premise_scaffold() {
+        let cfg = crate::config::AgentConfig {
+            intent_routing_enabled: true,
+            ..crate::config::AgentConfig::default()
+        };
+        let mut agent = build_agent_with_config(cfg);
+        let _ = agent.turn("已知 5+5=11, 那么 5+6=?").await.unwrap();
+        let user_content = first_user_turn_content(&agent);
+        assert!(
+            user_content.starts_with("## Intent: wrong_premise"),
+            "scaffold should prefix the user turn when WrongPremise is detected; got: {user_content}"
+        );
+        assert!(user_content.contains("已知 5+5=11"));
+    }
+
+    #[tokio::test]
+    async fn intent_routing_on_no_op_for_task_request() {
+        // A plain task request resolves to Intent::TaskRequest whose scaffold
+        // is empty — even with the flag on, the persisted user turn must be
+        // byte-identical to the flag-off path.
+        let cfg_on = crate::config::AgentConfig {
+            intent_routing_enabled: true,
+            ..crate::config::AgentConfig::default()
+        };
+        let mut agent_on = build_agent_with_config(cfg_on);
+        let _ = agent_on.turn("帮我写一个 hello world").await.unwrap();
+        let on_content = first_user_turn_content(&agent_on);
+
+        let cfg_off = crate::config::AgentConfig::default();
+        let mut agent_off = build_agent_with_config(cfg_off);
+        let _ = agent_off.turn("帮我写一个 hello world").await.unwrap();
+        let off_content = first_user_turn_content(&agent_off);
+
+        // Strip the wall-clock timestamp prefix added per turn so the
+        // comparison is stable across the two `agent.turn` calls.
+        fn strip_timestamp(s: &str) -> &str {
+            // Format: "[YYYY-MM-DD HH:MM:SS …] body". Find the first ']'
+            // and return what's after it (or the whole string if absent).
+            match s.find("] ") {
+                Some(i) => &s[i + 2..],
+                None => s,
+            }
+        }
+        assert!(!on_content.contains("## Intent:"));
+        assert_eq!(strip_timestamp(&on_content), strip_timestamp(&off_content));
     }
 }

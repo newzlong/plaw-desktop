@@ -653,6 +653,17 @@ pub struct AgentConfig {
     /// Set to `0` to disable token-based compaction (message-count compaction still applies).
     #[serde(default = "default_agent_max_context_tokens")]
     pub max_context_tokens: usize,
+    /// Phase 3 L1: per-turn intent classification + prompt scaffold injection.
+    /// When `true`, every user message is run through the rule-based
+    /// `HybridRouter` before the main loop. Detected intents (WrongPremise,
+    /// Ambiguous, AdversarialInjection, ConflictingConstraints, BorderlineSafety)
+    /// prepend a short instruction block to the user message. FactualLookup /
+    /// TaskRequest (the common ~95%) leave the message byte-identical so
+    /// behavior on the default path is unchanged.
+    /// Default: `false` while the eval suite validates the change against the
+    /// post-Phase-2 baseline.
+    #[serde(default)]
+    pub intent_routing_enabled: bool,
 }
 
 fn default_agent_max_tool_iterations() -> usize {
@@ -684,6 +695,7 @@ impl Default for AgentConfig {
             parallel_tools: false,
             tool_dispatcher: default_agent_tool_dispatcher(),
             max_context_tokens: default_agent_max_context_tokens(),
+            intent_routing_enabled: false,
         }
     }
 }
@@ -7274,6 +7286,8 @@ reasoning_level = "high"
         assert_eq!(cfg.max_history_messages, 50);
         assert!(!cfg.parallel_tools);
         assert_eq!(cfg.tool_dispatcher, "auto");
+        // Phase 3 L1-6: opt-in. Default off until eval validation completes.
+        assert!(!cfg.intent_routing_enabled);
     }
 
     #[test]
