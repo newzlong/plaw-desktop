@@ -27,6 +27,7 @@ mod context;
 mod errors;
 mod execution;
 pub(crate) mod history;
+mod non_cli_approval;
 mod parsing;
 mod tool_taxonomy;
 
@@ -49,9 +50,10 @@ use parsing::{
     parse_tool_calls, parse_tool_calls_from_json_value, tool_call_signature, ParsedToolCall,
 };
 use budgets::{
-    AUTOSAVE_MIN_MESSAGE_CHARS, DEFAULT_MAX_TOOL_ITERATIONS, NON_CLI_APPROVAL_POLL_INTERVAL_MS,
-    NON_CLI_APPROVAL_WAIT_TIMEOUT_SECS, STREAM_CHUNK_MIN_CHARS,
+    AUTOSAVE_MIN_MESSAGE_CHARS, DEFAULT_MAX_TOOL_ITERATIONS, STREAM_CHUNK_MIN_CHARS,
 };
+pub(crate) use non_cli_approval::{NonCliApprovalContext, NonCliApprovalPrompt};
+use non_cli_approval::await_non_cli_approval_decision;
 use tool_taxonomy::{
     is_external_content_tool, ANTI_LOOP_EXEMPT_TOOLS, MAX_SAME_TOOL_PER_TURN, TIGHT_LOOP_TOOLS,
 };
@@ -178,20 +180,6 @@ tokio::task_local! {
 
 const AUTO_CRON_DELIVERY_CHANNELS: &[&str] = &["telegram", "discord", "slack", "mattermost"];
 
-#[derive(Debug, Clone)]
-pub(crate) struct NonCliApprovalPrompt {
-    pub request_id: String,
-    pub tool_name: String,
-    pub arguments: serde_json::Value,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct NonCliApprovalContext {
-    pub sender: String,
-    pub reply_target: String,
-    pub prompt_tx: tokio::sync::mpsc::UnboundedSender<NonCliApprovalPrompt>,
-}
-
 tokio::task_local! {
     static TOOL_LOOP_NON_CLI_APPROVAL_CONTEXT: Option<NonCliApprovalContext>;
 }
@@ -284,41 +272,6 @@ fn maybe_inject_cron_add_delivery(
             "to".to_string(),
             serde_json::Value::String(reply_target.to_string()),
         );
-    }
-}
-
-async fn await_non_cli_approval_decision(
-    mgr: &ApprovalManager,
-    request_id: &str,
-    sender: &str,
-    channel_name: &str,
-    reply_target: &str,
-    cancellation_token: Option<&CancellationToken>,
-) -> ApprovalResponse {
-    let started = Instant::now();
-
-    loop {
-        if let Some(decision) = mgr.take_non_cli_pending_resolution(request_id) {
-            return decision;
-        }
-
-        if !mgr.has_non_cli_pending_request(request_id) {
-            // Fail closed when the request disappears without an explicit resolution.
-            return ApprovalResponse::No;
-        }
-
-        if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
-            return ApprovalResponse::No;
-        }
-
-        if started.elapsed() >= Duration::from_secs(NON_CLI_APPROVAL_WAIT_TIMEOUT_SECS) {
-            let _ =
-                mgr.reject_non_cli_pending_request(request_id, sender, channel_name, reply_target);
-            let _ = mgr.take_non_cli_pending_resolution(request_id);
-            return ApprovalResponse::No;
-        }
-
-        tokio::time::sleep(Duration::from_millis(NON_CLI_APPROVAL_POLL_INTERVAL_MS)).await;
     }
 }
 
