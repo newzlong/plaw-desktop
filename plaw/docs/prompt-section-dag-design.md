@@ -3,7 +3,7 @@
 > **Status:** Draft (RFC, not yet implemented)
 > **Tracking:** F-7 (Phase 3 architecture work)
 > **Last updated:** 2026-05-04
-> **Scope:** `plaw/src/agent/prompt.rs`, `plaw/src/agent/loop_/tool_io.rs` (re-injection), `plaw/src/agent/intent.rs` (L1 wiring)
+> **Scope:** `plaw/src/agent/prompt.rs`, `plaw/src/agent/prompt_dag.rs` (PR-1 skeleton), `plaw/src/agent/loop_/tool_io.rs` (re-injection), `plaw/src/agent/intent.rs` (L1 wiring)
 > **Non-scope:** runtime configuration of node graphs, user-editable prompts, prompt-injection content controls (handled by `security::prompt_guard`)
 
 This document is a design proposal. It does **not** describe shipped behavior. The current implementation uses an ordered `Vec<Box<dyn PromptSection>>` (`SystemPromptBuilder::with_defaults()`) — see "Background" below.
@@ -213,13 +213,13 @@ This unifies the L4 reminder with the rest of the prompt surface. Currently `app
 
 Five PRs, each independently revertable.
 
-### 5.1 PR-1: introduce `PromptDag` + one node migrated
+### 5.1 PR-1: introduce `PromptDag` + one node migrated *(landed)*
 
-- New module `agent/prompt/dag.rs`: trait, graph, topo-sort, cycle detector.
-- Migrate `IdentitySection` (zero-dep, simplest).
-- `SystemPromptBuilder::build()` calls `PromptDag::build_only(NodeId::Identity)` for the migrated slot, falls back to legacy for others.
-- Tests: empty graph, single node, cycle detection, dep ordering, topo determinism.
-- Eval: byte-for-byte parity vs `d5ae203b` (G4).
+- New module `agent/prompt_dag.rs`: trait, graph, topo-sort, cycle detector. *(Sibling module rather than `prompt/dag.rs` subdir; converting `prompt.rs` to a directory is structural reorganisation deferred to PR-2 per the "one concern per PR" rule.)*
+- Migrate `IdentitySection` via the [`LegacySectionNode`] adapter; the legacy `SystemPromptBuilder` continues to drive production paths unchanged.
+- Tests: empty graph, single node, cycle detection, dep ordering, topo determinism, gate semantics (active + inactive), byte-for-byte parity with `SystemPromptBuilder` for an identity-only build.
+- *Production wiring deferred*: PR-1 ships the DAG as standalone module + tests proving parity. The agent loop is **not** rewired yet — that flips atomically in PR-2 once all nine sections are nodes, avoiding a transient hybrid path.
+- Eval: byte-for-byte parity vs `d5ae203b` (G4) — held under the unit-test gate.
 
 ### 5.2 PR-2: migrate the remaining 8 baseline sections
 
