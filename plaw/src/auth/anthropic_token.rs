@@ -1,3 +1,13 @@
+// Items in this module are reached only through the `plaw auth ...`
+// CLI subcommand handlers in `main.rs` (e.g. `auth::anthropic_token::
+// detect_auth_kind` at main.rs:1796/1818). main.rs is part of the bin,
+// not the lib, so `cargo build --lib`'s dead-code analysis can't trace
+// the call. Module-level allow avoids 36 per-item annotations while
+// still leaving genuine internal dead code (rare here, since 100% of
+// pub items are OAuth/token plumbing) discoverable through the audit
+// doc workflow.
+#![allow(dead_code)]
+
 use serde::{Deserialize, Serialize};
 
 /// How Anthropic credentials should be sent.

@@ -6,6 +6,14 @@
 //!
 //! Uses the same client credentials as Gemini CLI for compatibility.
 
+// Items in this module are reached only through the `plaw auth login`
+// CLI subcommand wired in `main.rs` (e.g. `start_device_code_flow` at
+// main.rs:1501, `poll_device_code_tokens` at main.rs:1511,
+// `generate_pkce_state` at main.rs:1533). main.rs is part of the bin,
+// not the lib, so `cargo build --lib`'s dead-code analysis can't trace
+// the call. Module-level allow avoids 14 per-item annotations.
+#![allow(dead_code)]
+
 use crate::auth::oauth_common::{parse_query_params, url_decode, url_encode};
 use crate::auth::profiles::TokenSet;
 use anyhow::{Context, Result};

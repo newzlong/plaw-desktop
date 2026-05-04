@@ -159,6 +159,12 @@ impl AuthProfilesStore {
         }
     }
 
+    /// Test-only accessor for the on-disk profiles file path. Production
+    /// code accesses the path indirectly through the load/save methods;
+    /// the in-tree consumers are the two unit tests at the bottom of
+    /// this file. Gated `#[cfg(test)]` so it doesn't fire dead_code in
+    /// non-test builds.
+    #[cfg(test)]
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -214,14 +220,6 @@ impl AuthProfilesStore {
 
         data.active_profiles
             .insert(provider.to_string(), profile_id.to_string());
-        data.updated_at = Utc::now();
-        self.save_locked(&data).await
-    }
-
-    pub async fn clear_active_profile(&self, provider: &str) -> Result<()> {
-        let _lock = self.acquire_lock().await?;
-        let mut data = self.load_locked().await?;
-        data.active_profiles.remove(provider);
         data.updated_at = Utc::now();
         self.save_locked(&data).await
     }
