@@ -11,7 +11,6 @@ use chrono::{TimeZone, Utc};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use plaw_eval::judges::{api_key_env_var, build_from_spec};
-use plaw_eval::metrics::score_run;
 use plaw_eval::report::{
     compare_runs, extract_failing_rows, render_aggregate_md, render_comparison_md,
     render_pr_comment, write_aggregate_json, write_comparison_json, write_comparison_sarif,
@@ -612,9 +611,16 @@ async fn cmd_run(
         );
 
         if !summary.cancelled {
-            let score_summary = score_run(&repo, &summary.run_id, &suite, &*judge)
-                .await
-                .with_context(|| format!("scoring run {}", summary.run_id))?;
+            let score_summary = plaw_eval::metrics::runner::score_run_with_concurrency_and_progress(
+                &repo,
+                &summary.run_id,
+                &suite,
+                &*judge,
+                plaw_eval::metrics::runner::DEFAULT_SCORING_CONCURRENCY,
+                true,
+            )
+            .await
+            .with_context(|| format!("scoring run {}", summary.run_id))?;
             println!(
                 "  scored {} (case, metric) pairs",
                 score_summary.pairs_scored
