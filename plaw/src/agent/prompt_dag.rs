@@ -87,7 +87,13 @@ pub trait PromptNode: Send + Sync {
     /// order. Declaring a dependency on an inactive node (one whose
     /// `applies` returned `false`) is silently treated as satisfied —
     /// the dependent still runs. RFC §4.4.
-    fn dependencies(&self) -> &'static [NodeId] {
+    ///
+    /// The returned slice is borrowed against `&self`; production
+    /// impls return `&'static [NodeId]` (constant arrays), but the
+    /// trait permits owning the slice via the impl so test fixtures
+    /// can construct dynamic graphs without leaking. The build path
+    /// only iterates the slice during topo-sort, never stores it.
+    fn dependencies(&self) -> &[NodeId] {
         &[]
     }
 
@@ -223,7 +229,7 @@ impl<S: PromptSection + 'static> PromptNode for LegacySectionNode<S> {
         self.id
     }
 
-    fn dependencies(&self) -> &'static [NodeId] {
+    fn dependencies(&self) -> &[NodeId] {
         self.deps
     }
 
@@ -865,6 +871,232 @@ mod tests {
         let legacy = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
         let dag_out = PromptDag::with_defaults().build(&ctx).unwrap();
         assert_eq!(normalize_volatile(&legacy), normalize_volatile(&dag_out));
+    }
+
+    // ── F-8: property-based topo / cycle invariants ─────────────
+    //
+    // The hand-written tests above pin specific cases (single-dep
+    // chain, two zero-dep tie-break, one cycle, one inactive-node
+    // skip). proptest scales those checks to thousands of arbitrary
+    // graphs over the 13-variant NodeId pool, catching shape-
+    // dependent bugs the case-by-case tests can't reach. The graph
+    // builder is acyclic-by-construction (lower-triangular adjacency
+    // matrix) so the topo property tests don't have to filter
+    // cycles out — a separate property covers cycle detection.
+
+    /// Test-only PromptNode with dynamic dependencies — production
+    /// `LegacySectionNode` carries `&'static [NodeId]` because each
+    /// section's edges are known at compile time, but proptest
+    /// fixtures need to construct edges at runtime.
+    struct TestNode {
+        id: NodeId,
+        deps: Vec<NodeId>,
+        body: String,
+        applies_flag: bool,
+    }
+
+    impl PromptNode for TestNode {
+        fn id(&self) -> NodeId {
+            self.id
+        }
+        fn dependencies(&self) -> &[NodeId] {
+            &self.deps
+        }
+        fn applies(&self, _: &PromptContext<'_>) -> bool {
+            self.applies_flag
+        }
+        fn build(&self, _: &PromptContext<'_>) -> Result<String> {
+            Ok(self.body.clone())
+        }
+    }
+
+    /// The 13-variant NodeId pool, in declaration order. Indices
+    /// into this slice double as the ordering input for proptest's
+    /// adjacency-matrix graph generator.
+    const ALL_IDS: &[NodeId] = &[
+        NodeId::Identity,
+        NodeId::Tools,
+        NodeId::Safety,
+        NodeId::Calibration,
+        NodeId::Skills,
+        NodeId::Workspace,
+        NodeId::Runtime,
+        NodeId::DateTime,
+        NodeId::ChannelMedia,
+        NodeId::IntentScaffold,
+        NodeId::PerToolCalibrationReminder,
+        NodeId::ToolFreshnessMetadata,
+        NodeId::GroundingVerifierTail,
+    ];
+
+    /// Body marker shape: `__NODE:{idx}__`. Distinct per-NodeId so
+    /// the topo property tests can recover the build order from the
+    /// output string by scanning markers in order of appearance.
+    fn marker_body(idx: usize) -> String {
+        format!("__NODE:{idx}__")
+    }
+
+    /// Construct a PromptDag from a presence vector + lower-
+    /// triangular adjacency matrix. Index `j` of `present` decides
+    /// whether `ALL_IDS[j]` appears; `edges[j][i]` (with `i < j`)
+    /// declares that `j` depends on `i`. Acyclic by construction.
+    fn build_test_dag(present: &[bool], edges: &[Vec<bool>]) -> PromptDag {
+        let mut dag = PromptDag::new();
+        for (j, &p) in present.iter().enumerate() {
+            if !p {
+                continue;
+            }
+            let id = ALL_IDS[j];
+            let row = edges.get(j).map(Vec::as_slice).unwrap_or(&[]);
+            let deps: Vec<NodeId> = (0..j)
+                .filter(|&i| {
+                    present.get(i).copied().unwrap_or(false)
+                        && row.get(i).copied().unwrap_or(false)
+                })
+                .map(|i| ALL_IDS[i])
+                .collect();
+            dag = dag.add_node(Box::new(TestNode {
+                id,
+                deps,
+                body: marker_body(j),
+                applies_flag: true,
+            }));
+        }
+        dag
+    }
+
+    /// Recover the topo order produced by `dag.build` by scanning
+    /// the output for `__NODE:N__` markers in order of appearance.
+    fn parse_order_from_output(out: &str) -> Vec<NodeId> {
+        let mut order = Vec::new();
+        let mut cursor = 0usize;
+        while let Some(rel) = out[cursor..].find("__NODE:") {
+            let start = cursor + rel + "__NODE:".len();
+            if let Some(end_rel) = out[start..].find("__") {
+                let idx: usize = out[start..start + end_rel].parse().unwrap();
+                order.push(ALL_IDS[idx]);
+                cursor = start + end_rel + 2;
+            } else {
+                break;
+            }
+        }
+        order
+    }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Topo property: every declared dependency edge `i → j`
+        /// (i must run before j) is honoured in the output order
+        /// for every acyclic graph built from the 13-variant pool.
+        /// This is the load-bearing invariant for the entire DAG —
+        /// if it fails, system-prompt sections can land in an order
+        /// that puts (e.g.) Skills before the Safety rules they
+        /// reference, weakening the prompt-injection defense.
+        #[test]
+        fn arbitrary_acyclic_graph_satisfies_dep_ordering(
+            present in prop::collection::vec(any::<bool>(), ALL_IDS.len()),
+            edges in prop::collection::vec(
+                prop::collection::vec(any::<bool>(), ALL_IDS.len()),
+                ALL_IDS.len()
+            ),
+        ) {
+            let tmp = TempDir::new().unwrap();
+            let ctx = fixture_ctx(tmp.path());
+            let dag = build_test_dag(&present, &edges);
+            let out = dag.build(&ctx).unwrap();
+            let order = parse_order_from_output(&out);
+
+            for (j, &present_j) in present.iter().enumerate() {
+                if !present_j {
+                    continue;
+                }
+                let id_j = ALL_IDS[j];
+                for i in 0..j {
+                    if !present.get(i).copied().unwrap_or(false) {
+                        continue;
+                    }
+                    if !edges.get(j).and_then(|r| r.get(i)).copied().unwrap_or(false) {
+                        continue;
+                    }
+                    let id_i = ALL_IDS[i];
+                    let pos_i = order.iter().position(|&x| x == id_i);
+                    let pos_j = order.iter().position(|&x| x == id_j);
+                    prop_assert!(
+                        pos_i.is_some() && pos_j.is_some() && pos_i < pos_j,
+                        "edge {:?} → {:?} not respected: pos_i={:?}, pos_j={:?}, order={:?}",
+                        id_i, id_j, pos_i, pos_j, order
+                    );
+                }
+            }
+        }
+
+        /// Exhaustiveness: every active (present + applies=true)
+        /// node appears exactly once in the output. No node silently
+        /// dropped, no node accidentally emitted twice.
+        #[test]
+        fn all_active_nodes_appear_exactly_once(
+            present in prop::collection::vec(any::<bool>(), ALL_IDS.len()),
+            edges in prop::collection::vec(
+                prop::collection::vec(any::<bool>(), ALL_IDS.len()),
+                ALL_IDS.len()
+            ),
+        ) {
+            let tmp = TempDir::new().unwrap();
+            let ctx = fixture_ctx(tmp.path());
+            let dag = build_test_dag(&present, &edges);
+            let out = dag.build(&ctx).unwrap();
+            let order = parse_order_from_output(&out);
+
+            let expected: usize = present.iter().filter(|&&p| p).count();
+            prop_assert_eq!(order.len(), expected);
+
+            let mut seen: std::collections::HashSet<NodeId> =
+                std::collections::HashSet::new();
+            for id in &order {
+                prop_assert!(
+                    seen.insert(*id),
+                    "duplicate node {:?} in order {:?}",
+                    id, order
+                );
+            }
+        }
+
+        /// Cycle detection: any DAG containing a 2-cycle (A↔B)
+        /// must error. Generates two distinct NodeIds, wires them
+        /// into a mutual-dep cycle, asserts `build` returns Err.
+        /// Note: prop_assume is used to drop the degenerate
+        /// a_idx == b_idx cases.
+        #[test]
+        fn cyclic_two_node_graph_returns_error(
+            a_idx in 0usize..ALL_IDS.len(),
+            b_idx in 0usize..ALL_IDS.len(),
+        ) {
+            prop_assume!(a_idx != b_idx);
+            let id_a = ALL_IDS[a_idx];
+            let id_b = ALL_IDS[b_idx];
+            let tmp = TempDir::new().unwrap();
+            let ctx = fixture_ctx(tmp.path());
+            let dag = PromptDag::new()
+                .add_node(Box::new(TestNode {
+                    id: id_a,
+                    deps: vec![id_b],
+                    body: "A".into(),
+                    applies_flag: true,
+                }))
+                .add_node(Box::new(TestNode {
+                    id: id_b,
+                    deps: vec![id_a],
+                    body: "B".into(),
+                    applies_flag: true,
+                }));
+            let result = dag.build(&ctx);
+            prop_assert!(
+                result.is_err(),
+                "cyclic graph must produce error, got: {:?}",
+                result.map(|s| s.len())
+            );
+        }
     }
 
     /// Fixture variant: workspace files present (AGENTS.md). Exercises
