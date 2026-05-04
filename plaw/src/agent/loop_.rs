@@ -13,7 +13,7 @@ use crate::util::truncate_with_ellipsis;
 use anyhow::Result;
 use regex::{Regex, RegexSet};
 use rustyline::error::ReadlineError;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::io::Write as _;
 use std::sync::{Arc, LazyLock};
@@ -29,6 +29,7 @@ pub(crate) mod history;
 mod native_tools;
 mod non_cli_approval;
 mod parsing;
+mod shell_policy;
 mod tool_io;
 mod tool_taxonomy;
 
@@ -58,6 +59,7 @@ use native_tools::{
 };
 pub(crate) use non_cli_approval::{NonCliApprovalContext, NonCliApprovalPrompt};
 use non_cli_approval::await_non_cli_approval_decision;
+pub(crate) use shell_policy::build_shell_policy_instructions;
 use tool_io::{
     append_calibration_reminder, maybe_inject_cron_add_delivery, tag_injected_content,
     truncate_tool_args_for_progress,
@@ -1181,77 +1183,6 @@ pub(crate) fn build_tool_instructions_from_specs(tool_specs: &[crate::tools::Too
             tool.name, tool.description, tool.parameters
         );
     }
-
-    instructions
-}
-
-/// Build shell-policy instructions for the system prompt so the model is aware
-/// of command-level execution constraints before it emits tool calls.
-pub(crate) fn build_shell_policy_instructions(autonomy: &crate::config::AutonomyConfig) -> String {
-    let mut instructions = String::new();
-    instructions.push_str("\n## Shell Policy\n\n");
-    instructions
-        .push_str("When using the `shell` tool, follow these runtime constraints exactly.\n\n");
-
-    let autonomy_label = match autonomy.level {
-        crate::security::AutonomyLevel::ReadOnly => "read_only",
-        crate::security::AutonomyLevel::Supervised => "supervised",
-        crate::security::AutonomyLevel::Full => "full",
-    };
-    let _ = writeln!(instructions, "- Autonomy level: `{autonomy_label}`");
-
-    if autonomy.level == crate::security::AutonomyLevel::ReadOnly {
-        instructions.push_str(
-            "- Shell execution is disabled in `read_only` mode. Do not emit shell tool calls.\n",
-        );
-        return instructions;
-    }
-
-    let normalized: BTreeSet<String> = autonomy
-        .allowed_commands
-        .iter()
-        .map(|entry| entry.trim())
-        .filter(|entry| !entry.is_empty())
-        .map(ToOwned::to_owned)
-        .collect();
-
-    if normalized.contains("*") {
-        instructions.push_str(
-            "- Allowed commands: wildcard `*` is configured (any command name/path may be allowlisted).\n",
-        );
-    } else if normalized.is_empty() {
-        instructions
-            .push_str("- Allowed commands: none configured. Any shell command will be rejected.\n");
-    } else {
-        const MAX_DISPLAY_COMMANDS: usize = 64;
-        let shown: Vec<String> = normalized
-            .iter()
-            .take(MAX_DISPLAY_COMMANDS)
-            .map(|cmd| format!("`{cmd}`"))
-            .collect();
-        let hidden = normalized.len().saturating_sub(MAX_DISPLAY_COMMANDS);
-        let _ = write!(instructions, "- Allowed commands: {}", shown.join(", "));
-        if hidden > 0 {
-            let _ = write!(instructions, " (+{hidden} more)");
-        }
-        instructions.push('\n');
-    }
-
-    if autonomy.level == crate::security::AutonomyLevel::Supervised
-        && autonomy.require_approval_for_medium_risk
-    {
-        instructions.push_str(
-            "- Medium-risk shell commands require explicit approval in `supervised` mode.\n",
-        );
-    }
-    if autonomy.block_high_risk_commands {
-        instructions.push_str(
-            "- High-risk shell commands are blocked even when command names are allowed.\n",
-        );
-    }
-    instructions.push_str(
-        "- If a requested command is outside policy, choose allowed alternatives and explain the limitation.\n",
-    );
 
     instructions
 }
@@ -3548,43 +3479,6 @@ Tail"#;
         assert!(instructions.contains("shell"));
         assert!(instructions.contains("file_read"));
         assert!(instructions.contains("file_write"));
-    }
-
-    #[test]
-    fn build_shell_policy_instructions_lists_allowlist() {
-        let mut autonomy = crate::config::AutonomyConfig::default();
-        autonomy.level = crate::security::AutonomyLevel::Supervised;
-        autonomy.allowed_commands = vec!["grep".into(), "cat".into(), "grep".into()];
-
-        let instructions = build_shell_policy_instructions(&autonomy);
-
-        assert!(instructions.contains("## Shell Policy"));
-        assert!(instructions.contains("Autonomy level: `supervised`"));
-        assert!(instructions.contains("`cat`"));
-        assert!(instructions.contains("`grep`"));
-    }
-
-    #[test]
-    fn build_shell_policy_instructions_handles_wildcard() {
-        let mut autonomy = crate::config::AutonomyConfig::default();
-        autonomy.level = crate::security::AutonomyLevel::Full;
-        autonomy.allowed_commands = vec!["*".into()];
-
-        let instructions = build_shell_policy_instructions(&autonomy);
-
-        assert!(instructions.contains("Autonomy level: `full`"));
-        assert!(instructions.contains("wildcard `*`"));
-    }
-
-    #[test]
-    fn build_shell_policy_instructions_read_only_disables_shell() {
-        let mut autonomy = crate::config::AutonomyConfig::default();
-        autonomy.level = crate::security::AutonomyLevel::ReadOnly;
-
-        let instructions = build_shell_policy_instructions(&autonomy);
-
-        assert!(instructions.contains("Autonomy level: `read_only`"));
-        assert!(instructions.contains("Shell execution is disabled"));
     }
 
     #[test]
