@@ -618,10 +618,10 @@ impl Agent {
             self.trim_history();
         }
 
-        anyhow::bail!(
-            "Agent exceeded maximum tool iterations ({})",
-            self.config.max_tool_iterations
-        )
+        Err(crate::agent::loop_::ToolIterationLimit {
+            limit: self.config.max_tool_iterations,
+        }
+        .into())
     }
 
     pub async fn run_single(&mut self, message: &str) -> Result<String> {
