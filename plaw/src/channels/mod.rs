@@ -108,8 +108,15 @@ const BOOTSTRAP_MAX_CHARS: usize = 20_000;
 const DEFAULT_CHANNEL_INITIAL_BACKOFF_SECS: u64 = 2;
 const DEFAULT_CHANNEL_MAX_BACKOFF_SECS: u64 = 60;
 const MIN_CHANNEL_MESSAGE_TIMEOUT_SECS: u64 = 30;
-/// Default timeout for processing a single channel message (LLM + tools).
-/// Used as fallback when not configured in channels_config.message_timeout_secs.
+/// Test-fixture default for `message_timeout_secs` in channel-runtime
+/// constructions. Production paths read the value from
+/// `channels_config.message_timeout_secs` and clamp via
+/// [`effective_channel_message_timeout_secs`] to no less than
+/// [`MIN_CHANNEL_MESSAGE_TIMEOUT_SECS`] — this 300s named constant
+/// only exists so the dozens of test fixtures construct uniformly
+/// rather than each inlining a magic number. Gated `#[cfg(test)]`
+/// so it doesn't fire dead_code in non-test builds.
+#[cfg(test)]
 const CHANNEL_MESSAGE_TIMEOUT_SECS: u64 = 300;
 /// Cap timeout scaling so large max_tool_iterations values do not create unbounded waits.
 const CHANNEL_MESSAGE_TIMEOUT_SCALE_CAP: u64 = 4;
@@ -219,9 +226,21 @@ fn runtime_config_store() -> &'static Mutex<HashMap<PathBuf, RuntimeConfigState>
     STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+// `cargo build --lib` flags these as dead because their only consumer
+// is `maybe_restart_managed_daemon_service`, which is only reached
+// through the `plaw channel bind-telegram` CLI subcommand wired in
+// `main.rs:1101` → `channels::handle_command`. main.rs is part of the
+// bin, not the lib, so the lib's dead-code analysis can't see the
+// chain. Allowed per-item rather than at the crate root so the audit
+// doc (`docs/dead-code-audit-2026-05-04.md`) can shrink toward a
+// clean `cargo build --lib` over time.
+#[allow(dead_code)]
 const SYSTEMD_STATUS_ARGS: [&str; 3] = ["--user", "is-active", "plaw.service"];
+#[allow(dead_code)]
 const SYSTEMD_RESTART_ARGS: [&str; 3] = ["--user", "restart", "plaw.service"];
+#[allow(dead_code)]
 const OPENRC_STATUS_ARGS: [&str; 2] = ["plaw", "status"];
+#[allow(dead_code)]
 const OPENRC_RESTART_ARGS: [&str; 2] = ["plaw", "restart"];
 
 #[derive(Clone)]
@@ -3712,10 +3731,12 @@ fn inject_workspace_file(
     }
 }
 
+#[allow(dead_code)] // Reached only via main.rs CLI handler — see handle_command below.
 fn normalize_telegram_identity(value: &str) -> String {
     value.trim().trim_start_matches('@').to_string()
 }
 
+#[allow(dead_code)] // Reached only via main.rs CLI handler — see handle_command below.
 async fn bind_telegram_identity(config: &Config, identity: &str) -> Result<()> {
     let normalized = normalize_telegram_identity(identity);
     if normalized.is_empty() {
@@ -3768,6 +3789,7 @@ async fn bind_telegram_identity(config: &Config, identity: &str) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)] // Reached only via main.rs CLI handler — see handle_command below.
 fn maybe_restart_managed_daemon_service() -> Result<bool> {
     if cfg!(target_os = "macos") {
         let home = directories::UserDirs::new()
@@ -3863,6 +3885,16 @@ fn maybe_restart_managed_daemon_service() -> Result<bool> {
     Ok(false)
 }
 
+/// CLI entrypoint for `plaw channel ...` subcommands. Reached only
+/// from `main.rs` (specifically `main.rs:1101`); `cargo build --lib`'s
+/// dead-code analysis can't see the bin caller, so this and its
+/// helpers (`bind_telegram_identity`, `normalize_telegram_identity`,
+/// `maybe_restart_managed_daemon_service`, plus the SYSTEMD/OPENRC
+/// args constants) carry per-item `#[allow(dead_code)]` rather than
+/// relying on the crate-level allow. Allows shrink toward a clean
+/// `cargo build --lib` over time, per
+/// `docs/dead-code-audit-2026-05-04.md` recommended-follow-up #4.
+#[allow(dead_code)]
 pub(crate) async fn handle_command(command: crate::ChannelCommands, config: &Config) -> Result<()> {
     match command {
         crate::ChannelCommands::Start => {
