@@ -507,7 +507,11 @@ mod tests {
         let output = SkillsSection.build(&ctx).unwrap();
         assert!(output.contains("<available_skills "));
         assert!(output.contains("<name>deploy</name>"));
-        assert!(output.contains("<location>skills/deploy/SKILL.md</location>"));
+        assert!(
+            output.contains("<location>skills/deploy/SKILL.md</location>")
+                || output.contains("<location>skills\\deploy\\SKILL.md</location>"),
+            "expected platform-relative skills/deploy/SKILL.md location"
+        );
         assert!(!output.contains("<instruction>Run smoke tests before deploy.</instruction>"));
         assert!(!output.contains("<tools>"));
     }

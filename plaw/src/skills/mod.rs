@@ -1837,8 +1837,15 @@ command = "echo hello"
 
         assert!(prompt.contains("<available_skills "));
         assert!(prompt.contains("<name>test</name>"));
-        assert!(prompt.contains("<location>skills/test/SKILL.md</location>"));
-        assert!(prompt.contains("loaded on demand"));
+        assert!(
+            prompt.contains("<location>skills/test/SKILL.md</location>")
+                || prompt.contains("<location>skills\\test\\SKILL.md</location>"),
+            "expected platform-relative skills/test/SKILL.md location"
+        );
+        // Compact-mode language drifted from "loaded on demand" to
+        // "FIRST read the full SKILL.md at the `location` path". Assert
+        // the new phrasing so the test tracks current production.
+        assert!(prompt.contains("FIRST read the full SKILL.md"));
         assert!(!prompt.contains("<instructions>"));
         assert!(!prompt.contains("<instruction>Do the thing.</instruction>"));
         assert!(!prompt.contains("<tools>"));

@@ -109,7 +109,10 @@ impl WasmRuntime {
         }
         if self.config.security.require_workspace_relative_tools_dir {
             let tools_dir_path = Path::new(&self.config.tools_dir);
-            if tools_dir_path.is_absolute() {
+            // is_absolute() on Windows requires drive prefix (`C:\`); use
+            // has_root() too so rooted Unix-style paths (`/etc`) are also
+            // rejected. See content_search.rs for the same reasoning.
+            if tools_dir_path.is_absolute() || tools_dir_path.has_root() {
                 bail!("runtime.wasm.tools_dir must be a workspace-relative path");
             }
             if tools_dir_path

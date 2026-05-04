@@ -8690,8 +8690,16 @@ BTC is currently around $65,000 based on latest tool output."#
 
         assert!(prompt.contains("<available_skills "), "missing skills XML");
         assert!(prompt.contains("<name>code-review</name>"));
-        assert!(prompt.contains("<location>skills/code-review/SKILL.md</location>"));
-        assert!(prompt.contains("loaded on demand"));
+        // Path::display() uses platform separator (`/` on Unix, `\` on
+        // Windows). Match either to keep the test platform-agnostic.
+        assert!(
+            prompt.contains("<location>skills/code-review/SKILL.md</location>")
+                || prompt.contains("<location>skills\\code-review\\SKILL.md</location>"),
+            "expected location element with skills/code-review/SKILL.md (forward or back slash)"
+        );
+        // Compact-mode wording drifted from "loaded on demand" to
+        // "FIRST read the full SKILL.md ...".
+        assert!(prompt.contains("FIRST read the full SKILL.md"));
         assert!(!prompt.contains("<instructions>"));
         assert!(!prompt
             .contains("<instruction>Always run cargo test before final response.</instruction>"));

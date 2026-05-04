@@ -171,7 +171,13 @@ impl Tool for ContentSearchTool {
         }
 
         // --- Path security checks ---
-        if std::path::Path::new(search_path).is_absolute() {
+        // Use has_root() rather than is_absolute() so we catch Unix-style
+        // rooted paths on Windows too. is_absolute() on Windows requires
+        // a drive prefix (`C:\`), so `/etc` would slip past — letting
+        // tools resolve workspace-escape paths against the cwd. has_root()
+        // is true for both `/etc` and `C:\Windows` on either platform.
+        let path_obj = std::path::Path::new(search_path);
+        if path_obj.is_absolute() || path_obj.has_root() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),

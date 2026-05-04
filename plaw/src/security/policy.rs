@@ -953,8 +953,11 @@ impl SecurityPolicy {
         // Expand "~" for consistent matching with forbidden paths and allowlists.
         let expanded_path = expand_user_path(path);
 
-        // Block absolute paths when workspace_only is set
-        if self.workspace_only && expanded_path.is_absolute() {
+        // Block absolute paths when workspace_only is set.
+        // is_absolute() on Windows requires drive prefix (`C:\`); use
+        // has_root() too so Unix-style rooted paths (`/etc`) are also
+        // rejected on Windows.
+        if self.workspace_only && (expanded_path.is_absolute() || expanded_path.has_root()) {
             return false;
         }
 

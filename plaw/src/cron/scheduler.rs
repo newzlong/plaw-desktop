@@ -627,7 +627,13 @@ mod tests {
         let (success, output) = run_job_command(&config, &security, &job).await;
         assert!(success);
         assert!(output.contains("scheduler-ok"));
-        assert!(output.contains("status=exit status: 0"));
+        // Rust stdlib's ExitStatus::Display differs by platform:
+        // Unix prints "exit status: N", Windows prints "exit code: N".
+        // Accept either form.
+        assert!(
+            output.contains("status=exit status: 0") || output.contains("status=exit code: 0"),
+            "expected exit status/code 0 marker, got: {output}"
+        );
     }
 
     #[tokio::test]
@@ -640,7 +646,11 @@ mod tests {
         let (success, output) = run_job_command(&config, &security, &job).await;
         assert!(!success);
         assert!(output.contains("definitely_missing_file_for_scheduler_test"));
-        assert!(output.contains("status=exit status:"));
+        // See run_job_command_success for the platform-dependent format.
+        assert!(
+            output.contains("status=exit status:") || output.contains("status=exit code:"),
+            "expected exit status/code marker, got: {output}"
+        );
     }
 
     #[tokio::test]
