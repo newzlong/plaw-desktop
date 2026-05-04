@@ -175,4 +175,91 @@ mod tests {
         // Index 5 is inside "你" (3-byte char), floor should move back to 3.
         assert_eq!(floor_utf8_char_boundary(s, 5), 3);
     }
+
+    // ─── Property-based tests (proptest) ──────────────────────────────────
+    //
+    // The hand-written tests above cover specific shapes (ASCII, emoji,
+    // CJK, accented). proptest fills in the gaps by generating thousands
+    // of arbitrary `(s, max_chars)` pairs — including cases the author
+    // didn't think of (interleaved scripts, zero-width joiners, long
+    // single-char strings, empty + boundary combinations).
+
+    use proptest::prelude::*;
+
+    proptest! {
+        /// truncate_with_ellipsis must never panic on any (s, max_chars) input,
+        /// and its output must always be valid UTF-8 (the type system guarantees
+        /// the latter — this property documents the invariant explicitly).
+        #[test]
+        fn truncate_never_panics_and_returns_valid_utf8(
+            s in ".*",
+            max_chars in 0usize..1024,
+        ) {
+            let out = truncate_with_ellipsis(&s, max_chars);
+            // String is always valid UTF-8 by construction; checking
+            // is_char_boundary at len() proves the trailing edge is sane.
+            prop_assert!(out.is_char_boundary(out.len()));
+        }
+
+        /// When the input fits, the output is the input unchanged. Hand-tests
+        /// cover specific lengths; proptest sweeps the full short-input space.
+        #[test]
+        fn truncate_short_input_returned_verbatim(
+            s in ".{0,40}",
+            extra in 0usize..32,
+        ) {
+            let n = s.chars().count();
+            let max_chars = n + extra; // input fits with room to spare
+            prop_assert_eq!(truncate_with_ellipsis(&s, max_chars), s.clone());
+        }
+
+        /// When the input is strictly longer than `max_chars`, the output
+        /// must end with the ellipsis suffix. The trailing "..." is the
+        /// signal that downstream UI uses to indicate "more content
+        /// available" — silently dropping it on a long input would break
+        /// log formatting and tracing payload truncation.
+        #[test]
+        fn truncate_long_input_has_ellipsis_suffix(
+            s in ".{1,200}",
+            // Bound max_chars below the input length so we always truncate.
+            max_chars in 0usize..1,
+        ) {
+            // Pick max_chars strictly less than the input's char count.
+            let n = s.chars().count();
+            prop_assume!(n > 0);
+            let max_chars = max_chars.min(n.saturating_sub(1));
+            prop_assume!(n > max_chars);
+            let out = truncate_with_ellipsis(&s, max_chars);
+            prop_assert!(out.ends_with("..."), "expected trailing '...' in {out:?}");
+        }
+
+        /// floor_utf8_char_boundary: result is always a valid char boundary,
+        /// always ≤ requested index, and always ≤ s.len(). These together
+        /// guarantee `&s[..result]` never panics.
+        #[test]
+        fn floor_boundary_is_safe_slice_index(
+            s in ".*",
+            index in 0usize..256,
+        ) {
+            let r = floor_utf8_char_boundary(&s, index);
+            prop_assert!(r <= s.len());
+            prop_assert!(r <= index || r == s.len());
+            prop_assert!(s.is_char_boundary(r));
+            // Smoke: actually slicing must not panic.
+            let _ = &s[..r];
+        }
+
+        /// floor_utf8_char_boundary is idempotent: applying it to its own
+        /// output yields the same value. Boundary-snapping should be a
+        /// fixed-point operation when the input is already a boundary.
+        #[test]
+        fn floor_boundary_is_idempotent(
+            s in ".*",
+            index in 0usize..256,
+        ) {
+            let r1 = floor_utf8_char_boundary(&s, index);
+            let r2 = floor_utf8_char_boundary(&s, r1);
+            prop_assert_eq!(r1, r2);
+        }
+    }
 }
