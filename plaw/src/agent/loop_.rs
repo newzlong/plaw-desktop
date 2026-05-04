@@ -30,6 +30,7 @@ mod native_tools;
 mod non_cli_approval;
 mod parsing;
 mod shell_policy;
+mod streaming;
 mod tool_io;
 mod tool_taxonomy;
 
@@ -61,22 +62,12 @@ use native_tools::{
 pub(crate) use non_cli_approval::{NonCliApprovalContext, NonCliApprovalPrompt};
 use non_cli_approval::await_non_cli_approval_decision;
 pub(crate) use shell_policy::build_shell_policy_instructions;
+pub(crate) use streaming::{DRAFT_CLEAR_SENTINEL, DRAFT_PROGRESS_SENTINEL};
 use tool_io::{
     append_calibration_reminder, maybe_inject_cron_add_delivery, tag_injected_content,
     truncate_tool_args_for_progress,
 };
 use tool_taxonomy::{ANTI_LOOP_EXEMPT_TOOLS, MAX_SAME_TOOL_PER_TURN, TIGHT_LOOP_TOOLS};
-
-/// Minimum interval between progress sends to avoid flooding the draft channel.
-pub(crate) const PROGRESS_MIN_INTERVAL_MS: u64 = 500;
-
-/// Sentinel value sent through on_delta to signal the draft updater to clear accumulated text.
-/// Used before streaming the final answer so progress lines are replaced by the clean response.
-pub(crate) const DRAFT_CLEAR_SENTINEL: &str = "\x00CLEAR\x00";
-/// Sentinel prefix for internal progress deltas (thinking/tool execution trace).
-/// Channel layers can suppress these messages by default and only expose them
-/// when the user explicitly asks for command/tool execution details.
-pub(crate) const DRAFT_PROGRESS_SENTINEL: &str = "\x00PROGRESS\x00";
 
 tokio::task_local! {
     static TOOL_LOOP_REPLY_TARGET: Option<String>;
