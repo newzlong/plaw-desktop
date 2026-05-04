@@ -11,18 +11,18 @@ use crate::security::SecurityPolicy;
 use crate::tools::{self, Tool};
 use crate::util::truncate_with_ellipsis;
 use anyhow::Result;
-use regex::{Regex, RegexSet};
 use rustyline::error::ReadlineError;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::io::Write as _;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 mod budgets;
 mod context;
+mod credentials;
 mod errors;
 mod execution;
 pub(crate) mod history;
@@ -34,6 +34,7 @@ mod tool_io;
 mod tool_taxonomy;
 
 use context::{build_context, build_hardware_context};
+pub(crate) use credentials::scrub_credentials;
 pub(crate) use errors::{
     is_tool_iteration_limit_error, is_tool_loop_cancelled, ToolIterationLimit, ToolLoopCancelled,
 };
@@ -65,61 +66,6 @@ use tool_io::{
     truncate_tool_args_for_progress,
 };
 use tool_taxonomy::{ANTI_LOOP_EXEMPT_TOOLS, MAX_SAME_TOOL_PER_TURN, TIGHT_LOOP_TOOLS};
-
-static SENSITIVE_KEY_PATTERNS: LazyLock<RegexSet> = LazyLock::new(|| {
-    RegexSet::new([
-        r"(?i)token",
-        r"(?i)api[_-]?key",
-        r"(?i)password",
-        r"(?i)secret",
-        r"(?i)user[_-]?key",
-        r"(?i)bearer",
-        r"(?i)credential",
-    ])
-    .unwrap()
-});
-
-static SENSITIVE_KV_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)(token|api[_-]?key|password|secret|user[_-]?key|bearer|credential)["']?\s*[:=]\s*(?:"([^"]{8,})"|'([^']{8,})'|([a-zA-Z0-9_\-\.]{8,}))"#).unwrap()
-});
-
-/// Scrub credentials from tool output to prevent accidental exfiltration.
-/// Replaces known credential patterns with a redacted placeholder while preserving
-/// a small prefix for context.
-pub(crate) fn scrub_credentials(input: &str) -> String {
-    SENSITIVE_KV_REGEX
-        .replace_all(input, |caps: &regex::Captures| {
-            let full_match = &caps[0];
-            let key = &caps[1];
-            let val = caps
-                .get(2)
-                .or(caps.get(3))
-                .or(caps.get(4))
-                .map(|m| m.as_str())
-                .unwrap_or("");
-
-            // Preserve first 4 chars for context, then redact (use char boundaries for multibyte safety)
-            let prefix: String = val.chars().take(4).collect();
-            let prefix = if val.chars().count() > 4 { prefix.as_str() } else { "" };
-
-            if full_match.contains(':') {
-                if full_match.contains('"') {
-                    format!("\"{}\": \"{}*[REDACTED]\"", key, prefix)
-                } else {
-                    format!("{}: {}*[REDACTED]", key, prefix)
-                }
-            } else if full_match.contains('=') {
-                if full_match.contains('"') {
-                    format!("{}=\"{}*[REDACTED]\"", key, prefix)
-                } else {
-                    format!("{}={}*[REDACTED]", key, prefix)
-                }
-            } else {
-                format!("{}: {}*[REDACTED]", key, prefix)
-            }
-        })
-        .to_string()
-}
 
 /// Minimum interval between progress sends to avoid flooding the draft channel.
 pub(crate) const PROGRESS_MIN_INTERVAL_MS: u64 = 500;
@@ -4159,34 +4105,6 @@ Let me check the result."#;
             text.contains("help you"),
             "text before tool call should be preserved"
         );
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // TG4 (inline): scrub_credentials edge cases
-    // ─────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn scrub_credentials_empty_input() {
-        let result = scrub_credentials("");
-        assert_eq!(result, "");
-    }
-
-    #[test]
-    fn scrub_credentials_no_sensitive_data() {
-        let input = "normal text without any secrets";
-        let result = scrub_credentials(input);
-        assert_eq!(
-            result, input,
-            "non-sensitive text should pass through unchanged"
-        );
-    }
-
-    #[test]
-    fn scrub_credentials_short_values_not_redacted() {
-        // Values shorter than 8 chars should not be redacted
-        let input = r#"api_key="short""#;
-        let result = scrub_credentials(input);
-        assert_eq!(result, input, "short values should not be redacted");
     }
 
     // ─────────────────────────────────────────────────────────────────────
