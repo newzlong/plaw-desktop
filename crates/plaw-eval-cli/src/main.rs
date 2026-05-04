@@ -598,10 +598,28 @@ async fn cmd_run(
         );
 
         if !summary.cancelled {
-            let scored = score_run(&repo, &summary.run_id, &suite, &*judge)
+            let score_summary = score_run(&repo, &summary.run_id, &suite, &*judge)
                 .await
                 .with_context(|| format!("scoring run {}", summary.run_id))?;
-            println!("  scored {scored} (case, metric) pairs");
+            println!(
+                "  scored {} (case, metric) pairs",
+                score_summary.pairs_scored
+            );
+            if score_summary.has_silent_failures() {
+                let n_failed = score_summary.cases_all_metrics_failed.len();
+                println!(
+                    "  ⚠ {n_failed} case(s) had ALL metric attempts error \
+                     (judge timeout / rate limit / parse failure). \
+                     metric_scores left empty for these cases — investigate \
+                     before treating aggregate as authoritative."
+                );
+                for cid in score_summary.cases_all_metrics_failed.iter().take(5) {
+                    println!("     - {cid}");
+                }
+                if n_failed > 5 {
+                    println!("     ... and {} more", n_failed - 5);
+                }
+            }
         }
 
         let agg = aggregate(&repo, &summary.run_id, DEFAULT_AGGREGATE_ALPHA)?;

@@ -25,17 +25,41 @@ use crate::runner::executor::strip_repetition_suffix;
 use crate::storage::{EvalRepo, MetricScore, RecordedToolCall};
 use crate::suite::{Case, CaseInput, ChatRole, MetricSpec, Suite};
 
+/// Outcome of scoring one run. Replaces an earlier signature that returned
+/// just `usize` (pair count) — the additional fields surface partial /
+/// silent failures that the bare count hid.
+#[derive(Debug, Clone, Default)]
+pub struct ScoreRunSummary {
+    /// Total (case, metric) score pairs successfully written.
+    pub pairs_scored: usize,
+    /// case_ids where at least one whitelisted metric returned `Err`
+    /// from `compute_metric` AND no metric for that case produced a
+    /// successful score. These are the cases that were silently ignored
+    /// before we surfaced this signal — typically long-response cases
+    /// where the judge LLM timed out.
+    pub cases_all_metrics_failed: Vec<String>,
+}
+
+impl ScoreRunSummary {
+    pub fn has_silent_failures(&self) -> bool {
+        !self.cases_all_metrics_failed.is_empty()
+    }
+}
+
 /// Apply every metric in `suite.metrics` to every successful case_result
-/// of the given run. Returns the number of (case, metric) pairs scored.
+/// of the given run. Returns a summary including a list of case_ids whose
+/// metrics ALL errored (i.e. silent-failure cases the caller should
+/// surface explicitly).
 pub async fn score_run(
     repo: &EvalRepo,
     run_id: &str,
     suite: &Suite,
     judge: &dyn JudgeClient,
-) -> Result<usize> {
+) -> Result<ScoreRunSummary> {
+    let mut summary = ScoreRunSummary::default();
     if suite.metrics.is_empty() {
         debug!(suite = %suite.name, "no metrics declared; skipping scoring");
-        return Ok(0);
+        return Ok(summary);
     }
     let mut case_lookup: HashMap<String, &Case> = HashMap::with_capacity(suite.cases.len());
     for c in &suite.cases {
@@ -43,7 +67,6 @@ pub async fn score_run(
     }
 
     let mut results = repo.load_case_results(run_id)?;
-    let mut total = 0usize;
     for r in results.iter_mut() {
         if r.error.is_some() {
             continue;
@@ -56,6 +79,11 @@ pub async fn score_run(
             continue;
         };
         let mut scored: HashMap<String, MetricScore> = HashMap::new();
+        // Per-case bookkeeping: distinguish "no metrics attempted"
+        // (whitelist excluded everything) from "metrics attempted but all
+        // errored" (the silent-failure case worth surfacing).
+        let mut any_metric_errored = false;
+        let mut any_metric_succeeded = false;
         for spec in &suite.metrics {
             // Per-case metric whitelist — when set, only listed metrics run.
             // Cases with the field unset (legacy) get every suite metric.
@@ -67,15 +95,25 @@ pub async fn score_run(
             match compute_metric(spec, case, &r.plaw_response, &r.tool_calls, judge).await {
                 Ok(Some(score)) => {
                     scored.insert(spec.name.clone(), score);
-                    total += 1;
+                    summary.pairs_scored += 1;
+                    any_metric_succeeded = true;
                 }
                 Ok(None) => {
                     debug!(metric = %spec.name, "metric returned no score");
                 }
                 Err(e) => {
                     warn!(metric = %spec.name, case_id = %r.case_id, error = %e, "metric scoring failed");
+                    any_metric_errored = true;
                 }
             }
+        }
+        if any_metric_errored && !any_metric_succeeded {
+            // True silent failure: every metric attempt for this case
+            // raised an error and we wrote no scores. Pre-fix this was
+            // dropped on the floor.
+            summary
+                .cases_all_metrics_failed
+                .push(r.case_id.clone());
         }
         // Merge with anything the runner pre-populated (currently empty,
         // but reserved for future).
@@ -85,7 +123,14 @@ pub async fn score_run(
         }
         repo.update_metric_scores(run_id, &r.case_id, &merged)?;
     }
-    Ok(total)
+    if summary.has_silent_failures() {
+        warn!(
+            run_id = %run_id,
+            cases_failed = summary.cases_all_metrics_failed.len(),
+            "metric scoring: cases with all-metrics-errored — investigate judge timeouts/rate limits"
+        );
+    }
+    Ok(summary)
 }
 
 /// Produce a single metric score for one case. Returns `Ok(None)` when
@@ -433,12 +478,77 @@ mod tests {
         repo.insert_case_result(&cr).unwrap();
         let judge = MockJudgeClient::new(JudgeFamily::Kimi, "kimi-k2.5", vec![]);
 
-        let n = score_run(&repo, "r1", &suite, &judge).await.unwrap();
-        assert_eq!(n, 1);
+        let summary = score_run(&repo, "r1", &suite, &judge).await.unwrap();
+        assert_eq!(summary.pairs_scored, 1);
+        assert!(summary.cases_all_metrics_failed.is_empty());
 
         let stored = repo.load_case_results("r1").unwrap();
         assert_eq!(stored.len(), 1);
         let score = stored[0].metric_scores.get("keyword_coverage").unwrap();
         assert!((score.value - 1.0).abs() < 1e-12);
+    }
+
+    /// Test-only judge that always errors. Reproduces the silent-failure
+    /// situation where every judge call fails (timeout / rate limit / etc).
+    struct AlwaysErrJudge;
+    #[async_trait::async_trait]
+    impl JudgeClient for AlwaysErrJudge {
+        fn family(&self) -> JudgeFamily {
+            JudgeFamily::Kimi
+        }
+        fn model(&self) -> &str {
+            "always-err"
+        }
+        async fn complete(
+            &self,
+            _system: &str,
+            _user: &str,
+        ) -> Result<crate::judges::client::JudgeCompletion> {
+            Err(anyhow::anyhow!("simulated judge timeout"))
+        }
+    }
+
+    #[tokio::test]
+    async fn score_run_records_silent_failure_when_all_metrics_error() {
+        // Reproduces the bug we found in the post-Phase-2 baseline: when
+        // every metric scoring attempt errors (e.g. judge timeout on a
+        // long response), the case's metric_scores is left empty and —
+        // pre-fix — that's invisible at the caller.
+        let repo = EvalRepo::open_in_memory().unwrap();
+        let mut suite = suite_with_metrics(vec![MetricSpec {
+            name: "g_eval".into(),
+            judge: None,
+            params: Default::default(),
+        }]);
+        // Pin the case to whitelist g_eval so the loop attempts it.
+        suite.cases[0].metrics = Some(vec!["g_eval".into()]);
+
+        let run = crate::storage::Run {
+            id: "r_err".into(),
+            suite_name: suite.name.clone(),
+            suite_version: suite.version.clone(),
+            started_at: 0,
+            finished_at: Some(1),
+            plaw_commit: "x".into(),
+            model_version: "test".into(),
+            config_hash: "h".into(),
+            n_total: 1,
+            n_completed: 1,
+            n_failed: 0,
+        };
+        repo.insert_run(&run).unwrap();
+        let mut cr = case_result(&suite.cases[0].id, "anything");
+        cr.run_id = "r_err".into();
+        repo.insert_case_result(&cr).unwrap();
+
+        let judge = AlwaysErrJudge;
+        let summary = score_run(&repo, "r_err", &suite, &judge).await.unwrap();
+        assert_eq!(summary.pairs_scored, 0);
+        assert_eq!(summary.cases_all_metrics_failed.len(), 1);
+        assert!(summary.has_silent_failures());
+        assert_eq!(
+            &summary.cases_all_metrics_failed[0],
+            &suite.cases[0].id
+        );
     }
 }
