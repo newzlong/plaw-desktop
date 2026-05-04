@@ -47,10 +47,16 @@ fn config_default_temperature_positive() {
 
 #[test]
 fn agent_config_default_max_tool_iterations() {
+    // The runtime default is intentionally "effectively unlimited" (i64::MAX
+    // as usize). Long-running autonomous workflows (read → edit → build → fix
+    // → repeat) need to chain many tool calls; per-tool anti-loop caps in the
+    // agent loop guard against runaway repetition. i64::MAX (not usize::MAX)
+    // so the value round-trips through TOML serialization.
     let agent = AgentConfig::default();
     assert_eq!(
-        agent.max_tool_iterations, 20,
-        "default max_tool_iterations should be 20"
+        agent.max_tool_iterations,
+        i64::MAX as usize,
+        "default max_tool_iterations should be i64::MAX (effectively unlimited)"
     );
 }
 
@@ -198,8 +204,10 @@ default_temperature = 0.7
 "#;
     let parsed: Config = toml::from_str(minimal_toml).expect("minimal TOML should parse");
 
-    // Agent config should use defaults
-    assert_eq!(parsed.agent.max_tool_iterations, 20);
+    // Agent config should use defaults — max_tool_iterations is intentionally
+    // unlimited (i64::MAX) so autonomous chains aren't truncated; per-tool
+    // anti-loop caps prevent runaway repetition.
+    assert_eq!(parsed.agent.max_tool_iterations, i64::MAX as usize);
     assert_eq!(parsed.agent.max_history_messages, 50);
     assert!(!parsed.agent.compact_context);
 }
