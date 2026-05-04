@@ -546,7 +546,6 @@ pub(crate) async fn run_tool_call_loop(
                                 success: false,
                                 error_reason: Some(scrub_credentials(&reason)),
                                 duration: Duration::ZERO,
-                                progress_log: Vec::new(),
                             },
                         ));
                         continue;
@@ -590,7 +589,6 @@ pub(crate) async fn run_tool_call_loop(
                         success: false,
                         error_reason: Some(blocked),
                         duration: Duration::ZERO,
-                        progress_log: Vec::new(),
                     },
                 ));
                 continue;
@@ -670,7 +668,6 @@ pub(crate) async fn run_tool_call_loop(
                                 success: false,
                                 error_reason: Some(denied),
                                 duration: Duration::ZERO,
-                                progress_log: Vec::new(),
                             },
                         ));
                         continue;
@@ -706,7 +703,6 @@ pub(crate) async fn run_tool_call_loop(
                         success: false,
                         error_reason: Some(duplicate),
                         duration: Duration::ZERO,
-                        progress_log: Vec::new(),
                     },
                 ));
                 continue;
@@ -757,7 +753,6 @@ pub(crate) async fn run_tool_call_loop(
                         success: false,
                         error_reason: Some(anti_loop_msg),
                         duration: Duration::ZERO,
-                        progress_log: Vec::new(),
                     },
                 ));
                 continue;
@@ -1659,7 +1654,6 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
 mod tests {
     use super::*;
     use super::budgets::DEFAULT_MAX_HISTORY_MESSAGES;
-    use super::native_tools::tools_to_openai_format;
     use async_trait::async_trait;
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use std::collections::VecDeque;
@@ -3228,32 +3222,6 @@ Tail"#;
             0,
             "Raw JSON without wrappers should not be parsed"
         );
-    }
-
-    #[test]
-    fn tools_to_openai_format_produces_valid_schema() {
-        use crate::security::SecurityPolicy;
-        let security = Arc::new(SecurityPolicy::from_config(
-            &crate::config::AutonomyConfig::default(),
-            std::path::Path::new("/tmp"),
-        ));
-        let tools = tools::default_tools(security);
-        let formatted = tools_to_openai_format(&tools);
-
-        assert!(!formatted.is_empty());
-        for tool_json in &formatted {
-            assert_eq!(tool_json["type"], "function");
-            assert!(tool_json["function"]["name"].is_string());
-            assert!(tool_json["function"]["description"].is_string());
-            assert!(!tool_json["function"]["name"].as_str().unwrap().is_empty());
-        }
-        // Verify known tools are present
-        let names: Vec<&str> = formatted
-            .iter()
-            .filter_map(|t| t["function"]["name"].as_str())
-            .collect();
-        assert!(names.contains(&"shell"));
-        assert!(names.contains(&"file_read"));
     }
 
     #[test]

@@ -2,48 +2,18 @@
 //! the on-the-wire native tool-call shapes that providers (OpenAI,
 //! Anthropic, OpenRouter, Kimi-Anthropic-compat) expect.
 //!
-//! Two flavours of "native":
-//!
-//!   1. **Outbound tool *spec*** — what we hand the provider so the
-//!      model knows which tools exist. Format is OpenAI's
-//!      `{"type":"function", "function":{"name","description","parameters"}}`
-//!      array, which OpenRouter / Kimi-coder also accept verbatim.
-//!      See [`tools_to_openai_format`].
-//!
-//!   2. **Outbound assistant *history***— when we record an assistant
-//!      turn that issued tool calls, we encode it as JSON so the next
-//!      provider call can reconstruct the proper assistant message
-//!      with structured `tool_calls`. The OpenRouter provider's
-//!      `convert_messages` parses this JSON back. See
-//!      [`build_native_assistant_history`] (provider-issued
-//!      `ToolCall`s) and
-//!      [`build_native_assistant_history_from_parsed_calls`]
-//!      (prompt-mode-parsed `ParsedToolCall`s when the provider didn't
-//!      return native tool_calls and we extracted them from text).
+//! When we record an assistant turn that issued tool calls, we encode
+//! it as JSON so the next provider call can reconstruct the proper
+//! assistant message with structured `tool_calls`. The OpenRouter
+//! provider's `convert_messages` parses this JSON back. See
+//! [`build_native_assistant_history`] (provider-issued `ToolCall`s)
+//! and [`build_native_assistant_history_from_parsed_calls`]
+//! (prompt-mode-parsed `ParsedToolCall`s when the provider didn't
+//! return native tool_calls and we extracted them from text).
 
 use crate::providers::ToolCall;
-use crate::tools::Tool;
 
 use super::parsing::ParsedToolCall;
-
-/// Convert a tool registry to OpenAI function-calling format for native
-/// tool support. The output is what gets passed in `ChatRequest::tools`
-/// when the provider supports native tool calls.
-pub(super) fn tools_to_openai_format(tools_registry: &[Box<dyn Tool>]) -> Vec<serde_json::Value> {
-    tools_registry
-        .iter()
-        .map(|tool| {
-            serde_json::json!({
-                "type": "function",
-                "function": {
-                    "name": tool.name(),
-                    "description": tool.description(),
-                    "parameters": tool.parameters_schema()
-                }
-            })
-        })
-        .collect()
-}
 
 /// Build assistant history entry in JSON format for native tool-call APIs.
 /// `convert_messages` in the OpenRouter provider parses this JSON to
@@ -214,29 +184,4 @@ mod tests {
         assert!(parsed_back["tool_calls"][0]["arguments"].is_string());
     }
 
-    #[test]
-    fn tools_to_openai_format_emits_function_envelope() {
-        struct EchoTool;
-        #[async_trait::async_trait]
-        impl Tool for EchoTool {
-            fn name(&self) -> &str { "echo" }
-            fn description(&self) -> &str { "echo input" }
-            fn parameters_schema(&self) -> serde_json::Value {
-                serde_json::json!({"type": "object"})
-            }
-            async fn execute(
-                &self,
-                _args: serde_json::Value,
-            ) -> anyhow::Result<crate::tools::ToolResult> {
-                unreachable!()
-            }
-        }
-
-        let tools: Vec<Box<dyn Tool>> = vec![Box::new(EchoTool)];
-        let out = tools_to_openai_format(&tools);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0]["type"], "function");
-        assert_eq!(out[0]["function"]["name"], "echo");
-        assert_eq!(out[0]["function"]["description"], "echo input");
-    }
 }
