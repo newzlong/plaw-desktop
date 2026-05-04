@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 
 use anyhow::{anyhow, Result};
+use futures_util::stream::{self, StreamExt};
 use serde_json::json;
 use tracing::{debug, warn};
 
@@ -24,6 +25,13 @@ use crate::metrics::{
 use crate::runner::executor::strip_repetition_suffix;
 use crate::storage::{EvalRepo, MetricScore, RecordedToolCall};
 use crate::suite::{Case, CaseInput, ChatRole, MetricSpec, Suite};
+
+/// Default upper bound on simultaneous in-flight (case, metric) scoring
+/// futures. Most judge endpoints rate-limit hard somewhere in the 10–20
+/// concurrent-requests range, so 8 is a conservative default that still
+/// shaves an order of magnitude off sequential scoring (n=400 cases × 3
+/// metrics ≈ 1200 calls).
+pub const DEFAULT_SCORING_CONCURRENCY: usize = 8;
 
 /// Outcome of scoring one run. Replaces an earlier signature that returned
 /// just `usize` (pair count) — the additional fields surface partial /
@@ -50,12 +58,34 @@ impl ScoreRunSummary {
 /// of the given run. Returns a summary including a list of case_ids whose
 /// metrics ALL errored (i.e. silent-failure cases the caller should
 /// surface explicitly).
+///
+/// Uses [`DEFAULT_SCORING_CONCURRENCY`] in-flight (case, metric) futures.
+/// Use [`score_run_with_concurrency`] if you need a different bound (for
+/// example to dial down for a flaky judge or up for a high-quota one).
 pub async fn score_run(
     repo: &EvalRepo,
     run_id: &str,
     suite: &Suite,
     judge: &dyn JudgeClient,
 ) -> Result<ScoreRunSummary> {
+    score_run_with_concurrency(repo, run_id, suite, judge, DEFAULT_SCORING_CONCURRENCY).await
+}
+
+/// Same as [`score_run`] but with a caller-supplied concurrency bound.
+///
+/// Concurrency is across *(case, metric)* pairs — each pair issues one
+/// judge call (or runs deterministically), and `concurrency=1` gives
+/// strictly sequential behavior (useful for tests that need deterministic
+/// progress order). The repo writes are still serialized at the SQLite
+/// connection layer, so this does not introduce a write race.
+pub async fn score_run_with_concurrency(
+    repo: &EvalRepo,
+    run_id: &str,
+    suite: &Suite,
+    judge: &dyn JudgeClient,
+    concurrency: usize,
+) -> Result<ScoreRunSummary> {
+    let concurrency = concurrency.max(1);
     let mut summary = ScoreRunSummary::default();
     if suite.metrics.is_empty() {
         debug!(suite = %suite.name, "no metrics declared; skipping scoring");
@@ -67,62 +97,84 @@ pub async fn score_run(
     }
 
     let mut results = repo.load_case_results(run_id)?;
-    for r in results.iter_mut() {
+
+    // ── Phase 1: build a flat (case_idx, spec, case, response, tool_calls)
+    //    task list, applying the per-case metric whitelist up-front. We index
+    //    into `results` so the eventual write-back can mutate `r.metric_scores`
+    //    in place without re-cloning.
+    type Task<'a> = (usize, &'a MetricSpec, &'a Case, &'a str, &'a [RecordedToolCall]);
+    let mut tasks: Vec<Task<'_>> = Vec::new();
+    for (idx, r) in results.iter().enumerate() {
         if r.error.is_some() {
             continue;
         }
-        // Repetitions store ids as `<base>#<idx>`; the suite still keys by
-        // base id, so strip the suffix before lookup.
         let lookup_id = strip_repetition_suffix(&r.case_id);
         let Some(case) = case_lookup.get(lookup_id) else {
             warn!(case_id = %r.case_id, "case not found in suite; skipping");
             continue;
         };
-        let mut scored: HashMap<String, MetricScore> = HashMap::new();
-        // Per-case bookkeeping: distinguish "no metrics attempted"
-        // (whitelist excluded everything) from "metrics attempted but all
-        // errored" (the silent-failure case worth surfacing).
-        let mut any_metric_errored = false;
-        let mut any_metric_succeeded = false;
         for spec in &suite.metrics {
-            // Per-case metric whitelist — when set, only listed metrics run.
-            // Cases with the field unset (legacy) get every suite metric.
             if let Some(allowed) = case.metrics.as_ref() {
                 if !allowed.iter().any(|m| m == &spec.name) {
                     continue;
                 }
             }
-            match compute_metric(spec, case, &r.plaw_response, &r.tool_calls, judge).await {
-                Ok(Some(score)) => {
-                    scored.insert(spec.name.clone(), score);
-                    summary.pairs_scored += 1;
-                    any_metric_succeeded = true;
-                }
-                Ok(None) => {
-                    debug!(metric = %spec.name, "metric returned no score");
-                }
-                Err(e) => {
-                    warn!(metric = %spec.name, case_id = %r.case_id, error = %e, "metric scoring failed");
-                    any_metric_errored = true;
-                }
+            tasks.push((idx, spec, case, r.plaw_response.as_str(), r.tool_calls.as_slice()));
+        }
+    }
+
+    // ── Phase 2: drive all (case, metric) futures concurrently with a
+    //    bounded in-flight cap. Aggregation per case happens after the stream
+    //    drains. We collect the per-task outcome rather than write inline so
+    //    repo writes happen once per case (matching the legacy semantics).
+    let stream = stream::iter(tasks.into_iter().map(|(idx, spec, case, response, tool_calls)| {
+        async move {
+            let res = compute_metric(spec, case, response, tool_calls, judge).await;
+            (idx, spec.name.clone(), res)
+        }
+    }))
+    .buffer_unordered(concurrency);
+    let outcomes: Vec<(usize, String, Result<Option<MetricScore>>)> = stream.collect().await;
+
+    // ── Phase 3: group by case_idx, derive summary fields, persist.
+    #[derive(Default)]
+    struct CaseAggregate {
+        scored: HashMap<String, MetricScore>,
+        any_succeeded: bool,
+        any_errored: bool,
+    }
+    let mut per_case: HashMap<usize, CaseAggregate> = HashMap::new();
+    for (idx, name, res) in outcomes {
+        let entry = per_case.entry(idx).or_default();
+        match res {
+            Ok(Some(score)) => {
+                entry.scored.insert(name, score);
+                entry.any_succeeded = true;
+                summary.pairs_scored += 1;
+            }
+            Ok(None) => {
+                debug!(metric = %name, "metric returned no score");
+            }
+            Err(e) => {
+                let case_id = results.get(idx).map(|r| r.case_id.as_str()).unwrap_or("?");
+                warn!(metric = %name, case_id = %case_id, error = %e, "metric scoring failed");
+                entry.any_errored = true;
             }
         }
-        if any_metric_errored && !any_metric_succeeded {
-            // True silent failure: every metric attempt for this case
-            // raised an error and we wrote no scores. Pre-fix this was
-            // dropped on the floor.
-            summary
-                .cases_all_metrics_failed
-                .push(r.case_id.clone());
+    }
+
+    for (idx, agg) in per_case {
+        let r = &mut results[idx];
+        if agg.any_errored && !agg.any_succeeded {
+            summary.cases_all_metrics_failed.push(r.case_id.clone());
         }
-        // Merge with anything the runner pre-populated (currently empty,
-        // but reserved for future).
         let mut merged = std::mem::take(&mut r.metric_scores);
-        for (k, v) in scored {
+        for (k, v) in agg.scored {
             merged.insert(k, v);
         }
         repo.update_metric_scores(run_id, &r.case_id, &merged)?;
     }
+
     if summary.has_silent_failures() {
         warn!(
             run_id = %run_id,
@@ -550,5 +602,136 @@ mod tests {
             &summary.cases_all_metrics_failed[0],
             &suite.cases[0].id
         );
+    }
+
+    /// Build a (suite, repo, run_id) triple seeded with `n_cases` deterministic
+    /// case_results. Each case's response contains "Paris" so keyword_coverage
+    /// scores 1.0; that lets a parity test check that pairs_scored matches
+    /// regardless of `concurrency`.
+    fn seed_keyword_run(n_cases: usize) -> (Suite, EvalRepo, String) {
+        let repo = EvalRepo::open_in_memory().unwrap();
+        let suite = Suite {
+            name: "parity".into(),
+            version: "1.0.0".into(),
+            description: "".into(),
+            default_judge: JudgeSpec {
+                model: "kimi-k2.5".into(),
+                provider: "kimi".into(),
+                temperature: 0.0,
+                mode: JudgeMode::default(),
+            },
+            metrics: vec![MetricSpec {
+                name: "keyword_coverage".into(),
+                judge: None,
+                params: Default::default(),
+            }],
+            cases: (0..n_cases)
+                .map(|i| Case {
+                    id: format!("c{i}"),
+                    input: CaseInput::Chat {
+                        messages: vec![ChatMsg {
+                            role: ChatRole::User,
+                            content: format!("Question {i}?"),
+                        }],
+                    },
+                    expected: Some(CaseExpected {
+                        answer_keywords: vec!["Paris".into()],
+                        ..CaseExpected::default()
+                    }),
+                    tags: vec![],
+                    cluster_id: None,
+                    source: "authored".into(),
+                    promoted_at: None,
+                    metrics: None,
+                })
+                .collect(),
+        };
+        let run_id = "rparity".to_string();
+        let run = crate::storage::Run {
+            id: run_id.clone(),
+            suite_name: suite.name.clone(),
+            suite_version: suite.version.clone(),
+            started_at: 0,
+            finished_at: Some(1),
+            plaw_commit: "x".into(),
+            model_version: "kimi-k2.5".into(),
+            config_hash: "h".into(),
+            n_total: n_cases,
+            n_completed: n_cases,
+            n_failed: 0,
+        };
+        repo.insert_run(&run).unwrap();
+        for i in 0..n_cases {
+            let mut cr = case_result(&format!("c{i}"), "Paris is the answer.");
+            cr.run_id = run_id.clone();
+            repo.insert_case_result(&cr).unwrap();
+        }
+        (suite, repo, run_id)
+    }
+
+    #[tokio::test]
+    async fn score_run_with_concurrency_matches_sequential() {
+        // Concurrency must not change the outcome: same pairs scored, same
+        // stored values. We compare concurrency=1 (strictly sequential) to
+        // concurrency=8 (default production setting) over a 12-case run.
+        let (suite_seq, repo_seq, run_seq) = seed_keyword_run(12);
+        let judge_seq = MockJudgeClient::new(JudgeFamily::Kimi, "kimi-k2.5", vec![]);
+        let summary_seq = score_run_with_concurrency(&repo_seq, &run_seq, &suite_seq, &judge_seq, 1)
+            .await
+            .unwrap();
+
+        let (suite_par, repo_par, run_par) = seed_keyword_run(12);
+        let judge_par = MockJudgeClient::new(JudgeFamily::Kimi, "kimi-k2.5", vec![]);
+        let summary_par = score_run_with_concurrency(&repo_par, &run_par, &suite_par, &judge_par, 8)
+            .await
+            .unwrap();
+
+        assert_eq!(summary_seq.pairs_scored, summary_par.pairs_scored);
+        assert_eq!(summary_seq.pairs_scored, 12);
+        assert!(summary_seq.cases_all_metrics_failed.is_empty());
+        assert!(summary_par.cases_all_metrics_failed.is_empty());
+
+        let stored_seq = repo_seq.load_case_results(&run_seq).unwrap();
+        let stored_par = repo_par.load_case_results(&run_par).unwrap();
+        for r in stored_seq.iter().chain(stored_par.iter()) {
+            let s = r.metric_scores.get("keyword_coverage").unwrap();
+            assert!((s.value - 1.0).abs() < 1e-12);
+        }
+    }
+
+    #[tokio::test]
+    async fn score_run_default_concurrency_matches_explicit_default() {
+        // Sanity: score_run() without an explicit concurrency must behave
+        // identically to score_run_with_concurrency(..., DEFAULT_SCORING_CONCURRENCY).
+        let (suite_a, repo_a, run_a) = seed_keyword_run(5);
+        let judge_a = MockJudgeClient::new(JudgeFamily::Kimi, "kimi-k2.5", vec![]);
+        let s_a = score_run(&repo_a, &run_a, &suite_a, &judge_a).await.unwrap();
+
+        let (suite_b, repo_b, run_b) = seed_keyword_run(5);
+        let judge_b = MockJudgeClient::new(JudgeFamily::Kimi, "kimi-k2.5", vec![]);
+        let s_b = score_run_with_concurrency(
+            &repo_b,
+            &run_b,
+            &suite_b,
+            &judge_b,
+            DEFAULT_SCORING_CONCURRENCY,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(s_a.pairs_scored, s_b.pairs_scored);
+    }
+
+    #[tokio::test]
+    async fn score_run_concurrency_zero_falls_back_to_one() {
+        // Defensive: concurrency=0 would be a buffer_unordered no-op (it
+        // requires >= 1). We clamp to 1 inside score_run_with_concurrency
+        // so a misconfigured caller still makes progress.
+        let (suite, repo, run) = seed_keyword_run(3);
+        let judge = MockJudgeClient::new(JudgeFamily::Kimi, "kimi-k2.5", vec![]);
+        let summary = score_run_with_concurrency(&repo, &run, &suite, &judge, 0)
+            .await
+            .unwrap();
+        assert_eq!(summary.pairs_scored, 3);
     }
 }
