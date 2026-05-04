@@ -508,16 +508,33 @@ impl std::fmt::Display for ToolLoopCancelled {
 
 impl std::error::Error for ToolLoopCancelled {}
 
+/// Returned when the agent loop exits because it ran `max_tool_iterations`
+/// turns without producing a final assistant message. Replaces the previous
+/// stringly-typed `anyhow!("Agent exceeded maximum tool iterations …")` so
+/// callers can match on the type rather than substring-grep the chain.
+///
+/// The Display message is kept identical to the legacy formatted string so
+/// downstream telemetry / log queries that match on the human text continue
+/// to work.
+#[derive(Debug)]
+pub(crate) struct ToolIterationLimit {
+    pub limit: usize,
+}
+
+impl std::fmt::Display for ToolIterationLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Agent exceeded maximum tool iterations ({})", self.limit)
+    }
+}
+
+impl std::error::Error for ToolIterationLimit {}
+
 pub(crate) fn is_tool_loop_cancelled(err: &anyhow::Error) -> bool {
     err.chain().any(|source| source.is::<ToolLoopCancelled>())
 }
 
 pub(crate) fn is_tool_iteration_limit_error(err: &anyhow::Error) -> bool {
-    err.chain().any(|source| {
-        source
-            .to_string()
-            .contains("Agent exceeded maximum tool iterations")
-    })
+    err.chain().any(|source| source.is::<ToolIterationLimit>())
 }
 
 /// Execute a single turn of the agent loop: send messages, parse tool calls,
@@ -1495,7 +1512,10 @@ pub(crate) async fn run_tool_call_loop(
             "max_iterations": max_iterations,
         }),
     );
-    anyhow::bail!("Agent exceeded maximum tool iterations ({max_iterations})")
+    Err(ToolIterationLimit {
+        limit: max_iterations,
+    }
+    .into())
 }
 
 /// Build the tool instruction block for the system prompt from concrete tool
