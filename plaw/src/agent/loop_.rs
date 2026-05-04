@@ -34,6 +34,7 @@ mod non_cli_approval;
 mod parsing;
 mod shell_policy;
 mod streaming;
+mod tool_instructions;
 mod tool_io;
 mod tool_taxonomy;
 
@@ -67,6 +68,7 @@ pub(crate) use non_cli_approval::{NonCliApprovalContext, NonCliApprovalPrompt};
 use non_cli_approval::await_non_cli_approval_decision;
 pub(crate) use shell_policy::build_shell_policy_instructions;
 pub(crate) use streaming::{DRAFT_CLEAR_SENTINEL, DRAFT_PROGRESS_SENTINEL};
+pub(crate) use tool_instructions::{build_tool_instructions, build_tool_instructions_from_specs};
 use tool_io::{
     append_calibration_reminder, maybe_inject_cron_add_delivery, tag_injected_content,
     truncate_tool_args_for_progress,
@@ -1064,45 +1066,6 @@ pub(crate) async fn run_tool_call_loop(
 
 /// Build the tool instruction block for the system prompt from concrete tool
 /// specs so the LLM knows how to invoke tools.
-pub(crate) fn build_tool_instructions(tools_registry: &[Box<dyn Tool>]) -> String {
-    let specs: Vec<crate::tools::ToolSpec> =
-        tools_registry.iter().map(|tool| tool.spec()).collect();
-    build_tool_instructions_from_specs(&specs)
-}
-
-/// Build the tool instruction block for the system prompt from concrete tool
-/// specs so the LLM knows how to invoke tools.
-pub(crate) fn build_tool_instructions_from_specs(tool_specs: &[crate::tools::ToolSpec]) -> String {
-    let mut instructions = String::new();
-    instructions.push_str("\n## Tool Use Protocol\n\n");
-    instructions.push_str("To use a tool, wrap a JSON object in <tool_call></tool_call> tags:\n\n");
-    instructions.push_str("```\n<tool_call>\n{\"name\": \"tool_name\", \"arguments\": {\"param\": \"value\"}}\n</tool_call>\n```\n\n");
-    instructions.push_str(
-        "CRITICAL: Output actual <tool_call> tags—never describe steps or give examples.\n\n",
-    );
-    instructions.push_str(
-        "When a tool is needed, emit a real call (not prose), for example:\n\
-<tool_call>\n\
-{\"name\":\"tool_name\",\"arguments\":{}}\n\
-</tool_call>\n\n",
-    );
-    instructions.push_str("You may use multiple tool calls in a single response. ");
-    instructions.push_str("After tool execution, results appear in <tool_result> tags. ");
-    instructions
-        .push_str("Continue reasoning with the results until you can give a final answer.\n\n");
-    instructions.push_str("### Available Tools\n\n");
-
-    for tool in tool_specs {
-        let _ = writeln!(
-            instructions,
-            "**{}**: {}\nParameters: `{}`\n",
-            tool.name, tool.description, tool.parameters
-        );
-    }
-
-    instructions
-}
-
 // ── CLI Entrypoint ───────────────────────────────────────────────────────
 // Wires up all subsystems (observer, runtime, security, memory, tools,
 // provider, hardware RAG, peripherals) and enters either single-shot or
@@ -3378,23 +3341,6 @@ Tail"#;
             0,
             "Raw JSON without wrappers should not be parsed"
         );
-    }
-
-    #[test]
-    fn build_tool_instructions_includes_all_tools() {
-        use crate::security::SecurityPolicy;
-        let security = Arc::new(SecurityPolicy::from_config(
-            &crate::config::AutonomyConfig::default(),
-            std::path::Path::new("/tmp"),
-        ));
-        let tools = tools::default_tools(security);
-        let instructions = build_tool_instructions(&tools);
-
-        assert!(instructions.contains("## Tool Use Protocol"));
-        assert!(instructions.contains("<tool_call>"));
-        assert!(instructions.contains("shell"));
-        assert!(instructions.contains("file_read"));
-        assert!(instructions.contains("file_write"));
     }
 
     #[test]
