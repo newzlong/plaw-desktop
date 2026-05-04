@@ -1805,7 +1805,7 @@ command = "echo hello"
             embedding: None,
         }];
         let prompt = skills_to_prompt(&skills, Path::new("/tmp"));
-        assert!(prompt.contains("<available_skills>"));
+        assert!(prompt.contains("<available_skills "));
         assert!(prompt.contains("<name>test</name>"));
         assert!(prompt.contains("<instruction>Do the thing.</instruction>"));
     }
@@ -1835,7 +1835,7 @@ command = "echo hello"
             crate::config::SkillsPromptInjectionMode::Compact,
         );
 
-        assert!(prompt.contains("<available_skills>"));
+        assert!(prompt.contains("<available_skills "));
         assert!(prompt.contains("<name>test</name>"));
         assert!(prompt.contains("<location>skills/test/SKILL.md</location>"));
         assert!(prompt.contains("loaded on demand"));

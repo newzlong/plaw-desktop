@@ -857,6 +857,11 @@ mod tests {
         }
     }
 
+    // Unix-only: uses `env` command (cmd.exe / PowerShell don't expose it
+    // identically; Windows equivalent would be `set` / `Get-ChildItem env:`).
+    // Tracked under F-1.5; production env-leakage protection applies on
+    // both platforms regardless of this test's coverage gap.
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn shell_does_not_leak_api_key() {
         let _g1 = EnvGuard::set("API_KEY", "sk-test-secret-12345");
@@ -878,6 +883,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // uses `env` command — see shell_does_not_leak_api_key
     #[tokio::test]
     async fn shell_preserves_path_and_home_for_env_command() {
         let tool = ShellTool::new(test_security_with_env_cmd(), test_runtime());
@@ -912,6 +918,7 @@ mod tests {
             .contains("not allowed"));
     }
 
+    #[cfg(unix)] // uses `env` command — see shell_does_not_leak_api_key
     #[tokio::test(flavor = "current_thread")]
     async fn shell_allows_configured_env_passthrough() {
         let _guard = EnvGuard::set("PLAW_TEST_PASSTHROUGH", "db://unit-test");
@@ -948,6 +955,7 @@ mod tests {
         assert!(!vars.contains(&"1NOPE".to_string()));
     }
 
+    #[cfg(unix)] // uses `touch` (Unix) — Windows equivalent is `New-Item`
     #[tokio::test]
     async fn shell_requires_approval_for_medium_risk_command() {
         let security = Arc::new(SecurityPolicy {

@@ -628,6 +628,9 @@ mod tests {
         assert!(result.output.contains("list_test"));
     }
 
+    // Unix-only: relies on `echo` and `sleep` shell builtins available
+    // by name (Windows would need full path or PowerShell syntax).
+    #[cfg(unix)]
     #[tokio::test]
     async fn output_returns_stdout() {
         let tool = make_tool();
@@ -656,6 +659,7 @@ mod tests {
         assert!(result.output.contains("output_capture_test"));
     }
 
+    #[cfg(unix)] // uses `sleep 60` Unix command
     #[tokio::test]
     async fn kill_terminates_process() {
         let tool = make_tool();
@@ -848,6 +852,8 @@ mod tests {
         );
     }
 
+    // Unix-only: syscall detection is Linux/macOS-specific instrumentation.
+    #[cfg(unix)]
     #[tokio::test]
     async fn process_output_runs_syscall_detector_incrementally() {
         let tmp = tempfile::tempdir().expect("temp dir should be created");

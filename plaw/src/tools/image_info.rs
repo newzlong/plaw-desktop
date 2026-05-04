@@ -526,6 +526,8 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
+    // Unix-only: requires symlink creation, which on Windows needs admin.
+    #[cfg(unix)]
     #[tokio::test]
     async fn execute_blocks_symlink_escape_outside_workspace() {
         let temp = tempfile::tempdir().expect("tempdir");

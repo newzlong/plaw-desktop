@@ -8643,7 +8643,7 @@ BTC is currently around $65,000 based on latest tool output."#
 
         let prompt = build_system_prompt(ws.path(), "model", &[], &skills, None, None);
 
-        assert!(prompt.contains("<available_skills>"), "missing skills XML");
+        assert!(prompt.contains("<available_skills "), "missing skills XML");
         assert!(prompt.contains("<name>code-review</name>"));
         assert!(prompt.contains("<description>Review code for bugs</description>"));
         assert!(prompt.contains("SKILL.md</location>"));
@@ -8688,7 +8688,7 @@ BTC is currently around $65,000 based on latest tool output."#
             crate::config::SkillsPromptInjectionMode::Compact,
         );
 
-        assert!(prompt.contains("<available_skills>"), "missing skills XML");
+        assert!(prompt.contains("<available_skills "), "missing skills XML");
         assert!(prompt.contains("<name>code-review</name>"));
         assert!(prompt.contains("<location>skills/code-review/SKILL.md</location>"));
         assert!(prompt.contains("loaded on demand"));

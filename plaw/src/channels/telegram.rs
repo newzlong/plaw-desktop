@@ -3610,13 +3610,24 @@ mod tests {
 
     #[test]
     fn sanitize_attachment_filename_strips_path_traversal() {
+        // Unix-style separator: Path::file_name strips on every platform.
         assert_eq!(
             sanitize_attachment_filename("../../tmp/evil.txt").as_deref(),
             Some("evil.txt")
         );
-        assert_eq!(
-            sanitize_attachment_filename(r"..\\..\\secrets\\token.env").as_deref(),
-            Some("..__..__secrets__token.env")
+        // Windows-style backslash separator: Path::file_name only strips
+        // on Windows (where `\` is a real separator). On Unix the full
+        // string is treated as a single filename, then `\\` is replaced
+        // with `_`. Both outcomes are sanitized — accept either.
+        let bs_input = r"..\\..\\secrets\\token.env";
+        let bs_out = sanitize_attachment_filename(bs_input);
+        assert!(
+            matches!(
+                bs_out.as_deref(),
+                Some("token.env") | Some("..__..__secrets__token.env")
+            ),
+            "unexpected sanitization output: {:?}",
+            bs_out
         );
         assert!(sanitize_attachment_filename("..").is_none());
         assert!(sanitize_attachment_filename("").is_none());
@@ -3659,6 +3670,8 @@ mod tests {
         );
     }
 
+    // Unix-only: requires symlink creation, which on Windows needs admin.
+    #[cfg(unix)]
     #[tokio::test]
     async fn resolve_workspace_attachment_output_path_rejects_symlinked_save_dir() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -3677,6 +3690,8 @@ mod tests {
         assert!(result.is_err(), "symlinked save dir must be rejected");
     }
 
+    // Unix-only: requires symlink creation, which on Windows needs admin.
+    #[cfg(unix)]
     #[tokio::test]
     async fn resolve_workspace_attachment_output_path_rejects_symlink_target_file() {
         let temp = tempfile::tempdir().expect("tempdir");

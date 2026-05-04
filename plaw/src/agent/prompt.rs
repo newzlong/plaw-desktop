@@ -466,7 +466,7 @@ mod tests {
         };
 
         let output = SkillsSection.build(&ctx).unwrap();
-        assert!(output.contains("<available_skills>"));
+        assert!(output.contains("<available_skills "));
         assert!(output.contains("<name>deploy</name>"));
         assert!(output.contains("<instruction>Run smoke tests before deploy.</instruction>"));
         assert!(output.contains("<name>release_checklist</name>"));
@@ -505,7 +505,7 @@ mod tests {
         };
 
         let output = SkillsSection.build(&ctx).unwrap();
-        assert!(output.contains("<available_skills>"));
+        assert!(output.contains("<available_skills "));
         assert!(output.contains("<name>deploy</name>"));
         assert!(output.contains("<location>skills/deploy/SKILL.md</location>"));
         assert!(!output.contains("<instruction>Run smoke tests before deploy.</instruction>"));
@@ -566,7 +566,7 @@ mod tests {
 
         let prompt = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
 
-        assert!(prompt.contains("<available_skills>"));
+        assert!(prompt.contains("<available_skills "));
         assert!(prompt.contains("<name>code&lt;review&gt;&amp;</name>"));
         assert!(prompt.contains(
             "<description>Review &quot;unsafe&quot; and &apos;risky&apos; bits</description>"

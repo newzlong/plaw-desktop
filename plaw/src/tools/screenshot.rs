@@ -426,6 +426,8 @@ mod tests {
         assert!(result.error.unwrap().contains("unsafe for shell execution"));
     }
 
+    // Unix-only: screenshot_commands assumes /tmp-style paths.
+    #[cfg(unix)]
     #[test]
     fn screenshot_command_contains_output_path() {
         let commands = ScreenshotTool::screenshot_commands("/tmp/my_screenshot.png");
@@ -437,6 +439,8 @@ mod tests {
         );
     }
 
+    // Unix-only: requires symlink creation, which on Windows needs admin.
+    #[cfg(unix)]
     #[tokio::test]
     async fn screenshot_blocks_symlink_output_target() {
         let temp = tempfile::tempdir().expect("tempdir");
