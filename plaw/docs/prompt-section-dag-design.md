@@ -228,12 +228,23 @@ Five PRs, each independently revertable.
 - `SystemPromptBuilder` becomes a thin compatibility shim → eventually deleted.
 - Eval: byte-for-byte parity.
 
-### 5.3 PR-3: model L4 as `PerToolCalibrationReminder` node
+### 5.3 PR-3: model L4 as `PerToolCalibrationReminder` node *(deferred)*
 
-- `append_calibration_reminder` deleted from `tool_io.rs`.
-- New `PerToolCalibrationReminder` node added to default DAG with the gate from §4.4.
-- The agent loop's iteration boundary triggers `dag.build(ctx_with_iteration_rebuild = true)` and threads the result back to the LLM as a system-side reminder.
-- Eval: T-2 score must hold (≤ ±1 noise floor) — this is a refactor, not a behavior change.
+**Status:** deferred indefinitely after closer review post PR-2B.
+
+The original sketch proposed making `loop_::tool_io::append_calibration_reminder` a DAG node with `applies` gating on `is_iteration_rebuild`. Three concrete obstacles surfaced when planning the implementation:
+
+1. **Placement contract differs.** The L4 reminder is appended to a *tool result* (which the loop emits as a `<tool_result>...` block carried in user-message content). System-prompt nodes are joined into the **system** message at turn-start. Conflating them in one DAG either:
+   - bypasses the node's `applies` / `dependencies` machinery and just calls `build` directly (ceremony with no structural gain), or
+   - moves the reminder out of the tool-result block into a fresh system-side message between iterations (a behavior change the RFC §1 explicitly disallowed: "not a rewrite of `SystemPromptBuilder`'s output format").
+
+2. **Context type mismatch.** `PromptNode::applies` and `build` take `&PromptContext<'_>`, which carries fields (workspace_dir, tools, skills, identity_config, dispatcher_instructions) the L4 reminder doesn't read. Building a dummy `PromptContext` at the reminder call site to call `build` is awkward; parameterising the trait over context type loses the ergonomic single-trait shape PR-1 chose.
+
+3. **No second concrete reminder yet.** The `add_node` benefit (one place to register iteration-time reminders) only earns its keep when there's a second reminder. Today there's exactly one (the T-2 calibration check). Per `plaw/CLAUDE.md` §3.2 (YAGNI) and §3.3 (rule-of-three), do not extract until repetition justifies the abstraction.
+
+**Decision.** L4 stays as the imperative `append_calibration_reminder` helper in `loop_/tool_io.rs`. The DAG model proved its worth on system-prompt sections (PR-1 / PR-2A / PR-2B); per-iteration text injection is a different abstraction whose shape will become clearer once L2 (freshness metadata) and L3 (grounding verifier) — both also iteration-time concerns — are actually written. PR-5 may revisit a unified iteration-time abstraction at that point with three concrete users to design against.
+
+**Implication for the RFC.** The `NodeId::PerToolCalibrationReminder` variant in `agent/prompt_dag.rs` keeps its reservation (cheap to keep, signals intent) but is not wired. The §4.4 row for it stays as a documented future possibility, not a planned PR.
 
 ### 5.4 PR-4: model L1 scaffold as `IntentScaffold` node
 
@@ -281,10 +292,10 @@ Each PR is a standalone refactor with its own eval-parity gate; revert is `git r
 
 ## 10. Decision criteria for proceeding
 
-This proposal is **not adopted** unless and until:
+The decision criteria below were the ones the *original* draft used to gate adoption. As of 2026-05-04 the proposal has been **partially adopted**: PR-1 (skeleton), PR-2A (9 nodes), and PR-2B (production wiring through `SystemPromptBuilder` shim) have shipped, with byte-parity gates held under eight realistic-fixture tests. PR-3 is deferred per §5.3. PR-4 / PR-5 remain optional and gated on the criteria below:
 
-- a concrete blocker for L1 / L2 / L3 / L4 lands that the current ordered-vector model can't express, or
-- a second collision case in the same shape as math-003 ↔ ambiguity-001 surfaces from a future eval pass, or
+- a concrete blocker for L2 / L3 lands that the current ordered-vector / DAG-of-static-sections model can't express, or
+- a second collision case in the same shape as math-003 ↔ ambiguity-001 surfaces from a future eval pass that L1 + the existing system-prompt rules can't separate, or
 - a contributor accidentally reorders `with_defaults()` and the result merges, breaking an invariant.
 
-Until one of those fires, the existing `SystemPromptBuilder` is sufficient. The DAG is a planned response to a class of failure mode, not a speculative refactor.
+The shipped portions (PR-1, PR-2A, PR-2B) earned their keep by replacing the implicit ordering invariants of the legacy vec-iteration with a typed dependency graph + cycle detection + parity-gate test suite. Further migration is YAGNI-gated.
