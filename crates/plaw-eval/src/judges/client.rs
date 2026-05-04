@@ -134,6 +134,64 @@ impl JudgeClient for RetryingJudgeClient {
     }
 }
 
+/// Wraps any [`JudgeClient`] with a SHA256-keyed response cache backed by
+/// the eval SQLite store.
+///
+/// Why: a single eval suite issues thousands of judge calls (n=400 cases ×
+/// multiple metrics × repetitions). Re-running a baseline after a prompt
+/// tweak otherwise re-pays the entire judge bill. Cache key is
+/// `SHA256(system, user, model)` so prompt-template or model changes
+/// naturally invalidate without manual purge.
+///
+/// Composition: place this **outside** [`RetryingJudgeClient`] —
+/// cache hits short-circuit before any network call or retry budget; on
+/// miss, retries operate against the real backend, and the eventual
+/// success is cached. Errors are **not** cached.
+pub struct CachedJudgeClient {
+    inner: std::sync::Arc<dyn JudgeClient>,
+    cache: std::sync::Arc<crate::runner::cache::JudgeCache>,
+}
+
+impl CachedJudgeClient {
+    pub fn new(
+        inner: std::sync::Arc<dyn JudgeClient>,
+        cache: std::sync::Arc<crate::runner::cache::JudgeCache>,
+    ) -> Self {
+        Self { inner, cache }
+    }
+
+    /// Borrow the cache handle for stat reporting (hits/misses/hit_rate).
+    pub fn cache(&self) -> &crate::runner::cache::JudgeCache {
+        &self.cache
+    }
+}
+
+#[async_trait]
+impl JudgeClient for CachedJudgeClient {
+    fn family(&self) -> JudgeFamily {
+        self.inner.family()
+    }
+    fn model(&self) -> &str {
+        self.inner.model()
+    }
+    async fn complete(&self, system: &str, user: &str) -> Result<JudgeCompletion> {
+        let key = crate::runner::cache::cache_key(system, user, self.inner.model());
+        if let Some(cached_text) = self.cache.get(&key)? {
+            return Ok(JudgeCompletion {
+                text: cached_text,
+                family: self.inner.family(),
+                model: self.inner.model().to_string(),
+            });
+        }
+        let completion = self.inner.complete(system, user).await?;
+        // Store only on success — errors must not poison the cache.
+        if let Err(e) = self.cache.set(&key, &completion.text) {
+            tracing::warn!(error = %e, "judge cache set failed (continuing)");
+        }
+        Ok(completion)
+    }
+}
+
 /// Default per-call timeout if `with_timeout` isn't set.
 pub const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -528,5 +586,126 @@ mod tests {
         assert!(r.is_ok());
         // No retry needed — only 1 inner call.
         assert_eq!(inner.attempt_count(), 1);
+    }
+
+    /// Test-only judge that records each call's (system, user) and serves
+    /// canned responses — used by the cache tests to verify that a cache
+    /// hit short-circuits the inner client.
+    struct CountingJudge {
+        calls: std::sync::Mutex<Vec<(String, String)>>,
+        response: String,
+    }
+    impl CountingJudge {
+        fn new(response: &str) -> Self {
+            Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+                response: response.into(),
+            }
+        }
+        fn call_count(&self) -> usize {
+            self.calls.lock().unwrap().len()
+        }
+    }
+    #[async_trait]
+    impl JudgeClient for CountingJudge {
+        fn family(&self) -> JudgeFamily {
+            JudgeFamily::Kimi
+        }
+        fn model(&self) -> &str {
+            "counting-mock"
+        }
+        async fn complete(&self, system: &str, user: &str) -> Result<JudgeCompletion> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((system.to_string(), user.to_string()));
+            Ok(JudgeCompletion {
+                text: self.response.clone(),
+                family: JudgeFamily::Kimi,
+                model: "counting-mock".into(),
+            })
+        }
+    }
+
+    fn fresh_cache() -> std::sync::Arc<crate::runner::cache::JudgeCache> {
+        let repo = std::sync::Arc::new(crate::storage::EvalRepo::open_in_memory().unwrap());
+        std::sync::Arc::new(crate::runner::cache::JudgeCache::new(repo))
+    }
+
+    #[tokio::test]
+    async fn cached_misses_then_hits_skip_inner_call() {
+        let inner = std::sync::Arc::new(CountingJudge::new(r#"{"score":0.9}"#));
+        let inner_dyn: std::sync::Arc<dyn JudgeClient> = inner.clone();
+        let cached = CachedJudgeClient::new(inner_dyn, fresh_cache());
+
+        // Miss: inner is called.
+        let r1 = cached.complete("sys", "user").await.unwrap();
+        assert!(r1.text.contains("score"));
+        assert_eq!(inner.call_count(), 1);
+
+        // Hit: inner must NOT be called again.
+        let r2 = cached.complete("sys", "user").await.unwrap();
+        assert_eq!(r2.text, r1.text);
+        assert_eq!(
+            inner.call_count(),
+            1,
+            "second call should hit cache, not inner"
+        );
+
+        let stats = cached.cache().stats();
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.misses, 1);
+    }
+
+    #[tokio::test]
+    async fn cached_distinct_inputs_have_distinct_keys() {
+        let inner = std::sync::Arc::new(CountingJudge::new(r#"{"score":1.0}"#));
+        let inner_dyn: std::sync::Arc<dyn JudgeClient> = inner.clone();
+        let cached = CachedJudgeClient::new(inner_dyn, fresh_cache());
+
+        cached.complete("sys-a", "user").await.unwrap();
+        cached.complete("sys-b", "user").await.unwrap();
+        cached.complete("sys-a", "user-different").await.unwrap();
+
+        // Each unique (system, user) pair forces a fresh inner call.
+        assert_eq!(inner.call_count(), 3);
+
+        // Re-issuing the first variant hits cache.
+        cached.complete("sys-a", "user").await.unwrap();
+        assert_eq!(inner.call_count(), 3);
+    }
+
+    /// Test-only judge that always errors. Used to verify that errors are
+    /// never written to the cache (so a transient failure can't poison
+    /// future runs).
+    struct AlwaysErrJudge;
+    #[async_trait]
+    impl JudgeClient for AlwaysErrJudge {
+        fn family(&self) -> JudgeFamily {
+            JudgeFamily::Kimi
+        }
+        fn model(&self) -> &str {
+            "always-err"
+        }
+        async fn complete(&self, _system: &str, _user: &str) -> Result<JudgeCompletion> {
+            Err(anyhow!("inner permanently fails"))
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_does_not_store_errors() {
+        let inner_dyn: std::sync::Arc<dyn JudgeClient> = std::sync::Arc::new(AlwaysErrJudge);
+        let cache = fresh_cache();
+        let cached = CachedJudgeClient::new(inner_dyn, cache.clone());
+
+        let r1 = cached.complete("sys", "user").await;
+        assert!(r1.is_err());
+        let r2 = cached.complete("sys", "user").await;
+        assert!(r2.is_err());
+
+        // Both calls were misses; neither poisoned the cache with the error.
+        let stats = cache.stats();
+        assert_eq!(stats.misses, 2);
+        assert_eq!(stats.hits, 0);
     }
 }

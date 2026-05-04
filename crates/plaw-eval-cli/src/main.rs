@@ -581,8 +581,16 @@ async fn cmd_run(
         // 429 rate limit, connection reset) don't leave cases with
         // empty metric_scores. 3 attempts × 1s/2s backoff catches the
         // common case without doubling cost on permanent failures.
-        let judge: std::sync::Arc<dyn plaw_eval::judges::JudgeClient> =
+        let retried: std::sync::Arc<dyn plaw_eval::judges::JudgeClient> =
             std::sync::Arc::new(plaw_eval::judges::RetryingJudgeClient::new(raw_judge, 3));
+        // Cache wraps the retry layer so cache hits short-circuit before
+        // any network call, while misses still benefit from retry. Errors
+        // are not cached. Re-running the same suite (same judge model)
+        // therefore replays scores from the eval SQLite DB instead of
+        // re-paying the judge bill.
+        let cache = std::sync::Arc::new(plaw_eval::runner::cache::JudgeCache::new(repo.clone()));
+        let judge: std::sync::Arc<dyn plaw_eval::judges::JudgeClient> =
+            std::sync::Arc::new(plaw_eval::judges::CachedJudgeClient::new(retried, cache));
 
         let mut cfg = RunnerConfig::new(suite.clone(), plaw, repo.clone());
         cfg.cancel = cancel.clone();
