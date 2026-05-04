@@ -20,4 +20,4 @@ Source anglaise:
 ## Notes de mise à jour
 
 - Ajout de `provider.reasoning_level` (OpenAI Codex `/responses`). Voir la source anglaise pour les détails.
-- Valeur par défaut de `agent.max_tool_iterations` augmentée à `20` (fallback sûr si `0`).
+- Valeur par défaut de `agent.max_tool_iterations` : `i64::MAX as usize` (effectivement illimitée). Les bornes anti-boucle par outil dans la boucle de l'agent évitent la répétition incontrôlée ; définissez une valeur finie explicite si vous avez besoin de bornes strictes.

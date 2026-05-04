@@ -315,13 +315,15 @@ async fn agent_handles_mixed_tool_success_and_failure() {
 // TG4.3: Iteration limit enforcement (#777)
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// Agent should not exceed max_tool_iterations (default=20) even with
-/// a provider that keeps returning tool calls
+/// Agent should not exceed an explicit `max_tool_iterations` cap even with a
+/// provider that keeps returning tool calls. The runtime default is
+/// "effectively unlimited" (i64::MAX) so callers that need a bound must set
+/// one explicitly via `AgentConfig`.
 #[tokio::test]
 async fn agent_respects_max_tool_iterations() {
     let (counting_tool, count) = CountingTool::new();
 
-    // Create 30 tool call responses - more than the default limit of 20
+    // Create 30 tool call responses - more than the explicit cap of 20.
     let mut responses: Vec<ChatResponse> = (0..30)
         .map(|i| {
             tool_response(vec![ToolCall {
@@ -335,7 +337,20 @@ async fn agent_respects_max_tool_iterations() {
     responses.push(text_response("Final response after iterations"));
 
     let provider = Box::new(MockProvider::new(responses));
-    let mut agent = build_agent(provider, vec![Box::new(counting_tool)]);
+    let agent_cfg = plaw::config::AgentConfig {
+        max_tool_iterations: 20,
+        ..plaw::config::AgentConfig::default()
+    };
+    let mut agent = Agent::builder()
+        .provider(provider)
+        .tools(vec![Box::new(counting_tool)])
+        .memory(make_memory())
+        .observer(make_observer())
+        .tool_dispatcher(Box::new(NativeToolDispatcher))
+        .workspace_dir(std::env::temp_dir())
+        .config(agent_cfg)
+        .build()
+        .unwrap();
 
     // Agent should complete (either by hitting iteration limit or running out of responses)
     let result = agent.turn("keep calling tools").await;
@@ -345,7 +360,7 @@ async fn agent_respects_max_tool_iterations() {
     let invocations = *count.lock().unwrap();
     assert!(
         invocations <= 20,
-        "tool invocations ({invocations}) should not exceed default max_tool_iterations (20)"
+        "tool invocations ({invocations}) should not exceed explicit max_tool_iterations (20)"
     );
 }
 
