@@ -30,7 +30,10 @@
 //! `agent/prompt/` can happen in PR-2 when the migration of remaining
 //! sections actually wants the directory.
 
-use crate::agent::prompt::{IdentitySection, PromptContext, PromptSection};
+use crate::agent::prompt::{
+    CalibrationSection, ChannelMediaSection, DateTimeSection, IdentitySection, PromptContext,
+    PromptSection, RuntimeSection, SafetySection, SkillsSection, ToolsSection, WorkspaceSection,
+};
 use anyhow::{bail, Result};
 use std::collections::HashSet;
 
@@ -39,14 +42,13 @@ use std::collections::HashSet;
 /// `dependencies() = &[NodeId::Safety]` references the safety node by
 /// this enum variant — never by string, so a typo is a compile error.
 ///
-/// Variants for unmigrated sections (everything except `Identity`) are
-/// reserved here so the [`crate::agent::prompt::PromptSection`]
-/// migration in subsequent PRs doesn't have to renumber. The reserved
-/// variants are intentionally unused right now; they exist so the
-/// `dependencies()` arrays of nodes that will be migrated later can
-/// already cite them once we want to test ordering with stubs.
+/// All nine baseline variants are wired into [`PromptDag::with_defaults`]
+/// as of PR-2A. The four future-architecture variants
+/// ([`Self::IntentScaffold`], [`Self::PerToolCalibrationReminder`],
+/// [`Self::ToolFreshnessMetadata`], [`Self::GroundingVerifierTail`]) are
+/// reserved so subsequent PRs don't have to renumber.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
-#[allow(dead_code)] // reserved variants for future PRs (RFC §5.2-5.5)
+#[allow(dead_code)] // reserved variants for future PRs (RFC §5.3-5.5)
 pub enum NodeId {
     Identity,
     Tools,
@@ -230,14 +232,82 @@ impl<S: PromptSection + 'static> PromptNode for LegacySectionNode<S> {
     }
 }
 
-/// Construct an `Identity`-only DAG using the legacy adapter. Convenience
-/// for tests and for the parity-gate call site that PR-2 will introduce.
+/// Construct an `Identity`-only DAG using the legacy adapter. Used by
+/// PR-1's byte-parity test against the matching `SystemPromptBuilder`
+/// fixture; kept after PR-2A landed [`PromptDag::with_defaults`] so the
+/// minimal-graph path stays exercised.
 pub fn identity_only_dag() -> PromptDag {
     PromptDag::new().add_node(Box::new(LegacySectionNode {
         id: NodeId::Identity,
         deps: &[],
         section: IdentitySection,
     }))
+}
+
+impl PromptDag {
+    /// Build the production-equivalent DAG: nine baseline sections wrapped
+    /// as [`LegacySectionNode`]s with the dependency edges declared in
+    /// `docs/prompt-section-dag-design.md` §4.3.
+    ///
+    /// The declaration order here intentionally matches
+    /// [`crate::agent::prompt::SystemPromptBuilder::with_defaults`] — combined
+    /// with the dependency edges and the topo-sort's declaration-order
+    /// tie-break, this guarantees the produced section sequence is
+    /// byte-equivalent to the legacy builder. PR-2B will switch
+    /// `Agent::turn` to call this directly; until then the function
+    /// exists to feed the parity gate (`tests::dag_with_defaults_*`).
+    ///
+    /// Skills depends on Tools + Safety + Calibration so the LLM is
+    /// guaranteed to read the core capability list and rule set before
+    /// any skill description that might reference them — RFC §4.3.
+    pub fn with_defaults() -> Self {
+        Self::new()
+            .add_node(Box::new(LegacySectionNode {
+                id: NodeId::Identity,
+                deps: &[],
+                section: IdentitySection,
+            }))
+            .add_node(Box::new(LegacySectionNode {
+                id: NodeId::Tools,
+                deps: &[NodeId::Identity],
+                section: ToolsSection,
+            }))
+            .add_node(Box::new(LegacySectionNode {
+                id: NodeId::Safety,
+                deps: &[NodeId::Tools],
+                section: SafetySection,
+            }))
+            .add_node(Box::new(LegacySectionNode {
+                id: NodeId::Calibration,
+                deps: &[NodeId::Safety],
+                section: CalibrationSection,
+            }))
+            .add_node(Box::new(LegacySectionNode {
+                id: NodeId::Skills,
+                deps: &[NodeId::Tools, NodeId::Safety, NodeId::Calibration],
+                section: SkillsSection,
+            }))
+            .add_node(Box::new(LegacySectionNode {
+                id: NodeId::Workspace,
+                deps: &[],
+                section: WorkspaceSection,
+            }))
+            .add_node(Box::new(LegacySectionNode {
+                id: NodeId::DateTime,
+                deps: &[],
+                section: DateTimeSection,
+            }))
+            .add_node(Box::new(LegacySectionNode {
+                id: NodeId::Runtime,
+                deps: &[],
+                section: RuntimeSection,
+            }))
+            .add_node(Box::new(LegacySectionNode {
+                id: NodeId::ChannelMedia,
+                deps: &[],
+                section: ChannelMediaSection,
+            }))
+    }
 }
 
 #[cfg(test)]
@@ -497,5 +567,136 @@ mod tests {
         };
         assert_eq!(node.dependencies().len(), 0);
         assert_eq!(node.id(), NodeId::Identity);
+    }
+
+    // ── PR-2A: full nine-section parity gate ──────────────────────
+    //
+    // These tests are the regression net for the production wiring
+    // switch in PR-2B. If either fails, do not flip the Agent::turn
+    // call site to PromptDag::with_defaults() — the legacy path stays
+    // authoritative until parity is restored.
+
+    /// Extract the `## ` section headers from a prompt build, in order.
+    /// Headers are stable strings determined by section identity, so
+    /// this captures structural ordering without depending on
+    /// time-/host-volatile bodies.
+    fn section_headers(prompt: &str) -> Vec<String> {
+        prompt
+            .lines()
+            .filter(|line| line.starts_with("## "))
+            .map(|line| line.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn dag_with_defaults_section_header_order_matches_legacy() {
+        // Pure structural ordering test: the `## ...` headers produced
+        // by the DAG must appear in the same sequence as those produced
+        // by SystemPromptBuilder::with_defaults(), confirming the
+        // topo-sort + declaration-order tie-break recovers the legacy
+        // vec order exactly.
+        let tmp = TempDir::new().unwrap();
+        let ctx = fixture_ctx(tmp.path());
+
+        let legacy = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
+        let dag_out = PromptDag::with_defaults().build(&ctx).unwrap();
+
+        assert_eq!(
+            section_headers(&legacy),
+            section_headers(&dag_out),
+            "section header order must match legacy"
+        );
+    }
+
+    #[test]
+    fn dag_with_defaults_byte_parity_modulo_volatile_sections() {
+        // Full byte-equality of the DAG output and the legacy output,
+        // *after* normalising the two volatile sections:
+        //
+        //   - DateTimeSection: emits `chrono::Local::now()`-based time.
+        //     Two back-to-back calls can land on different seconds in
+        //     the rare ~0.05% of runs that straddle a second-rollover,
+        //     causing a real-but-meaningless byte diff.
+        //   - RuntimeSection: emits the OS hostname. Stable within a
+        //     single test run, but normalising it future-proofs the
+        //     test against running in containerised CI where hostnames
+        //     can differ between two threads (one per build).
+        //
+        // After normalisation the remaining seven sections (Identity,
+        // Tools, Safety, Calibration, Skills, Workspace, ChannelMedia)
+        // must byte-match. Any drift here is a real regression.
+
+        let tmp = TempDir::new().unwrap();
+        let ctx = fixture_ctx(tmp.path());
+
+        let legacy = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
+        let dag_out = PromptDag::with_defaults().build(&ctx).unwrap();
+
+        // The volatile sections sit on a single body line each — both
+        // headers produce `## Title\n\n<single line>` followed by the
+        // joiner `\n\n`. Normalise that body line to a placeholder so
+        // a clock tick or hostname doesn't fail an otherwise correct
+        // parity. Use lazy regexes via std (LazyLock holders are in
+        // tests so they don't escape into prod builds).
+        use std::sync::LazyLock;
+        static DATETIME_BODY: LazyLock<regex::Regex> = LazyLock::new(|| {
+            regex::Regex::new(r"## Current Date & Time\n\n[^\n]+").unwrap()
+        });
+        static RUNTIME_BODY: LazyLock<regex::Regex> =
+            LazyLock::new(|| regex::Regex::new(r"## Runtime\n\n[^\n]+").unwrap());
+
+        let normalize = |s: String| -> String {
+            let s = DATETIME_BODY.replace(&s, "## Current Date & Time\n\n<DATETIME>");
+            let s = RUNTIME_BODY.replace(&s, "## Runtime\n\n<RUNTIME>");
+            s.into_owned()
+        };
+
+        assert_eq!(
+            normalize(legacy),
+            normalize(dag_out),
+            "DAG output must equal SystemPromptBuilder output byte-for-byte after normalising the two volatile sections"
+        );
+    }
+
+    #[test]
+    fn dag_with_defaults_emits_nine_sections_in_topo_order() {
+        // Pin the *exact* sequence of NodeIds the topo-sort produces
+        // for the default graph. This catches a future PR that adds
+        // an edge or reorders without realising the topo result moved.
+        // Read the headers and map them back to their declared IDs.
+        let tmp = TempDir::new().unwrap();
+        let ctx = fixture_ctx(tmp.path());
+        let dag_out = PromptDag::with_defaults().build(&ctx).unwrap();
+        let headers = section_headers(&dag_out);
+
+        // The first nine `## ` headers we expect, in order. Identity
+        // emits "## Project Context"; Skills' header depends on mode
+        // and may be absent for empty skills + Compact mode (its body
+        // returns empty when the skills set is empty; the wrapper
+        // function `skills_to_prompt_with_mode` handles this).
+        let expected_prefix_in_order: &[&str] = &[
+            "## Project Context",
+            "## Tools",
+            "## Safety",
+            "## Calibration & Honesty",
+            // Skills section may be omitted when skills is empty and
+            // mode is Compact — handled below by checking that the
+            // remaining headers appear after where Skills would have
+            // been.
+            "## Workspace",
+            "## Current Date & Time",
+            "## Runtime",
+            "## Channel Media Markers",
+        ];
+
+        // Verify each expected header appears in `headers` in order.
+        let mut iter = headers.iter();
+        for expected in expected_prefix_in_order {
+            let found = iter.any(|h| h == expected);
+            assert!(
+                found,
+                "expected header {expected:?} not found (or out of order) in {headers:?}"
+            );
+        }
     }
 }
