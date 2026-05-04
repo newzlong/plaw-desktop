@@ -27,6 +27,7 @@ mod errors;
 mod execution;
 pub(crate) mod history;
 mod parsing;
+mod tool_taxonomy;
 
 use context::{build_context, build_hardware_context};
 pub(crate) use errors::{
@@ -46,6 +47,9 @@ use parsing::{
     parse_perl_style_tool_calls, parse_structured_tool_calls, parse_tool_call_value,
     parse_tool_calls, parse_tool_calls_from_json_value, tool_call_signature, ParsedToolCall,
 };
+use tool_taxonomy::{
+    is_external_content_tool, ANTI_LOOP_EXEMPT_TOOLS, MAX_SAME_TOOL_PER_TURN, TIGHT_LOOP_TOOLS,
+};
 
 /// Minimum characters per chunk when relaying LLM text to a streaming draft.
 const STREAM_CHUNK_MIN_CHARS: usize = 80;
@@ -61,48 +65,6 @@ const STREAM_CHUNK_MIN_CHARS: usize = 80;
 /// gateway::api::tests::normalize_dashboard_config_toml_*. i64::MAX is
 /// still effectively "no built-in cap" (~9.2 quintillion).
 const DEFAULT_MAX_TOOL_ITERATIONS: usize = i64::MAX as usize;
-
-/// Maximum times the same tool can be called in a single turn before anti-loop protection kicks in.
-/// Prevents adversarial web content from inducing the AI into fetch/search/browser loops.
-const MAX_SAME_TOOL_PER_TURN: usize = 6;
-
-/// Tighter per-turn cap for tools where adversarial / non-existent queries
-/// (fake citations, hallucinated papers) cause the agent to retry many
-/// rephrasings before giving up. 3 is enough to try a few variations.
-const TIGHT_LOOP_TOOLS: &[(&str, usize)] = &[
-    ("web_search_tool", 3),
-];
-
-/// Tools exempt from per-turn frequency limits.
-/// Browser automation naturally requires many sequential calls (open → snapshot → click → wait → ...).
-/// File operations (reading/writing multiple files) are also normal in complex tasks.
-/// Shell and delegate tools are also exempt since complex tasks (e.g. PPT generation) need many calls.
-const ANTI_LOOP_EXEMPT_TOOLS: &[&str] = &[
-    // File operations — multi-file generation (e.g. 10 HTML slides → PPT)
-    "file_read", "file_write", "file_edit", "glob_search", "content_search",
-    // Shell — complex tasks chain many commands
-    "shell",
-    // Browser — navigation requires many sequential calls
-    "browser", "browser_open", "screenshot",
-    // Delegation — parallel/sub-agent orchestration
-    "delegate", "parallel_delegate",
-    // Web — research tasks may fetch many pages
-    "web_fetch", "http_request",
-];
-
-/// Tools that return external (untrusted) content which may contain prompt injection.
-const EXTERNAL_CONTENT_TOOLS: &[&str] = &[
-    "web_fetch",
-    "web_search_tool",
-    "browser",
-    "http_request",
-    "content_search", // search results from user files could also be adversarial
-];
-
-/// Check if a tool produces external/untrusted content.
-fn is_external_content_tool(name: &str) -> bool {
-    EXTERNAL_CONTENT_TOOLS.iter().any(|t| name.starts_with(t) || name == *t)
-}
 
 /// Scan external tool output for prompt injection and prepend warning if detected.
 fn tag_injected_content(tool_name: &str, output: String) -> String {
