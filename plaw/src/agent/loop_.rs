@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+mod autosave;
 mod budgets;
 mod context;
 mod credentials;
@@ -34,6 +35,7 @@ mod streaming;
 mod tool_io;
 mod tool_taxonomy;
 
+use autosave::autosave_memory_key;
 use context::{build_context, build_hardware_context};
 pub(crate) use credentials::scrub_credentials;
 pub(crate) use errors::{
@@ -75,10 +77,6 @@ tokio::task_local! {
 
 tokio::task_local! {
     static TOOL_LOOP_NON_CLI_APPROVAL_CONTEXT: Option<NonCliApprovalContext>;
-}
-
-fn autosave_memory_key(prefix: &str) -> String {
-    format!("{prefix}_{}", Uuid::new_v4())
 }
 
 fn build_assistant_history_with_tool_calls(text: &str, tool_calls: &[ToolCall]) -> String {
@@ -3514,16 +3512,6 @@ Tail"#;
         assert!(history[2].content.contains("Compaction summary"));
         assert!(history[3].content.contains("recent 1"));
         assert!(history[4].content.contains("recent 2"));
-    }
-
-    #[test]
-    fn autosave_memory_key_has_prefix_and_uniqueness() {
-        let key1 = autosave_memory_key("user_msg");
-        let key2 = autosave_memory_key("user_msg");
-
-        assert!(key1.starts_with("user_msg_"));
-        assert!(key2.starts_with("user_msg_"));
-        assert_ne!(key1, key2);
     }
 
     #[tokio::test]
