@@ -354,6 +354,11 @@ impl PromptGuard {
                 Regex::new(r"(发|送|转|私发|打赏).{0,10}(红包|转账|汇款|钱|款项|余额)").unwrap(),
                 Regex::new(r"(支付|付款|打款|充值|提现|下单|购买).{0,8}(给|到|至)").unwrap(),
                 Regex::new(r"\d+\s*(元|块|￥|¥).{0,6}(红包|转账)").unwrap(),
+                // Compound verb + amount + destination ("转账500到X账户",
+                // "汇款 200 给某人"). The first regex above misses these
+                // because "转账" needs to start the second capture, which
+                // collides with "转" matching the first capture.
+                Regex::new(r"(转账|汇款|打款|付款)\s*\d+.{0,15}(到|给|至|账户)").unwrap(),
                 // English: send money, transfer funds, make payment
                 Regex::new(r"(?i)(send|transfer|wire|pay|remit)\s+(money|funds|payment|cash|\$|\d+\s*(dollars?|yuan|rmb|usd|eur))").unwrap(),
                 // Crypto
@@ -416,8 +421,14 @@ impl PromptGuard {
                 Regex::new(r"(?i)(cat|type|read).{0,20}(\.env|config\.toml|id_rsa|shadow|passwd|credentials)").unwrap(),
                 // Leak system prompt / internal instructions
                 Regex::new(r"(?i)(print|output|repeat|copy|paste|echo).{0,15}(system\s*prompt|instructions|config)").unwrap(),
-                // Chinese: leak, steal, send out
+                // Chinese: leak, steal, send out (verb-first order:
+                // "泄露密码", "发送到X 这个地址")
                 Regex::new(r"(泄露|偷取|窃取|外传|发送到|上传到|导出).{0,10}(密码|密钥|秘密|配置|API|key|token|数据|聊天记录|通讯录)").unwrap(),
+                // Chinese: object-first order ("把API密钥发送到X").
+                // Verbs are the same set as above; written second here so
+                // attackers using natural Chinese topic-comment word order
+                // are also caught.
+                Regex::new(r"(密码|密钥|秘密|配置|API|key|token|数据|聊天记录|通讯录).{0,15}(泄露|偷取|窃取|外传|发送到|上传到|导出)").unwrap(),
                 // Read private data and send
                 Regex::new(r"(读取|获取|打开).{0,10}(私密|隐私|机密|敏感).{0,6}(文件|数据|信息)").unwrap(),
                 // Base64 encode secrets for exfiltration

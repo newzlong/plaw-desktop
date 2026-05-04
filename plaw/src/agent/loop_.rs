@@ -50,7 +50,13 @@ const STREAM_CHUNK_MIN_CHARS: usize = 80;
 /// Used as a safe fallback when `max_tool_iterations` is unset or configured as zero.
 /// Set high enough to allow full-chain autonomous work (read → edit → build → fix → repeat)
 /// while still preventing infinite runaway. Mid-loop trim keeps context manageable.
-const DEFAULT_MAX_TOOL_ITERATIONS: usize = usize::MAX;
+///
+/// Must be ≤ i64::MAX so the value round-trips through TOML (whose
+/// integer type is i64). usize::MAX would overflow on 64-bit platforms
+/// and break dashboard config serialize→parse cycles — see
+/// gateway::api::tests::normalize_dashboard_config_toml_*. i64::MAX is
+/// still effectively "no built-in cap" (~9.2 quintillion).
+const DEFAULT_MAX_TOOL_ITERATIONS: usize = i64::MAX as usize;
 
 /// Maximum times the same tool can be called in a single turn before anti-loop protection kicks in.
 /// Prevents adversarial web content from inducing the AI into fetch/search/browser loops.

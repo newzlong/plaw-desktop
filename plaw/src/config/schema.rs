@@ -652,7 +652,11 @@ pub struct AgentConfig {
 }
 
 fn default_agent_max_tool_iterations() -> usize {
-    usize::MAX
+    // i64::MAX (not usize::MAX) so the value round-trips through TOML
+    // serialization. TOML integers are i64, and usize::MAX overflows on
+    // 64-bit. i64::MAX is still effectively "no built-in cap" — see
+    // agent::loop_::DEFAULT_MAX_TOOL_ITERATIONS for the same reasoning.
+    i64::MAX as usize
 }
 
 fn default_agent_max_history_messages() -> usize {
@@ -7260,7 +7264,9 @@ reasoning_level = "high"
     async fn agent_config_defaults() {
         let cfg = AgentConfig::default();
         assert!(!cfg.compact_context);
-        assert_eq!(cfg.max_tool_iterations, 20);
+        // Originally 20; bumped to "effectively unlimited" (i64::MAX, not
+        // usize::MAX, so it round-trips through TOML).
+        assert_eq!(cfg.max_tool_iterations, i64::MAX as usize);
         assert_eq!(cfg.max_history_messages, 50);
         assert!(!cfg.parallel_tools);
         assert_eq!(cfg.tool_dispatcher, "auto");
@@ -9170,6 +9176,12 @@ default_model = "legacy-model"
         let _ = fs::remove_dir_all(temp_home).await;
     }
 
+    // Unix-only: relies on HOME env var to override the home dir.
+    // Windows uses USERPROFILE (and dirs::home_dir doesn't read HOME),
+    // so the test's `set_var("HOME", ...)` doesn't redirect the marker
+    // path. Cross-platform fix would need both env vars + a deeper
+    // home-dir override hook in production code.
+    #[cfg(unix)]
     #[test]
     async fn persist_active_workspace_marker_is_cleared_for_default_config_dir() {
         let _env_guard = env_override_lock().await;
