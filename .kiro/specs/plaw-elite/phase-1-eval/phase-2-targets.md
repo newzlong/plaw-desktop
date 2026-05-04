@@ -305,10 +305,13 @@ ambiguity-001 主目标修了（2.60 → 3.00），代价是 math-003 从 v1 的
 | T-6 | 模糊请求反问 | system prompt |
 | T-7 | refusal calibration | system prompt + 训练 |
 | T-8 | 多步推理 | system prompt（CoT）/ 训练 |
-| T-2 | post-tool-use confabulation | per-tool calibration reminder (部分) + grounding 层 (Phase 3) |
+| T-2 | post-tool-use confabulation | per-tool calibration reminder (部分) + grounding 层 → Phase 3 L2 |
 | T-9 | web_search fail-fast | plaw 工具代码 |
-| T-10 | ambiguity ↔ wrong-premise 互斥 | 训练 / router / 工具门 |
+| T-10 | ambiguity ↔ wrong-premise 互斥 | intent router → Phase 3 L1 |
 | E-1 | guard 识别 | plaw-eval runner |
+
+> Phase 3 入口见 [`../phase-3-arch/README.md`](../phase-3-arch/README.md)。
+> 撞墙的 case（T-2 / T-3 / T-7 / T-10）映射到 Phase 3 4 个架构层。
 
 **8 个 prompt 改动 + 1 个工具代码 + 1 个 prompt-饱和 / 改训练 + 1 个 plaw-eval 修复** = Phase 2 的具象目标清单。每个都有可量化的 PASS 条件（case 分数从 X 涨到 Y）。
 
