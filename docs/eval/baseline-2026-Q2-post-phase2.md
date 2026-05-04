@@ -3,7 +3,7 @@ title: Plaw Baseline — Post-Phase-2 (2026-Q2)
 date: 2026-05-04
 runs:
   chat_quality_n400: "d5ae203b-65d2-4172-bfd2-638dadfd9f91"  # 40 cases × 10 reps
-  tool_routing_n320: "9643e17c-..."                          # pending
+  tool_routing_n320: "9643e17c-8819-4151-acdc-3de1e015f12e"  # 32 cases × 10 reps
 plaw_version: "Phase 2 final state — v2 prompt + T-9 anti-loop + T-2 reminder + E-1"
 default_judge: kimi-coder/k2p5 (api.kimi.com/coding) with strict G-Eval prompt
 sample: 40 cases × 10 reps = 400 obs (chat_quality); 32 × 10 = 320 obs (tool_routing)
@@ -12,19 +12,28 @@ predecessor: docs/eval/baseline-2026-Q2.md (pre-Phase-2)
 
 # Plaw Baseline — Post-Phase-2 (2026-Q2)
 
-**Status**：✅ chat_quality 锁定，tool_routing 跑中（run `9643e17c`，
-12:30 起）。
+**Status**：✅ 完整 baseline 锁定（chat_quality 400 obs + tool_routing 320 obs）。
 
 Phase 3 任何改动都和这里的数字比，不再回头比 pre-Phase-2 baseline
 （用的 G-Eval prompt 不一样，对比无效，详见下文）。
 
 ## 锁定的数字 (n=400, 10 reps, cluster SE pending)
 
-| Suite | Metric | n_obs | n_scored | mean | 95% CI |
-|-------|--------|---:|---:|---:|---|
-| chat_quality | g_eval | 400 | 227 | **0.7920** | [0.7661, 0.8178] |
-| chat_quality | keyword_coverage | 400 | 217 | **0.7865** | [0.7462, 0.8267] |
-| tool_routing | tool_call_accuracy | (320 pending — run `9643e17c` 跑中，pace ~25s/obs) | | | |
+| Suite | Metric | n_obs | n_scored | mean | 95% CI | clustered SE |
+|-------|--------|---:|---:|---:|---|---:|
+| chat_quality | g_eval | 400 | 227 | **0.7920** | [0.7661, 0.8178] | — |
+| chat_quality | keyword_coverage | 400 | 217 | **0.7865** | [0.7462, 0.8267] | — |
+| tool_routing | tool_call_accuracy | 320 | 243 | **0.7475** | [0.6742, 0.8208] | 0.0372 (26 clusters) |
+
+> tool_routing 18 个 ws-connection 失败（plaw 在某时刻 transient
+> 不可达，all in tool_routing-multi-003 burst）—— 相对 320 obs 是 5.6%
+> 的边角误差，metric 仍可比较。
+
+**vs Pre-Phase-2** (run `642b6812`，OLD prompt/anti-loop)：
+- tool_call_accuracy: 0.7362 → **0.7475** = +1.1pp（CI 重叠，统计上等价）
+
+→ Phase 2 的 T-9 anti-loop 收紧没影响整体 tool 选择质量。预期内（T-9
+只改 web_search 上限，不改其他工具）。
 
 > n_scored < n_obs 因为 case-level metric whitelist：很多 case `metrics =
 > ["g_eval"]` 或 `["keyword_coverage"]` 单选其一，跑哪个 metric 看 case
