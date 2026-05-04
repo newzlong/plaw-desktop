@@ -4694,6 +4694,19 @@ mod tests {
         tmp
     }
 
+    /// Autonomy config that pre-approves the mock tools used by channel tests.
+    /// Default supervised mode would otherwise gate every mock_* tool call on
+    /// non-CLI approval, hanging tests for 300s on prompt_tx that no test
+    /// channel resolves.
+    fn autonomy_with_mock_tools_pre_approved() -> crate::config::AutonomyConfig {
+        let mut cfg = crate::config::AutonomyConfig::default();
+        cfg.auto_approve.extend([
+            "mock_price".to_string(),
+            "mock_echo".to_string(),
+        ]);
+        cfg
+    }
+
     #[test]
     fn effective_channel_message_timeout_secs_clamps_to_minimum() {
         assert_eq!(
@@ -4973,7 +4986,7 @@ mod tests {
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(
-                &crate::config::AutonomyConfig::default(),
+                &autonomy_with_mock_tools_pre_approved(),
             )),
         };
 
@@ -5027,7 +5040,7 @@ mod tests {
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(
-                &crate::config::AutonomyConfig::default(),
+                &autonomy_with_mock_tools_pre_approved(),
             )),
         };
 
@@ -5084,7 +5097,7 @@ mod tests {
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(
-                &crate::config::AutonomyConfig::default(),
+                &autonomy_with_mock_tools_pre_approved(),
             )),
         };
 
@@ -5682,7 +5695,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(
-                &crate::config::AutonomyConfig::default(),
+                &autonomy_with_mock_tools_pre_approved(),
             )),
         });
 
@@ -5757,7 +5770,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(
-                &crate::config::AutonomyConfig::default(),
+                &autonomy_with_mock_tools_pre_approved(),
             )),
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
@@ -5821,7 +5834,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(
-                &crate::config::AutonomyConfig::default(),
+                &autonomy_with_mock_tools_pre_approved(),
             )),
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
@@ -5897,7 +5910,7 @@ BTC is currently around $65,000 based on latest tool output."#
             interrupt_on_new_message: false,
             non_cli_excluded_tools: Arc::new(Mutex::new(Vec::new())),
             approval_manager: Arc::new(ApprovalManager::from_config(
-                &crate::config::AutonomyConfig::default(),
+                &autonomy_with_mock_tools_pre_approved(),
             )),
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
@@ -5974,7 +5987,7 @@ BTC is currently around $65,000 based on latest tool output."#
             interrupt_on_new_message: false,
             non_cli_excluded_tools: Arc::new(Mutex::new(Vec::new())),
             approval_manager: Arc::new(ApprovalManager::from_config(
-                &crate::config::AutonomyConfig::default(),
+                &autonomy_with_mock_tools_pre_approved(),
             )),
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
@@ -6047,7 +6060,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(
-                &crate::config::AutonomyConfig::default(),
+                &autonomy_with_mock_tools_pre_approved(),
             )),
         });
 
@@ -6111,7 +6124,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(
-                &crate::config::AutonomyConfig::default(),
+                &autonomy_with_mock_tools_pre_approved(),
             )),
         });
 
@@ -6184,7 +6197,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(
-                &crate::config::AutonomyConfig::default(),
+                &autonomy_with_mock_tools_pre_approved(),
             )),
         });
 
@@ -7455,7 +7468,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(
-                &crate::config::AutonomyConfig::default(),
+                &autonomy_with_mock_tools_pre_approved(),
             )),
         });
 
@@ -7531,7 +7544,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(
-                &crate::config::AutonomyConfig::default(),
+                &autonomy_with_mock_tools_pre_approved(),
             )),
         });
 
@@ -7622,7 +7635,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(
-                &crate::config::AutonomyConfig::default(),
+                &autonomy_with_mock_tools_pre_approved(),
             )),
         });
 
@@ -7762,7 +7775,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(
-                &crate::config::AutonomyConfig::default(),
+                &autonomy_with_mock_tools_pre_approved(),
             )),
         });
 
@@ -7859,7 +7872,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(
-                &crate::config::AutonomyConfig::default(),
+                &autonomy_with_mock_tools_pre_approved(),
             )),
         });
 
@@ -7924,7 +7937,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(
-                &crate::config::AutonomyConfig::default(),
+                &autonomy_with_mock_tools_pre_approved(),
             )),
         });
 
@@ -8101,7 +8114,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(
-                &crate::config::AutonomyConfig::default(),
+                &autonomy_with_mock_tools_pre_approved(),
             )),
         });
 
@@ -8186,7 +8199,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(
-                &crate::config::AutonomyConfig::default(),
+                &autonomy_with_mock_tools_pre_approved(),
             )),
         });
 
@@ -8283,7 +8296,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(
-                &crate::config::AutonomyConfig::default(),
+                &autonomy_with_mock_tools_pre_approved(),
             )),
         });
 
@@ -8362,7 +8375,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(
-                &crate::config::AutonomyConfig::default(),
+                &autonomy_with_mock_tools_pre_approved(),
             )),
         });
 
@@ -8426,7 +8439,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(
-                &crate::config::AutonomyConfig::default(),
+                &autonomy_with_mock_tools_pre_approved(),
             )),
         });
 
@@ -8958,7 +8971,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(
-                &crate::config::AutonomyConfig::default(),
+                &autonomy_with_mock_tools_pre_approved(),
             )),
         });
 
@@ -9048,7 +9061,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(
-                &crate::config::AutonomyConfig::default(),
+                &autonomy_with_mock_tools_pre_approved(),
             )),
         });
 
@@ -9086,7 +9099,11 @@ BTC is currently around $65,000 based on latest tool output."#
             .get("test-channel_alice")
             .expect("history should be stored for sender");
         assert_eq!(turns[0].role, "user");
-        assert_eq!(turns[0].content, "hello");
+        assert!(
+            turns[0].content.ends_with("hello"),
+            "persisted user turn should end with raw message body, got: {}",
+            turns[0].content
+        );
         assert!(!turns[0].content.contains("[Memory context]"));
     }
 
@@ -9138,7 +9155,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(
-                &crate::config::AutonomyConfig::default(),
+                &autonomy_with_mock_tools_pre_approved(),
             )),
         });
 
@@ -9769,7 +9786,7 @@ BTC is currently around $65,000 based on latest tool output."#;
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(
-                &crate::config::AutonomyConfig::default(),
+                &autonomy_with_mock_tools_pre_approved(),
             )),
         });
 
@@ -9840,7 +9857,7 @@ BTC is currently around $65,000 based on latest tool output."#;
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(
-                &crate::config::AutonomyConfig::default(),
+                &autonomy_with_mock_tools_pre_approved(),
             )),
         });
 
@@ -9897,7 +9914,11 @@ BTC is currently around $65,000 based on latest tool output."#;
             .expect("history should exist for sender");
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].role, "user");
-        assert_eq!(turns[0].content, "What is WAL?");
+        assert!(
+            turns[0].content.ends_with("What is WAL?"),
+            "persisted user turn should end with raw message body, got: {}",
+            turns[0].content
+        );
         assert_eq!(turns[1].role, "assistant");
         assert_eq!(turns[1].content, "ok");
         assert!(

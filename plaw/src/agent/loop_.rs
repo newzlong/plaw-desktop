@@ -952,7 +952,14 @@ pub(crate) async fn run_tool_call_loop(
                 }
             };
 
-        let display_text = if parsed_text.is_empty() {
+        // When the response carries tool calls, prefer parsed_text (narrative
+        // with tool-call XML stripped). Falling back to raw response_text would
+        // leak the prompt-mode `<tool_call>` payload into user-visible streams.
+        // Only fall back to response_text when there are no tool calls (and
+        // parsed_text is therefore not yet populated).
+        let display_text = if !tool_calls.is_empty() {
+            parsed_text
+        } else if parsed_text.is_empty() {
             response_text.clone()
         } else {
             parsed_text
