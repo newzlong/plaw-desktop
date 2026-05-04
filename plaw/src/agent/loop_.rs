@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+mod budgets;
 mod context;
 mod errors;
 mod execution;
@@ -47,24 +48,13 @@ use parsing::{
     parse_perl_style_tool_calls, parse_structured_tool_calls, parse_tool_call_value,
     parse_tool_calls, parse_tool_calls_from_json_value, tool_call_signature, ParsedToolCall,
 };
+use budgets::{
+    AUTOSAVE_MIN_MESSAGE_CHARS, DEFAULT_MAX_TOOL_ITERATIONS, NON_CLI_APPROVAL_POLL_INTERVAL_MS,
+    NON_CLI_APPROVAL_WAIT_TIMEOUT_SECS, STREAM_CHUNK_MIN_CHARS,
+};
 use tool_taxonomy::{
     is_external_content_tool, ANTI_LOOP_EXEMPT_TOOLS, MAX_SAME_TOOL_PER_TURN, TIGHT_LOOP_TOOLS,
 };
-
-/// Minimum characters per chunk when relaying LLM text to a streaming draft.
-const STREAM_CHUNK_MIN_CHARS: usize = 80;
-
-/// Default maximum agentic tool-use iterations per user message to prevent runaway loops.
-/// Used as a safe fallback when `max_tool_iterations` is unset or configured as zero.
-/// Set high enough to allow full-chain autonomous work (read → edit → build → fix → repeat)
-/// while still preventing infinite runaway. Mid-loop trim keeps context manageable.
-///
-/// Must be ≤ i64::MAX so the value round-trips through TOML (whose
-/// integer type is i64). usize::MAX would overflow on 64-bit platforms
-/// and break dashboard config serialize→parse cycles — see
-/// gateway::api::tests::normalize_dashboard_config_toml_*. i64::MAX is
-/// still effectively "no built-in cap" (~9.2 quintillion).
-const DEFAULT_MAX_TOOL_ITERATIONS: usize = i64::MAX as usize;
 
 /// Scan external tool output for prompt injection and prepend warning if detected.
 fn tag_injected_content(tool_name: &str, output: String) -> String {
@@ -115,10 +105,6 @@ fn append_calibration_reminder(tool_name: &str, output: String) -> String {
          is correct, not a failure to serve the user."
     )
 }
-
-/// Minimum user-message length (in chars) for auto-save to memory.
-/// Matches the channel-side constant in `channels/mod.rs`.
-const AUTOSAVE_MIN_MESSAGE_CHARS: usize = 20;
 
 static SENSITIVE_KEY_PATTERNS: LazyLock<RegexSet> = LazyLock::new(|| {
     RegexSet::new([
@@ -175,11 +161,6 @@ pub(crate) fn scrub_credentials(input: &str) -> String {
         .to_string()
 }
 
-/// Default trigger for auto-compaction when non-system message count exceeds this threshold.
-/// Prefer passing the config-driven value via `run_tool_call_loop`; this constant is only
-/// used when callers omit the parameter.
-const DEFAULT_MAX_HISTORY_MESSAGES: usize = 50;
-
 /// Minimum interval between progress sends to avoid flooding the draft channel.
 pub(crate) const PROGRESS_MIN_INTERVAL_MS: u64 = 500;
 
@@ -196,9 +177,6 @@ tokio::task_local! {
 }
 
 const AUTO_CRON_DELIVERY_CHANNELS: &[&str] = &["telegram", "discord", "slack", "mattermost"];
-
-const NON_CLI_APPROVAL_WAIT_TIMEOUT_SECS: u64 = 300;
-const NON_CLI_APPROVAL_POLL_INTERVAL_MS: u64 = 250;
 
 #[derive(Debug, Clone)]
 pub(crate) struct NonCliApprovalPrompt {
@@ -2261,6 +2239,7 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::budgets::DEFAULT_MAX_HISTORY_MESSAGES;
     use async_trait::async_trait;
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use std::collections::VecDeque;
