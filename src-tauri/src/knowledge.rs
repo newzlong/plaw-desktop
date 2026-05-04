@@ -378,6 +378,7 @@ Some content about async patterns.
         assert_eq!(title, "Rust async patterns");
         assert_eq!(tags, vec!["rust", "async", "tokio"]);
         assert_eq!(created, "2026-03-08");
+        assert_eq!(updated, "2026-03-08");
         assert_eq!(source, "conversation");
         println!("  title: {title}");
         println!("  tags: {tags:?}");
