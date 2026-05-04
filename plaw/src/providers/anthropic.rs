@@ -33,19 +33,6 @@ struct Message {
     content: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct ChatResponse {
-    content: Vec<ContentBlock>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ContentBlock {
-    #[serde(rename = "type")]
-    kind: String,
-    #[serde(default)]
-    text: Option<String>,
-}
-
 #[derive(Debug, Serialize)]
 struct NativeChatRequest<'a> {
     model: String,
@@ -448,15 +435,6 @@ impl AnthropicProvider {
         });
 
         (system_prompt, native_messages)
-    }
-
-    fn parse_text_response(response: ChatResponse) -> anyhow::Result<String> {
-        response
-            .content
-            .into_iter()
-            .find(|c| c.kind == "text")
-            .and_then(|c| c.text)
-            .ok_or_else(|| anyhow::anyhow!("No response from Anthropic"))
     }
 
     fn parse_native_response(response: NativeChatResponse) -> ProviderChatResponse {
@@ -1087,32 +1065,6 @@ mod tests {
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"system\":\"You are Plaw\""));
-    }
-
-    #[test]
-    fn chat_response_deserializes() {
-        let json = r#"{"content":[{"type":"text","text":"Hello there!"}]}"#;
-        let resp: ChatResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.content.len(), 1);
-        assert_eq!(resp.content[0].kind, "text");
-        assert_eq!(resp.content[0].text.as_deref(), Some("Hello there!"));
-    }
-
-    #[test]
-    fn chat_response_empty_content() {
-        let json = r#"{"content":[]}"#;
-        let resp: ChatResponse = serde_json::from_str(json).unwrap();
-        assert!(resp.content.is_empty());
-    }
-
-    #[test]
-    fn chat_response_multiple_blocks() {
-        let json =
-            r#"{"content":[{"type":"text","text":"First"},{"type":"text","text":"Second"}]}"#;
-        let resp: ChatResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.content.len(), 2);
-        assert_eq!(resp.content[0].text.as_deref(), Some("First"));
-        assert_eq!(resp.content[1].text.as_deref(), Some("Second"));
     }
 
     #[test]
