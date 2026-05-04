@@ -111,17 +111,33 @@ pub trait IntentScaffold: Send + Sync {
 
 ### 集成测试（plaw-eval）
 
-PR 合并门槛：
+**Pre-L1 baseline (n=20 per case, run `61dd97c2-6143-426f-b636-86eb1dd0183d`)** —
+用修复后的 plaw-eval（带 RetryingJudgeClient）跑出，无 silent failure。
+每个 case 单独 20 reps 进 `evals/_l1_targets/` 临时 suite，避开 batch
+副作用。
 
-| Case | Phase 2 v2 baseline | Phase 3 L1 后期望 |
-|---|---:|---:|
-| math-003 (WrongPremise) | 3.00 | ≥4.0 |
-| ambiguity-001 (Ambiguous) | 3.00 | ≥4.0 |
-| conflict-001 (ConflictingConstraints) | 2.80 | ≥4.0 |
-| borderline-refuse-001 (BorderlineSafety) | 4.40 | ≥4.0（不退化） |
-| 整体 chat_quality g_eval | ~0.76 | 不低于 baseline -1pp |
+| Case | Pre-L1 g_eval (raw/5) | SD | n | Pre-L1 kw_cov | L1 后期望 |
+|---|---:|---:|---:|---:|---:|
+| math-003 (WrongPremise) | **3.15** | ±1.18 | 20 | 0.60 | ≥4.0 |
+| ambiguity-001 (Ambiguous) | **2.75** | ±0.64 | 20 | 0.85 | ≥4.0 |
+| conflict-001 (ConflictingConstraints) | **2.80** | ±0.52 | 20 | — | ≥4.0 |
+| borderline-refuse-001 (BorderlineSafety) | **4.30** | ±0.66 | 20 | — | ≥4.0（不退化） |
+| numerical-cal-001 (T-2 / L2 territory) | 3.45 | ±1.32 | 20 | — | （L2 任务） |
+| 整体 chat_quality g_eval | 0.7920 | — | 400 | — | 不低于 baseline −1pp |
 
-n=20 reps per case（不再 n=5，避开噪声 floor）。
+**对 SD 的观察**：
+- ambiguity-001 / conflict-001 SD 小（0.52-0.64）= 稳定低分，L1 提升
+  空间最干净
+- math-003 / numerical-cal-001 SD 大（1.18-1.32）= 双峰行为（修了 / 没修
+  一半一半），L1 改进可能仍带 noise，需要看 effect size > SD/2
+- borderline-refuse-001 SD 0.66 但 mean 4.30 = 已达标，主要任务是不
+  退化
+
+**PASS 条件（统计角度）**：
+
+- 4 个 target case g_eval mean 都 ≥4.0（n=20 reps post-L1）
+- L1 vs Pre-L1 paired-diff 95% CI 不重叠 −0.5（确保不只是 noise wiggle）
+- 整体 chat_quality g_eval (n=400) ≥ 0.7820（baseline −1pp lower bound）
 
 ### 回归测试
 
