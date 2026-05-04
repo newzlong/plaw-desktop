@@ -1,3 +1,11 @@
+// Items in this module are reached only through the `plaw auth ...`
+// CLI subcommand handlers in `main.rs` (e.g. `start_device_code_flow`
+// at main.rs:1587, `build_authorize_url` at main.rs:1632, etc.).
+// main.rs is part of the bin, not the lib, so `cargo build --lib`'s
+// dead-code analysis can't trace the call. Module-level allow avoids
+// 12 per-item annotations.
+#![allow(dead_code)]
+
 use crate::auth::oauth_common::{parse_query_params, url_encode};
 
 use crate::auth::profiles::TokenSet;

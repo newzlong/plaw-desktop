@@ -5,6 +5,14 @@
 //! - URL encoding/decoding
 //! - Query parameter parsing
 
+// Items in this module are consumed by the per-provider OAuth flows
+// (`gemini_oauth`, `openai_oauth`) which themselves are reached only
+// through the `plaw auth ...` CLI subcommand handlers in `main.rs`.
+// main.rs is part of the bin, not the lib, so `cargo build --lib`'s
+// dead-code analysis can't trace the chain. Module-level allow avoids
+// 6 per-item annotations.
+#![allow(dead_code)]
+
 use base64::Engine;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
