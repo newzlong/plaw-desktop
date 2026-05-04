@@ -13,6 +13,7 @@ use std::collections::HashMap;
 
 use anyhow::{anyhow, Result};
 use futures_util::stream::{self, StreamExt};
+use indicatif::{ProgressBar, ProgressStyle};
 use serde_json::json;
 use tracing::{debug, warn};
 
@@ -85,6 +86,21 @@ pub async fn score_run_with_concurrency(
     judge: &dyn JudgeClient,
     concurrency: usize,
 ) -> Result<ScoreRunSummary> {
+    score_run_with_concurrency_and_progress(repo, run_id, suite, judge, concurrency, false).await
+}
+
+/// Score a run with both an explicit concurrency bound and an optional
+/// CLI-style progress bar. `show_progress=true` renders an indicatif bar
+/// keyed on (case, metric)-pair completion; `false` is a no-op so library
+/// callers (tests, programmatic re-scoring) don't see any output.
+pub async fn score_run_with_concurrency_and_progress(
+    repo: &EvalRepo,
+    run_id: &str,
+    suite: &Suite,
+    judge: &dyn JudgeClient,
+    concurrency: usize,
+    show_progress: bool,
+) -> Result<ScoreRunSummary> {
     let concurrency = concurrency.max(1);
     let mut summary = ScoreRunSummary::default();
     if suite.metrics.is_empty() {
@@ -127,14 +143,35 @@ pub async fn score_run_with_concurrency(
     //    bounded in-flight cap. Aggregation per case happens after the stream
     //    drains. We collect the per-task outcome rather than write inline so
     //    repo writes happen once per case (matching the legacy semantics).
+    let total_pairs = tasks.len() as u64;
+    let pb = if show_progress && total_pairs > 0 {
+        let pb = ProgressBar::new(total_pairs);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "scoring {pos:>5}/{len:5} [{wide_bar:.cyan/blue}] {elapsed_precise} {msg}",
+            )
+            .unwrap()
+            .progress_chars("=> "),
+        );
+        Some(pb)
+    } else {
+        None
+    };
     let stream = stream::iter(tasks.into_iter().map(|(idx, spec, case, response, tool_calls)| {
+        let pb = pb.clone();
         async move {
             let res = compute_metric(spec, case, response, tool_calls, judge).await;
+            if let Some(pb) = &pb {
+                pb.inc(1);
+            }
             (idx, spec.name.clone(), res)
         }
     }))
     .buffer_unordered(concurrency);
     let outcomes: Vec<(usize, String, Result<Option<MetricScore>>)> = stream.collect().await;
+    if let Some(pb) = pb {
+        pb.finish_with_message("done");
+    }
 
     // ── Phase 3: group by case_idx, derive summary fields, persist.
     #[derive(Default)]
