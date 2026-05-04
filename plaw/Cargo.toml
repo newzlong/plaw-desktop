@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "plaw"
-version = "0.1.7"
+version = "0.2.0"
 edition = "2021"
 authors = ["theonlyhennygod"]
 license = "MIT OR Apache-2.0"
@@ -252,6 +252,9 @@ tempfile = "3.26"
 criterion = { version = "0.8", features = ["async_tokio"] }
 wiremock = "0.6"
 scopeguard = "1.2"
+# Property-based testing for invariants over arbitrary inputs (UTF-8
+# truncation boundaries, etc.). Dev-only — no impact on release binary.
+proptest = "1.6"
 
 [[bin]]
 name = "plaw"

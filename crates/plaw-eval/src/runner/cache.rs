@@ -126,4 +126,88 @@ mod tests {
         assert_eq!(stats.misses, 1);
         assert!((stats.hit_rate() - 0.5).abs() < 1e-12);
     }
+
+    // ─── Property-based tests (proptest) ──────────────────────────────────
+    //
+    // The hand-test above checks one specific collision case (boundary
+    // shift between the prompt and input fields). proptest scales that
+    // up to thousands of arbitrary triples to make sure no other input
+    // shape collides — the cache_key is load-bearing for the whole
+    // re-run-skipping eval pipeline, so a silent collision would cause
+    // the wrong score to be served.
+
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Determinism: same inputs → same key, every time. Sanity check
+        /// that the SHA256 finalisation is order-stable across calls.
+        #[test]
+        fn cache_key_is_deterministic(
+            prompt in ".*",
+            input in ".*",
+            model in ".*",
+        ) {
+            let k1 = cache_key(&prompt, &input, &model);
+            let k2 = cache_key(&prompt, &input, &model);
+            prop_assert_eq!(k1, k2);
+        }
+
+        /// Output is a 64-char lowercase hex digest regardless of input
+        /// shape (empty / massive / unicode / control chars).
+        #[test]
+        fn cache_key_shape_is_64_hex(
+            prompt in ".*",
+            input in ".*",
+            model in ".*",
+        ) {
+            let k = cache_key(&prompt, &input, &model);
+            prop_assert_eq!(k.len(), 64);
+            prop_assert!(k.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+
+        /// Field-shift collision resistance: moving one byte from the
+        /// `prompt` field into `input` MUST produce a different key
+        /// (otherwise the NUL separator failed to do its job and the
+        /// cache could serve the wrong response when an unrelated
+        /// (prompt, input) pair happened to concatenate to the same
+        /// total bytes). Skip the trivial degenerate case where the
+        /// shift happens to land on a NUL byte that's already there.
+        #[test]
+        fn cache_key_resists_field_boundary_shift(
+            prefix in "[a-zA-Z0-9]{1,20}",
+            suffix in "[a-zA-Z0-9]{0,20}",
+            model in "[a-zA-Z0-9]{1,12}",
+        ) {
+            let prompt_a = format!("{prefix}");
+            let input_a = format!("{suffix}");
+            // Shift one char from prompt to input.
+            let prefix_chars: Vec<char> = prefix.chars().collect();
+            let split = prefix_chars.len() - 1;
+            let prompt_b: String = prefix_chars[..split].iter().collect();
+            let mut input_b = String::new();
+            input_b.push(prefix_chars[split]);
+            input_b.push_str(&suffix);
+
+            let k_a = cache_key(&prompt_a, &input_a, &model);
+            let k_b = cache_key(&prompt_b, &input_b, &model);
+            prop_assert_ne!(k_a, k_b);
+        }
+
+        /// Different models must produce different keys for the same
+        /// (prompt, input). Two judge versions must NEVER share a cache
+        /// slot — otherwise a model upgrade silently keeps serving the
+        /// old model's responses.
+        #[test]
+        fn cache_key_different_models_diverge(
+            prompt in ".*",
+            input in ".*",
+            model_a in "[a-zA-Z0-9-]{1,30}",
+            model_b in "[a-zA-Z0-9-]{1,30}",
+        ) {
+            prop_assume!(model_a != model_b);
+            let k_a = cache_key(&prompt, &input, &model_a);
+            let k_b = cache_key(&prompt, &input, &model_b);
+            prop_assert_ne!(k_a, k_b);
+        }
+    }
 }
