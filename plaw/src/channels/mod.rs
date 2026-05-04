@@ -254,6 +254,11 @@ struct ChannelRuntimeContext {
     query_classification: crate::config::QueryClassificationConfig,
     model_routes: Vec<crate::config::ModelRouteConfig>,
     approval_manager: Arc<ApprovalManager>,
+    /// Phase 3 L1-6: when true, classify each user message and prepend the
+    /// matching scaffold to the persisted user turn. Mirrors the
+    /// `agent.intent_routing_enabled` flag — channels honor the same toggle
+    /// the embedded `Agent::turn` path already does.
+    intent_routing_enabled: bool,
 }
 
 #[derive(Clone)]
@@ -2702,6 +2707,32 @@ async fn process_channel_message(
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
     let timestamped_content = format!("[{now}] {}", msg.content);
 
+    // Phase 3 L1-6: optionally prepend the intent scaffold to the persisted
+    // user turn. Mirrors the Agent::turn wiring — empty scaffold (TaskRequest /
+    // FactualLookup, the common case) returns the input unchanged so the
+    // legacy channel path stays byte-identical when the flag is off.
+    // We pass an empty base to apply_intent_scaffold so it returns just the
+    // scaffold text (or "" for empty intents); then prepend manually to keep
+    // the scaffold ABOVE the user-message body in the persisted turn.
+    let timestamped_content = if ctx.intent_routing_enabled {
+        let router = crate::agent::intent::HybridRouter::new();
+        let (intent, scaffold_only) =
+            crate::agent::intent::apply_intent_scaffold(&router, &msg.content, "").await;
+        tracing::debug!(
+            channel = %msg.channel,
+            sender = %msg.sender,
+            intent = intent.as_str(),
+            "intent classified for channel message"
+        );
+        if scaffold_only.is_empty() {
+            timestamped_content
+        } else {
+            format!("{scaffold_only}\n\n{timestamped_content}")
+        }
+    } else {
+        timestamped_content
+    };
+
     // Preserve user turn before the LLM call so interrupted requests keep context.
     append_sender_turn(
         ctx.as_ref(),
@@ -4648,6 +4679,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
         query_classification: config.query_classification.clone(),
         model_routes: config.model_routes.clone(),
         approval_manager: Arc::new(ApprovalManager::from_config(&config.autonomy)),
+        intent_routing_enabled: config.agent.intent_routing_enabled,
     });
 
     run_message_dispatch_loop(rx, runtime_ctx, max_in_flight_messages).await;
@@ -4988,6 +5020,7 @@ mod tests {
             approval_manager: Arc::new(ApprovalManager::from_config(
                 &autonomy_with_mock_tools_pre_approved(),
             )),
+            intent_routing_enabled: false,
         };
 
         assert!(compact_sender_history(&ctx, &sender));
@@ -5042,6 +5075,7 @@ mod tests {
             approval_manager: Arc::new(ApprovalManager::from_config(
                 &autonomy_with_mock_tools_pre_approved(),
             )),
+            intent_routing_enabled: false,
         };
 
         append_sender_turn(&ctx, &sender, ChatMessage::user("hello"));
@@ -5099,6 +5133,7 @@ mod tests {
             approval_manager: Arc::new(ApprovalManager::from_config(
                 &autonomy_with_mock_tools_pre_approved(),
             )),
+            intent_routing_enabled: false,
         };
 
         assert!(rollback_orphan_user_turn(&ctx, &sender, "pending"));
@@ -5697,6 +5732,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::from_config(
                 &autonomy_with_mock_tools_pre_approved(),
             )),
+            intent_routing_enabled: false,
         });
 
         process_channel_message(
@@ -5772,6 +5808,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::from_config(
                 &autonomy_with_mock_tools_pre_approved(),
             )),
+            intent_routing_enabled: false,
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
         });
@@ -5836,6 +5873,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::from_config(
                 &autonomy_with_mock_tools_pre_approved(),
             )),
+            intent_routing_enabled: false,
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
         });
@@ -5912,6 +5950,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::from_config(
                 &autonomy_with_mock_tools_pre_approved(),
             )),
+            intent_routing_enabled: false,
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             query_classification: crate::config::QueryClassificationConfig::default(),
@@ -5989,6 +6028,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::from_config(
                 &autonomy_with_mock_tools_pre_approved(),
             )),
+            intent_routing_enabled: false,
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             query_classification: crate::config::QueryClassificationConfig::default(),
@@ -6062,6 +6102,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::from_config(
                 &autonomy_with_mock_tools_pre_approved(),
             )),
+            intent_routing_enabled: false,
         });
 
         process_channel_message(
@@ -6126,6 +6167,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::from_config(
                 &autonomy_with_mock_tools_pre_approved(),
             )),
+            intent_routing_enabled: false,
         });
 
         process_channel_message(
@@ -6199,6 +6241,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::from_config(
                 &autonomy_with_mock_tools_pre_approved(),
             )),
+            intent_routing_enabled: false,
         });
 
         process_channel_message(
@@ -6300,6 +6343,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(&autonomy_cfg)),
+            intent_routing_enabled: false,
         });
         assert_eq!(
             runtime_ctx
@@ -6435,6 +6479,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(&autonomy_cfg)),
+            intent_routing_enabled: false,
         });
         assert_eq!(
             runtime_ctx
@@ -6545,6 +6590,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager,
+            intent_routing_enabled: false,
         });
 
         process_channel_message(
@@ -6650,6 +6696,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager,
+            intent_routing_enabled: false,
         });
 
         process_channel_message(
@@ -6745,6 +6792,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(&autonomy_cfg)),
+            intent_routing_enabled: false,
         });
 
         process_channel_message(
@@ -6884,6 +6932,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(&autonomy_cfg)),
+            intent_routing_enabled: false,
         });
 
         process_channel_message(
@@ -7029,6 +7078,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(&autonomy_cfg)),
+            intent_routing_enabled: false,
         });
 
         process_channel_message(
@@ -7144,6 +7194,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(&autonomy_cfg)),
+            intent_routing_enabled: false,
         });
 
         process_channel_message(
@@ -7239,6 +7290,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(&autonomy_cfg)),
+            intent_routing_enabled: false,
         });
 
         process_channel_message(
@@ -7353,6 +7405,7 @@ BTC is currently around $65,000 based on latest tool output."#
             query_classification: crate::config::QueryClassificationConfig::default(),
             model_routes: Vec::new(),
             approval_manager: Arc::new(ApprovalManager::from_config(&autonomy_cfg)),
+            intent_routing_enabled: false,
         });
 
         process_channel_message(
@@ -7470,6 +7523,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::from_config(
                 &autonomy_with_mock_tools_pre_approved(),
             )),
+            intent_routing_enabled: false,
         });
 
         process_channel_message(
@@ -7546,6 +7600,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::from_config(
                 &autonomy_with_mock_tools_pre_approved(),
             )),
+            intent_routing_enabled: false,
         });
 
         process_channel_message(
@@ -7637,6 +7692,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::from_config(
                 &autonomy_with_mock_tools_pre_approved(),
             )),
+            intent_routing_enabled: false,
         });
 
         process_channel_message(
@@ -7777,6 +7833,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::from_config(
                 &autonomy_with_mock_tools_pre_approved(),
             )),
+            intent_routing_enabled: false,
         });
 
         maybe_apply_runtime_config_update(runtime_ctx.as_ref())
@@ -7874,6 +7931,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::from_config(
                 &autonomy_with_mock_tools_pre_approved(),
             )),
+            intent_routing_enabled: false,
         });
 
         process_channel_message(
@@ -7939,6 +7997,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::from_config(
                 &autonomy_with_mock_tools_pre_approved(),
             )),
+            intent_routing_enabled: false,
         });
 
         process_channel_message(
@@ -8116,6 +8175,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::from_config(
                 &autonomy_with_mock_tools_pre_approved(),
             )),
+            intent_routing_enabled: false,
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(4);
@@ -8201,6 +8261,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::from_config(
                 &autonomy_with_mock_tools_pre_approved(),
             )),
+            intent_routing_enabled: false,
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(8);
@@ -8298,6 +8359,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::from_config(
                 &autonomy_with_mock_tools_pre_approved(),
             )),
+            intent_routing_enabled: false,
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(8);
@@ -8377,6 +8439,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::from_config(
                 &autonomy_with_mock_tools_pre_approved(),
             )),
+            intent_routing_enabled: false,
         });
 
         process_channel_message(
@@ -8441,6 +8504,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::from_config(
                 &autonomy_with_mock_tools_pre_approved(),
             )),
+            intent_routing_enabled: false,
         });
 
         process_channel_message(
@@ -8973,6 +9037,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::from_config(
                 &autonomy_with_mock_tools_pre_approved(),
             )),
+            intent_routing_enabled: false,
         });
 
         process_channel_message(
@@ -9063,6 +9128,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::from_config(
                 &autonomy_with_mock_tools_pre_approved(),
             )),
+            intent_routing_enabled: false,
         });
 
         process_channel_message(
@@ -9157,6 +9223,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::from_config(
                 &autonomy_with_mock_tools_pre_approved(),
             )),
+            intent_routing_enabled: false,
         });
 
         process_channel_message(
@@ -9788,6 +9855,7 @@ BTC is currently around $65,000 based on latest tool output."#;
             approval_manager: Arc::new(ApprovalManager::from_config(
                 &autonomy_with_mock_tools_pre_approved(),
             )),
+            intent_routing_enabled: false,
         });
 
         // Simulate a photo attachment message with [IMAGE:] marker.
@@ -9859,6 +9927,7 @@ BTC is currently around $65,000 based on latest tool output."#;
             approval_manager: Arc::new(ApprovalManager::from_config(
                 &autonomy_with_mock_tools_pre_approved(),
             )),
+            intent_routing_enabled: false,
         });
 
         process_channel_message(
@@ -9925,5 +9994,167 @@ BTC is currently around $65,000 based on latest tool output."#;
             turns.iter().all(|turn| !turn.content.contains("[IMAGE:")),
             "failed vision turn must not persist image marker content"
         );
+    }
+
+    /// Phase 3 L1-6b regression test: with `intent_routing_enabled = true`,
+    /// the channel path classifies the user message and prepends the matching
+    /// scaffold to the persisted user turn. Mirrors the `Agent::turn` test
+    /// `intent_routing_on_injects_wrong_premise_scaffold`.
+    #[tokio::test]
+    async fn process_channel_message_intent_routing_injects_scaffold_when_flag_on() {
+        let channel_impl = Arc::new(RecordingChannel::default());
+        let channel: Arc<dyn Channel> = channel_impl.clone();
+
+        let mut channels_by_name = HashMap::new();
+        channels_by_name.insert(channel.name().to_string(), channel);
+
+        let runtime_ctx = Arc::new(ChannelRuntimeContext {
+            channels_by_name: Arc::new(channels_by_name),
+            provider: Arc::new(DummyProvider),
+            default_provider: Arc::new("dummy".to_string()),
+            memory: Arc::new(NoopMemory),
+            tools_registry: Arc::new(vec![]),
+            observer: Arc::new(NoopObserver),
+            system_prompt: Arc::new("test-system-prompt".to_string()),
+            model: Arc::new("test-model".to_string()),
+            temperature: 0.0,
+            auto_save_memory: false,
+            max_tool_iterations: 5,
+            min_relevance_score: 0.0,
+            conversation_histories: Arc::new(Mutex::new(HashMap::new())),
+            provider_cache: Arc::new(Mutex::new(HashMap::new())),
+            route_overrides: Arc::new(Mutex::new(HashMap::new())),
+            api_key: None,
+            api_url: None,
+            reliability: Arc::new(crate::config::ReliabilityConfig::default()),
+            provider_runtime_options: providers::ProviderRuntimeOptions::default(),
+            workspace_dir: Arc::new(std::env::temp_dir()),
+            message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
+            interrupt_on_new_message: false,
+            multimodal: crate::config::MultimodalConfig::default(),
+            hooks: None,
+            non_cli_excluded_tools: Arc::new(Mutex::new(Vec::new())),
+            query_classification: crate::config::QueryClassificationConfig::default(),
+            model_routes: Vec::new(),
+            approval_manager: Arc::new(ApprovalManager::from_config(
+                &autonomy_with_mock_tools_pre_approved(),
+            )),
+            intent_routing_enabled: true,
+        });
+
+        process_channel_message(
+            Arc::clone(&runtime_ctx),
+            traits::ChannelMessage {
+                id: "msg-intent-1".to_string(),
+                sender: "alice".to_string(),
+                reply_target: "chat-intent".to_string(),
+                content: "已知 5+5=11, 那么 5+6=?".to_string(),
+                channel: "test-channel".to_string(),
+                timestamp: 1,
+                thread_ts: None,
+            },
+            CancellationToken::new(),
+        )
+        .await;
+
+        let histories = runtime_ctx
+            .conversation_histories
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let turns = histories
+            .get("test-channel_alice")
+            .expect("history should exist for sender");
+        assert_eq!(turns[0].role, "user");
+        assert!(
+            turns[0].content.starts_with("## Intent: wrong_premise"),
+            "scaffold should prefix the persisted user turn when WrongPremise is detected; got: {}",
+            turns[0].content
+        );
+        assert!(turns[0].content.contains("已知 5+5=11"));
+    }
+
+    /// With the flag on but a TaskRequest message (the common case ~95% of
+    /// traffic), the persisted user turn must be byte-identical to the
+    /// flag-off path so we don't silently change the dominant flow.
+    #[tokio::test]
+    async fn process_channel_message_intent_routing_off_for_task_request_when_flag_on() {
+        async fn run_once(intent_routing_enabled: bool) -> String {
+            let channel_impl = Arc::new(RecordingChannel::default());
+            let channel: Arc<dyn Channel> = channel_impl.clone();
+            let mut channels_by_name = HashMap::new();
+            channels_by_name.insert(channel.name().to_string(), channel);
+            let runtime_ctx = Arc::new(ChannelRuntimeContext {
+                channels_by_name: Arc::new(channels_by_name),
+                provider: Arc::new(DummyProvider),
+                default_provider: Arc::new("dummy".to_string()),
+                memory: Arc::new(NoopMemory),
+                tools_registry: Arc::new(vec![]),
+                observer: Arc::new(NoopObserver),
+                system_prompt: Arc::new("test-system-prompt".to_string()),
+                model: Arc::new("test-model".to_string()),
+                temperature: 0.0,
+                auto_save_memory: false,
+                max_tool_iterations: 5,
+                min_relevance_score: 0.0,
+                conversation_histories: Arc::new(Mutex::new(HashMap::new())),
+                provider_cache: Arc::new(Mutex::new(HashMap::new())),
+                route_overrides: Arc::new(Mutex::new(HashMap::new())),
+                api_key: None,
+                api_url: None,
+                reliability: Arc::new(crate::config::ReliabilityConfig::default()),
+                provider_runtime_options: providers::ProviderRuntimeOptions::default(),
+                workspace_dir: Arc::new(std::env::temp_dir()),
+                message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
+                interrupt_on_new_message: false,
+                multimodal: crate::config::MultimodalConfig::default(),
+                hooks: None,
+                non_cli_excluded_tools: Arc::new(Mutex::new(Vec::new())),
+                query_classification: crate::config::QueryClassificationConfig::default(),
+                model_routes: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::from_config(
+                    &autonomy_with_mock_tools_pre_approved(),
+                )),
+                intent_routing_enabled,
+            });
+            process_channel_message(
+                Arc::clone(&runtime_ctx),
+                traits::ChannelMessage {
+                    id: "msg-task".to_string(),
+                    sender: "alice".to_string(),
+                    reply_target: "chat-task".to_string(),
+                    content: "帮我写一段 hello world".to_string(),
+                    channel: "test-channel".to_string(),
+                    timestamp: 1,
+                    thread_ts: None,
+                },
+                CancellationToken::new(),
+            )
+            .await;
+            let histories = runtime_ctx
+                .conversation_histories
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            histories
+                .get("test-channel_alice")
+                .expect("history")
+                .get(0)
+                .expect("user turn")
+                .content
+                .clone()
+        }
+
+        let on_content = run_once(true).await;
+        let off_content = run_once(false).await;
+
+        assert!(!on_content.contains("## Intent:"));
+        // Both runs use a fresh `chrono::Local::now()`; strip the leading
+        // timestamp prefix so the comparison is stable across the two calls.
+        fn strip_timestamp(s: &str) -> &str {
+            match s.find("] ") {
+                Some(i) => &s[i + 2..],
+                None => s,
+            }
+        }
+        assert_eq!(strip_timestamp(&on_content), strip_timestamp(&off_content));
     }
 }
