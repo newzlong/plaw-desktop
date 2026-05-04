@@ -4016,10 +4016,18 @@ Tail"#;
 
         apply_compaction_summary(&mut history, 1, 3, "- user prefers concise replies");
 
-        assert_eq!(history.len(), 4);
-        assert!(history[1].content.contains("Compaction summary"));
-        assert!(history[2].content.contains("recent 1"));
-        assert!(history[3].content.contains("recent 2"));
+        // After splice [sys, summary, recent1, recent2] (4 entries) the
+        // sanitize_after_trim pass detects an assistant in slot 1 and
+        // inserts a synthetic "请继续" user message before it (the
+        // Anthropic API requires the first non-system message to be
+        // user-role). So final length is 5: [sys, synthetic-user,
+        // summary, recent1, recent2].
+        assert_eq!(history.len(), 5);
+        assert_eq!(history[0].role, "system");
+        assert_eq!(history[1].role, "user");
+        assert!(history[2].content.contains("Compaction summary"));
+        assert!(history[3].content.contains("recent 1"));
+        assert!(history[4].content.contains("recent 2"));
     }
 
     #[test]
