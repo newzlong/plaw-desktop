@@ -23,11 +23,15 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 mod context;
+mod errors;
 mod execution;
 pub(crate) mod history;
 mod parsing;
 
 use context::{build_context, build_hardware_context};
+pub(crate) use errors::{
+    is_tool_iteration_limit_error, is_tool_loop_cancelled, ToolIterationLimit, ToolLoopCancelled,
+};
 use execution::{
     execute_tools_parallel, execute_tools_sequential, should_execute_tools_in_parallel,
     ToolExecutionOutcome,
@@ -495,46 +499,6 @@ fn build_assistant_history_with_tool_calls(text: &str, tool_calls: &[ToolCall]) 
     }
 
     parts.join("\n")
-}
-
-#[derive(Debug)]
-pub(crate) struct ToolLoopCancelled;
-
-impl std::fmt::Display for ToolLoopCancelled {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("tool loop cancelled")
-    }
-}
-
-impl std::error::Error for ToolLoopCancelled {}
-
-/// Returned when the agent loop exits because it ran `max_tool_iterations`
-/// turns without producing a final assistant message. Replaces the previous
-/// stringly-typed `anyhow!("Agent exceeded maximum tool iterations …")` so
-/// callers can match on the type rather than substring-grep the chain.
-///
-/// The Display message is kept identical to the legacy formatted string so
-/// downstream telemetry / log queries that match on the human text continue
-/// to work.
-#[derive(Debug)]
-pub(crate) struct ToolIterationLimit {
-    pub limit: usize,
-}
-
-impl std::fmt::Display for ToolIterationLimit {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Agent exceeded maximum tool iterations ({})", self.limit)
-    }
-}
-
-impl std::error::Error for ToolIterationLimit {}
-
-pub(crate) fn is_tool_loop_cancelled(err: &anyhow::Error) -> bool {
-    err.chain().any(|source| source.is::<ToolLoopCancelled>())
-}
-
-pub(crate) fn is_tool_iteration_limit_error(err: &anyhow::Error) -> bool {
-    err.chain().any(|source| source.is::<ToolIterationLimit>())
 }
 
 /// Execute a single turn of the agent loop: send messages, parse tool calls,
