@@ -38,10 +38,14 @@ pub(super) const DEFAULT_MAX_TOOL_ITERATIONS: usize = i64::MAX as usize;
 /// pollute the recall set.
 pub(super) const AUTOSAVE_MIN_MESSAGE_CHARS: usize = 20;
 
-/// Default trigger for auto-compaction when non-system message count
-/// exceeds this threshold. Prefer passing the config-driven value via
-/// `run_tool_call_loop`; this constant is only used when callers omit
-/// the parameter.
+/// Default cap used by `trim_history` tests as a "realistically sized"
+/// history limit. Production paths always pass `config.agent.
+/// max_history_messages` (or `state.max_history_messages` from the
+/// gateway) — there is no production caller that defaults to this
+/// value, hence the `#[cfg(test)]` gate. Kept as a named constant so
+/// the dozen-plus `trim_history(...)` test sites read uniformly
+/// rather than each inlining `50`.
+#[cfg(test)]
 pub(super) const DEFAULT_MAX_HISTORY_MESSAGES: usize = 50;
 
 /// Maximum time the loop will wait for a non-CLI approval response

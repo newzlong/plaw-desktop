@@ -8,9 +8,6 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-/// Max progress lines to keep per tool execution (avoid bloat).
-const MAX_PROGRESS_LINES: usize = 8;
-
 fn find_tool<'a>(tools: &'a [Box<dyn Tool>], name: &str) -> Option<&'a dyn Tool> {
     tools.iter().find(|t| t.name() == name).map(|t| t.as_ref())
 }
@@ -103,7 +100,6 @@ async fn execute_one_tool(
             success: false,
             error_reason: Some(scrub_credentials(&reason)),
             duration,
-            progress_log: Vec::new(),
         });
     };
 
@@ -141,7 +137,6 @@ async fn execute_one_tool(
                     success: true,
                     error_reason: None,
                     duration,
-                    progress_log,
                 })
             } else {
                 let reason = r.error.unwrap_or(r.output);
@@ -151,7 +146,6 @@ async fn execute_one_tool(
                     success: false,
                     error_reason: Some(scrub_credentials(&reason)),
                     duration,
-                    progress_log,
                 })
             }
         }
@@ -169,7 +163,6 @@ async fn execute_one_tool(
                 success: false,
                 error_reason: Some(scrub_credentials(&reason)),
                 duration,
-                progress_log,
             })
         }
     }
@@ -194,7 +187,6 @@ pub(super) struct ToolExecutionOutcome {
     pub(super) success: bool,
     pub(super) error_reason: Option<String>,
     pub(super) duration: Duration,
-    pub(super) progress_log: Vec<String>,
 }
 
 pub(super) fn should_execute_tools_in_parallel(

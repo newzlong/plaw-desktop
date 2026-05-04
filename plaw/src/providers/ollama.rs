@@ -602,7 +602,8 @@ impl Provider for OllamaProvider {
         let api_messages = self.convert_messages(messages);
 
         // Tools arrive pre-formatted in OpenAI/Ollama-compatible JSON from
-        // tools_to_openai_format() in loop_.rs — pass them through directly.
+        // the caller (agent loop builds the OpenAI function-calling envelope
+        // before invoking the provider) — pass them through directly.
         let tools_opt = if tools.is_empty() { None } else { Some(tools) };
 
         let response = self
