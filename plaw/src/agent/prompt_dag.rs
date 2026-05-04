@@ -699,4 +699,212 @@ mod tests {
             );
         }
     }
+
+    // ── PR-2B: extended-fixture parity gate ───────────────────────
+    //
+    // The PR-2A parity tests run under an empty fixture (no tools, no
+    // skills, no identity config, no workspace files). That covers
+    // five of the nine sections fully (Identity / Tools / Safety /
+    // Calibration / Skills emit empty or near-empty bodies) but
+    // leaves the realistic-context branches of three sections
+    // (ToolsSection with tools, SkillsSection with skills, Identity-
+    // Section with identity_config / workspace files) on a "trust me"
+    // basis. PR-2B is the call-site flip that makes Agent::turn drive
+    // through the DAG path; before it ships, parity must hold under
+    // the realistic branches too.
+    //
+    // After PR-2B's SystemPromptBuilder shim lands, these tests
+    // become trivially-true (DAG-via-shim equals DAG-direct), but
+    // they are *kept* as an intent contract: any later refactor that
+    // resurrects the legacy vec-iteration path must still match the
+    // DAG output under each fixture variant.
+
+    /// Helper: normalise the two volatile sections (DateTime body,
+    /// Runtime body) so back-to-back builds compare cleanly. Same
+    /// regex pair as `byte_parity_modulo_volatile_sections`.
+    fn normalize_volatile(s: &str) -> String {
+        use std::sync::LazyLock;
+        static DATETIME_BODY: LazyLock<regex::Regex> = LazyLock::new(|| {
+            regex::Regex::new(r"## Current Date & Time\n\n[^\n]+").unwrap()
+        });
+        static RUNTIME_BODY: LazyLock<regex::Regex> =
+            LazyLock::new(|| regex::Regex::new(r"## Runtime\n\n[^\n]+").unwrap());
+        let s = DATETIME_BODY.replace(s, "## Current Date & Time\n\n<DATETIME>");
+        let s = RUNTIME_BODY.replace(&s, "## Runtime\n\n<RUNTIME>");
+        s.into_owned()
+    }
+
+    /// Fixture variant: tools registry populated + dispatcher
+    /// instructions present. Exercises the live branch of ToolsSection.
+    #[test]
+    fn parity_holds_with_tools_present() {
+        struct StubTool;
+        #[async_trait::async_trait]
+        impl crate::tools::Tool for StubTool {
+            fn name(&self) -> &str {
+                "stub_tool"
+            }
+            fn description(&self) -> &str {
+                "stub for prompt parity tests"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _: serde_json::Value,
+            ) -> anyhow::Result<crate::tools::ToolResult> {
+                unreachable!("stub_tool only used for prompt rendering")
+            }
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let tools: Vec<Box<dyn crate::tools::Tool>> = vec![Box::new(StubTool)];
+        let ctx = PromptContext {
+            workspace_dir: tmp.path(),
+            model_name: "test-model",
+            tools: &tools,
+            skills: &[],
+            skills_prompt_mode: SkillsPromptInjectionMode::Compact,
+            identity_config: None,
+            dispatcher_instructions: "Use tools wisely.",
+        };
+
+        let legacy = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
+        let dag_out = PromptDag::with_defaults().build(&ctx).unwrap();
+        assert_eq!(normalize_volatile(&legacy), normalize_volatile(&dag_out));
+    }
+
+    /// Fixture variant: skills loaded, Compact mode (location ref
+    /// rather than inlined instructions / tools).
+    #[test]
+    fn parity_holds_with_skills_compact_mode() {
+        let tmp = TempDir::new().unwrap();
+        let skills = vec![crate::skills::Skill {
+            name: "deploy".into(),
+            description: "Release safely".into(),
+            version: "1.0.0".into(),
+            author: None,
+            tags: vec![],
+            tools: vec![],
+            prompts: vec!["Smoke test before deploy.".into()],
+            location: Some(tmp.path().join("skills").join("deploy").join("SKILL.md")),
+            embedding: None,
+        }];
+
+        let ctx = PromptContext {
+            workspace_dir: tmp.path(),
+            model_name: "test-model",
+            tools: &[],
+            skills: &skills,
+            skills_prompt_mode: SkillsPromptInjectionMode::Compact,
+            identity_config: None,
+            dispatcher_instructions: "",
+        };
+
+        let legacy = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
+        let dag_out = PromptDag::with_defaults().build(&ctx).unwrap();
+        assert_eq!(normalize_volatile(&legacy), normalize_volatile(&dag_out));
+    }
+
+    /// Fixture variant: skills loaded, Full mode (instructions + tools
+    /// inlined into the section body).
+    #[test]
+    fn parity_holds_with_skills_full_mode() {
+        let tmp = TempDir::new().unwrap();
+        let skills = vec![crate::skills::Skill {
+            name: "lint".into(),
+            description: "Run static checks".into(),
+            version: "0.1.0".into(),
+            author: None,
+            tags: vec![],
+            tools: vec![crate::skills::SkillTool {
+                name: "clippy".into(),
+                description: "rust linter".into(),
+                kind: "shell".into(),
+                command: "cargo clippy".into(),
+                args: std::collections::HashMap::new(),
+            }],
+            prompts: vec!["Lint before pushing.".into()],
+            location: None,
+            embedding: None,
+        }];
+
+        let ctx = PromptContext {
+            workspace_dir: tmp.path(),
+            model_name: "test-model",
+            tools: &[],
+            skills: &skills,
+            skills_prompt_mode: SkillsPromptInjectionMode::Full,
+            identity_config: None,
+            dispatcher_instructions: "",
+        };
+
+        let legacy = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
+        let dag_out = PromptDag::with_defaults().build(&ctx).unwrap();
+        assert_eq!(normalize_volatile(&legacy), normalize_volatile(&dag_out));
+    }
+
+    /// Fixture variant: identity_config supplied (default openclaw
+    /// format, no AIEOS file). Exercises the `Some(config)` branch of
+    /// IdentitySection without touching the AIEOS load path.
+    #[test]
+    fn parity_holds_with_identity_config_some() {
+        let tmp = TempDir::new().unwrap();
+        let id_cfg = crate::config::IdentityConfig::default();
+        let ctx = PromptContext {
+            workspace_dir: tmp.path(),
+            model_name: "test-model",
+            tools: &[],
+            skills: &[],
+            skills_prompt_mode: SkillsPromptInjectionMode::Compact,
+            identity_config: Some(&id_cfg),
+            dispatcher_instructions: "",
+        };
+
+        let legacy = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
+        let dag_out = PromptDag::with_defaults().build(&ctx).unwrap();
+        assert_eq!(normalize_volatile(&legacy), normalize_volatile(&dag_out));
+    }
+
+    /// Fixture variant: workspace files present (AGENTS.md). Exercises
+    /// `inject_workspace_file` via IdentitySection — the real-world
+    /// shape where a project supplies its own behavior bootstrap.
+    #[test]
+    fn parity_holds_with_workspace_files_present() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("AGENTS.md"),
+            "# Test Agent\n\nBe terse.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("USER.md"),
+            "# User\n\nTreat me kindly.\n",
+        )
+        .unwrap();
+
+        let ctx = PromptContext {
+            workspace_dir: tmp.path(),
+            model_name: "test-model",
+            tools: &[],
+            skills: &[],
+            skills_prompt_mode: SkillsPromptInjectionMode::Compact,
+            identity_config: None,
+            dispatcher_instructions: "",
+        };
+
+        let legacy = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
+        let dag_out = PromptDag::with_defaults().build(&ctx).unwrap();
+        assert_eq!(normalize_volatile(&legacy), normalize_volatile(&dag_out));
+        // Sanity: the file content actually got injected.
+        assert!(
+            dag_out.contains("Be terse."),
+            "AGENTS.md content must appear in DAG output, got: {dag_out}"
+        );
+        assert!(
+            dag_out.contains("Treat me kindly."),
+            "USER.md content must appear in DAG output"
+        );
+    }
 }

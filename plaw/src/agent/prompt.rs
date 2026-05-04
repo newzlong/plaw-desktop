@@ -27,6 +27,18 @@ pub trait PromptSection: Send + Sync {
 #[derive(Default)]
 pub struct SystemPromptBuilder {
     sections: Vec<Box<dyn PromptSection>>,
+    /// Set to `true` only when constructed via [`Self::with_defaults`]
+    /// and not subsequently mutated. Cleared by [`Self::add_section`]
+    /// the moment the user appends anything custom — at which point
+    /// the legacy vec-iteration path takes over to preserve their
+    /// extra section.
+    ///
+    /// When `true`, [`Self::build`] delegates to
+    /// [`crate::agent::prompt_dag::PromptDag::with_defaults`] so the
+    /// production prompt is composed by the DAG (RFC F-7 PR-2B). The
+    /// byte-output is unchanged — see the parity tests in
+    /// `agent::prompt_dag::tests::parity_holds_*`.
+    is_default_layout: bool,
 }
 
 impl SystemPromptBuilder {
@@ -43,15 +55,32 @@ impl SystemPromptBuilder {
                 Box::new(RuntimeSection),
                 Box::new(ChannelMediaSection),
             ],
+            is_default_layout: true,
         }
     }
 
     pub fn add_section(mut self, section: Box<dyn PromptSection>) -> Self {
         self.sections.push(section);
+        // Any custom section invalidates the "this is exactly the
+        // default layout" assumption — fall through to the legacy
+        // vec path so the user's section actually runs.
+        self.is_default_layout = false;
         self
     }
 
     pub fn build(&self, ctx: &PromptContext<'_>) -> Result<String> {
+        if self.is_default_layout {
+            // F-7 PR-2B: the default layout now composes through the
+            // PromptDag, so the dependency edges declared in
+            // `docs/prompt-section-dag-design.md` §4.3 actually drive
+            // production order. Byte-equivalence with the previous
+            // vec-iteration path is held by the parity tests in
+            // `agent::prompt_dag::tests::parity_holds_*`.
+            return crate::agent::prompt_dag::PromptDag::with_defaults().build(ctx);
+        }
+        // Custom layout (user appended their own section): keep
+        // running the legacy vec-iteration path so anything they
+        // added still gets emitted at the position they declared.
         let mut output = String::new();
         for section in &self.sections {
             let part = section.build(ctx)?;
