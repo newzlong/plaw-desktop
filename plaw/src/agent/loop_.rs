@@ -37,6 +37,7 @@ mod streaming;
 mod tool_instructions;
 mod tool_io;
 mod tool_taxonomy;
+mod wrappers;
 
 use autosave::autosave_memory_key;
 use context::{build_context, build_hardware_context};
@@ -69,19 +70,12 @@ use non_cli_approval::await_non_cli_approval_decision;
 pub(crate) use shell_policy::build_shell_policy_instructions;
 pub(crate) use streaming::{DRAFT_CLEAR_SENTINEL, DRAFT_PROGRESS_SENTINEL};
 pub(crate) use tool_instructions::{build_tool_instructions, build_tool_instructions_from_specs};
+pub(crate) use wrappers::run_tool_call_loop_with_non_cli_approval_context;
 use tool_io::{
     append_calibration_reminder, maybe_inject_cron_add_delivery, tag_injected_content,
     truncate_tool_args_for_progress,
 };
 use tool_taxonomy::{ANTI_LOOP_EXEMPT_TOOLS, MAX_SAME_TOOL_PER_TURN, TIGHT_LOOP_TOOLS};
-
-tokio::task_local! {
-    static TOOL_LOOP_REPLY_TARGET: Option<String>;
-}
-
-tokio::task_local! {
-    static TOOL_LOOP_NON_CLI_APPROVAL_CONTEXT: Option<NonCliApprovalContext>;
-}
 
 /// Execute a single turn of the agent loop: send messages, parse tool calls,
 /// execute tools, and loop until the LLM produces a final text response.
@@ -120,106 +114,6 @@ pub(crate) async fn agent_turn(
     .await
 }
 
-/// Run the tool loop with channel reply_target context, used by channel runtimes
-/// to auto-populate delivery routing for scheduled reminders.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_tool_call_loop_with_reply_target(
-    provider: &dyn Provider,
-    history: &mut Vec<ChatMessage>,
-    tools_registry: &[Box<dyn Tool>],
-    observer: &dyn Observer,
-    provider_name: &str,
-    model: &str,
-    temperature: f64,
-    silent: bool,
-    approval: Option<&ApprovalManager>,
-    channel_name: &str,
-    reply_target: Option<&str>,
-    multimodal_config: &crate::config::MultimodalConfig,
-    max_tool_iterations: usize,
-    cancellation_token: Option<CancellationToken>,
-    on_delta: Option<tokio::sync::mpsc::Sender<String>>,
-    hooks: Option<&crate::hooks::HookRunner>,
-    excluded_tools: &[String],
-) -> Result<String> {
-    TOOL_LOOP_REPLY_TARGET
-        .scope(
-            reply_target.map(str::to_string),
-            run_tool_call_loop(
-                provider,
-                history,
-                tools_registry,
-                observer,
-                provider_name,
-                model,
-                temperature,
-                silent,
-                approval,
-                channel_name,
-                multimodal_config,
-                max_tool_iterations,
-                cancellation_token,
-                on_delta,
-                hooks,
-                excluded_tools,
-            ),
-        )
-        .await
-}
-
-/// Run the tool loop with optional non-CLI approval context scoped to this task.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_tool_call_loop_with_non_cli_approval_context(
-    provider: &dyn Provider,
-    history: &mut Vec<ChatMessage>,
-    tools_registry: &[Box<dyn Tool>],
-    observer: &dyn Observer,
-    provider_name: &str,
-    model: &str,
-    temperature: f64,
-    silent: bool,
-    approval: Option<&ApprovalManager>,
-    channel_name: &str,
-    non_cli_approval_context: Option<NonCliApprovalContext>,
-    multimodal_config: &crate::config::MultimodalConfig,
-    max_tool_iterations: usize,
-    cancellation_token: Option<CancellationToken>,
-    on_delta: Option<tokio::sync::mpsc::Sender<String>>,
-    hooks: Option<&crate::hooks::HookRunner>,
-    excluded_tools: &[String],
-) -> Result<String> {
-    let reply_target = non_cli_approval_context
-        .as_ref()
-        .map(|ctx| ctx.reply_target.clone());
-
-    TOOL_LOOP_NON_CLI_APPROVAL_CONTEXT
-        .scope(
-            non_cli_approval_context,
-            TOOL_LOOP_REPLY_TARGET.scope(
-                reply_target,
-                run_tool_call_loop(
-                    provider,
-                    history,
-                    tools_registry,
-                    observer,
-                    provider_name,
-                    model,
-                    temperature,
-                    silent,
-                    approval,
-                    channel_name,
-                    multimodal_config,
-                    max_tool_iterations,
-                    cancellation_token,
-                    on_delta,
-                    hooks,
-                    excluded_tools,
-                ),
-            ),
-        )
-        .await
-}
-
 // ── Agent Tool-Call Loop ──────────────────────────────────────────────────
 // Core agentic iteration: send conversation to the LLM, parse any tool
 // calls from the response, execute them, append results to history, and
@@ -253,19 +147,12 @@ pub(crate) async fn run_tool_call_loop(
     hooks: Option<&crate::hooks::HookRunner>,
     excluded_tools: &[String],
 ) -> Result<String> {
-    let non_cli_approval_context = TOOL_LOOP_NON_CLI_APPROVAL_CONTEXT
-        .try_with(Clone::clone)
-        .ok()
-        .flatten();
-    let channel_reply_target = TOOL_LOOP_REPLY_TARGET
-        .try_with(Clone::clone)
-        .ok()
-        .flatten()
-        .or_else(|| {
-            non_cli_approval_context
-                .as_ref()
-                .map(|ctx| ctx.reply_target.clone())
-        });
+    let non_cli_approval_context = wrappers::current_non_cli_approval_context();
+    let channel_reply_target = wrappers::current_reply_target().or_else(|| {
+        non_cli_approval_context
+            .as_ref()
+            .map(|ctx| ctx.reply_target.clone())
+    });
 
     let max_iterations = if max_tool_iterations == 0 {
         DEFAULT_MAX_TOOL_ITERATIONS
