@@ -27,6 +27,7 @@ mod context;
 mod errors;
 mod execution;
 pub(crate) mod history;
+mod native_tools;
 mod non_cli_approval;
 mod parsing;
 mod tool_taxonomy;
@@ -51,6 +52,9 @@ use parsing::{
 };
 use budgets::{
     AUTOSAVE_MIN_MESSAGE_CHARS, DEFAULT_MAX_TOOL_ITERATIONS, STREAM_CHUNK_MIN_CHARS,
+};
+use native_tools::{
+    build_native_assistant_history, build_native_assistant_history_from_parsed_calls,
 };
 pub(crate) use non_cli_approval::{NonCliApprovalContext, NonCliApprovalPrompt};
 use non_cli_approval::await_non_cli_approval_decision;
@@ -275,102 +279,8 @@ fn maybe_inject_cron_add_delivery(
     }
 }
 
-/// Convert a tool registry to OpenAI function-calling format for native tool support.
-fn tools_to_openai_format(tools_registry: &[Box<dyn Tool>]) -> Vec<serde_json::Value> {
-    tools_registry
-        .iter()
-        .map(|tool| {
-            serde_json::json!({
-                "type": "function",
-                "function": {
-                    "name": tool.name(),
-                    "description": tool.description(),
-                    "parameters": tool.parameters_schema()
-                }
-            })
-        })
-        .collect()
-}
-
 fn autosave_memory_key(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::new_v4())
-}
-
-/// Build assistant history entry in JSON format for native tool-call APIs.
-/// `convert_messages` in the OpenRouter provider parses this JSON to reconstruct
-/// the proper `NativeMessage` with structured `tool_calls`.
-fn build_native_assistant_history(
-    text: &str,
-    tool_calls: &[ToolCall],
-    reasoning_content: Option<&str>,
-) -> String {
-    let calls_json: Vec<serde_json::Value> = tool_calls
-        .iter()
-        .map(|tc| {
-            serde_json::json!({
-                "id": tc.id,
-                "name": tc.name,
-                "arguments": tc.arguments,
-            })
-        })
-        .collect();
-
-    let content = if text.trim().is_empty() {
-        serde_json::Value::Null
-    } else {
-        serde_json::Value::String(text.trim().to_string())
-    };
-
-    let mut obj = serde_json::json!({
-        "content": content,
-        "tool_calls": calls_json,
-    });
-
-    if let Some(rc) = reasoning_content {
-        obj.as_object_mut().unwrap().insert(
-            "reasoning_content".to_string(),
-            serde_json::Value::String(rc.to_string()),
-        );
-    }
-
-    obj.to_string()
-}
-
-fn build_native_assistant_history_from_parsed_calls(
-    text: &str,
-    tool_calls: &[ParsedToolCall],
-    reasoning_content: Option<&str>,
-) -> Option<String> {
-    let calls_json = tool_calls
-        .iter()
-        .map(|tc| {
-            Some(serde_json::json!({
-                "id": tc.tool_call_id.clone()?,
-                "name": tc.name,
-                "arguments": serde_json::to_string(&tc.arguments).unwrap_or_else(|_| "{}".to_string()),
-            }))
-        })
-        .collect::<Option<Vec<_>>>()?;
-
-    let content = if text.trim().is_empty() {
-        serde_json::Value::Null
-    } else {
-        serde_json::Value::String(text.trim().to_string())
-    };
-
-    let mut obj = serde_json::json!({
-        "content": content,
-        "tool_calls": calls_json,
-    });
-
-    if let Some(rc) = reasoning_content {
-        obj.as_object_mut().unwrap().insert(
-            "reasoning_content".to_string(),
-            serde_json::Value::String(rc.to_string()),
-        );
-    }
-
-    Some(obj.to_string())
 }
 
 fn build_assistant_history_with_tool_calls(text: &str, tool_calls: &[ToolCall]) -> String {
@@ -2193,6 +2103,7 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
 mod tests {
     use super::*;
     use super::budgets::DEFAULT_MAX_HISTORY_MESSAGES;
+    use super::native_tools::tools_to_openai_format;
     use async_trait::async_trait;
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use std::collections::VecDeque;
