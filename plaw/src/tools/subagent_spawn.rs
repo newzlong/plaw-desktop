@@ -719,8 +719,9 @@ mod tests {
         }
 
         let tool = SubAgentSpawnTool::new(
-            sample_agents_raw(),
+            wrap_agents(sample_agents_raw()),
             None,
+            String::new(),
             test_security(),
             providers::ProviderRuntimeOptions::default(),
             registry,

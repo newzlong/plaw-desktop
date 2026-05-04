@@ -107,13 +107,19 @@ static INJECTION_MARKER_RE: LazyLock<Regex> = LazyLock::new(|| {
     // Explicit prompt-injection markers. The plaw security guard already
     // catches scored injections >0.5; this layer surfaces ones the guard
     // lets through (subtler [SYSTEM] / DAN-style attempts) for refusal.
-    Regex::new(
-        r"(?i)\[\s*(?:system|admin|developer|override|jailbreak)\b\
-         |<\|im_(?:start|end)\|>\
-         |\bignore (?:the )?(?:above|previous|prior)\b\
-         |\b(?:你是|you are)\s+DAN\b\
-         |\bforget (?:all )?(?:your )?(?:previous |prior )?instructions\b",
-    )
+    //
+    // Note: do NOT use `\<newline>` line continuation inside a raw string
+    // — Rust raw strings preserve `\` literally, so the regex would see
+    // a literal backslash + space chain and fail to match. Concatenate
+    // alternatives explicitly with `concat!` instead.
+    Regex::new(concat!(
+        r"(?i)",
+        r"\[\s*(?:system|admin|developer|override|jailbreak)\b",
+        r"|<\|im_(?:start|end)\|>",
+        r"|\bignore (?:the )?(?:above|previous|prior)\b",
+        r"|(?:你是|you are)\s+DAN\b",
+        r"|\bforget (?:all )?(?:your )?(?:previous |prior )?instructions\b",
+    ))
     .expect("INJECTION_MARKER_RE is a valid regex")
 });
 
@@ -122,7 +128,11 @@ static SAFETY_RISK_RE: LazyLock<Regex> = LazyLock::new(|| {
     // legitimate uses (locked out of own house, security research,
     // recovering own account). The scaffold for BorderlineSafety asks an
     // intent-check question rather than refusing outright.
-    Regex::new(r"(?i)\b撬锁|\b破解\b|\b绕过.*(?:检测|限制|风控|审核)\b|\b入侵\b|\bpick\s+(?:the\s+)?lock\b")
+    // Note: `\b` (word boundary) is the boundary between \w and \W in
+    // regex — but Chinese characters are not \w by default in the `regex`
+    // crate, so `\b撬` would fail unless preceded by an ASCII alphanum.
+    // Drop \b for the Chinese patterns and rely on substring containment.
+    Regex::new(r"(?i)撬锁|破解|绕过.*(?:检测|限制|风控|审核)|入侵|pick\s+(?:the\s+)?lock")
         .expect("SAFETY_RISK_RE is a valid regex")
 });
 

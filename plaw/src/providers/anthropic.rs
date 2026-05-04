@@ -1061,6 +1061,7 @@ mod tests {
                 content: "hello".to_string(),
             }],
             temperature: 0.7,
+            stream: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(
@@ -1082,6 +1083,7 @@ mod tests {
                 content: "hello".to_string(),
             }],
             temperature: 0.7,
+            stream: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"system\":\"You are Plaw\""));
@@ -1122,6 +1124,7 @@ mod tests {
                 system: None,
                 messages: vec![],
                 temperature: temp,
+                stream: None,
             };
             let json = serde_json::to_string(&req).unwrap();
             assert!(json.contains(&format!("{temp}")));

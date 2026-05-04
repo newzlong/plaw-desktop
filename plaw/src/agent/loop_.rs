@@ -4240,7 +4240,10 @@ Done."#;
 
     const _: () = {
         assert!(DEFAULT_MAX_TOOL_ITERATIONS > 0);
-        assert!(DEFAULT_MAX_TOOL_ITERATIONS <= 100);
+        // Note: DEFAULT_MAX_TOOL_ITERATIONS was deliberately bumped to
+        // usize::MAX (no built-in cap; runtime config controls bound).
+        // The previous `<= 100` upper bound assertion is therefore no
+        // longer applicable; drop it instead of tightening the constant.
         assert!(DEFAULT_MAX_HISTORY_MESSAGES > 0);
         assert!(DEFAULT_MAX_HISTORY_MESSAGES <= 1000);
     };

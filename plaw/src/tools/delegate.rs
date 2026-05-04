@@ -1356,7 +1356,7 @@ mod tests {
 
         let provider = OneToolThenFinalProvider;
         let result = tool
-            .execute_agentic("agentic", &config, &provider, "run", 0.2)
+            .execute_agentic("agentic", &config, &provider, "run", 0.2, "openrouter", "model-test")
             .await
             .unwrap();
 
@@ -1370,7 +1370,7 @@ mod tests {
         let config = agentic_config(vec!["delegate".to_string()], 10);
         let tool = DelegateTool::new(wrap_agents(HashMap::new()), None, test_security()).with_parent_tools(
             Arc::new(vec![Arc::new(DelegateTool::new(
-                HashMap::new(),
+                wrap_agents(HashMap::new()),
                 None,
                 test_security(),
             ))]),
@@ -1378,7 +1378,7 @@ mod tests {
 
         let provider = OneToolThenFinalProvider;
         let result = tool
-            .execute_agentic("agentic", &config, &provider, "run", 0.2)
+            .execute_agentic("agentic", &config, &provider, "run", 0.2, "openrouter", "model-test")
             .await
             .unwrap();
 
@@ -1398,7 +1398,7 @@ mod tests {
 
         let provider = InfiniteToolCallProvider;
         let result = tool
-            .execute_agentic("agentic", &config, &provider, "run", 0.2)
+            .execute_agentic("agentic", &config, &provider, "run", 0.2, "openrouter", "model-test")
             .await
             .unwrap();
 
@@ -1418,7 +1418,7 @@ mod tests {
 
         let provider = FailingProvider;
         let result = tool
-            .execute_agentic("agentic", &config, &provider, "run", 0.2)
+            .execute_agentic("agentic", &config, &provider, "run", 0.2, "openrouter", "model-test")
             .await
             .unwrap();
 
@@ -1517,8 +1517,8 @@ mod tests {
             },
         );
         let tool = DelegateTool::new(wrap_agents(agents), None, test_security());
-        let agent_config = tool
-            .agents
+        let agents_map = tool.agents.read().unwrap();
+        let agent_config = agents_map
             .get("tester")
             .expect("tester config should exist");
 

@@ -306,6 +306,7 @@ mod tests {
             1_000_000,
             30,
             "test".to_string(),
+            false,
         )
     }
 
@@ -421,7 +422,7 @@ mod tests {
     #[test]
     fn validate_requires_allowlist() {
         let security = Arc::new(SecurityPolicy::default());
-        let tool = HttpRequestTool::new(security, vec![], 1_000_000, 30, "test".to_string());
+        let tool = HttpRequestTool::new(security, vec![], 1_000_000, 30, "test".to_string(), false);
         let err = tool
             .validate_url("https://example.com")
             .unwrap_err()
@@ -543,6 +544,7 @@ mod tests {
             1_000_000,
             30,
             "test".to_string(),
+            false,
         );
         let result = tool
             .execute(json!({"url": "https://example.com"}))
@@ -564,6 +566,7 @@ mod tests {
             1_000_000,
             30,
             "test".to_string(),
+            false,
         );
         let result = tool
             .execute(json!({"url": "https://example.com"}))
@@ -588,6 +591,7 @@ mod tests {
             10,
             30,
             "test".to_string(),
+            false,
         );
         let text = "hello world this is long";
         let truncated = tool.truncate_response(text);
