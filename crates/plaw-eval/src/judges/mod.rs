@@ -8,7 +8,7 @@ pub mod pairwise;
 
 pub use builder::{api_key_env_var, build_from_spec};
 pub use client::{
-    AnthropicClient, JudgeClient, JudgeCompletion, JudgeFamily, MockJudgeClient,
+    AnthropicClient, CachedJudgeClient, JudgeClient, JudgeCompletion, JudgeFamily, MockJudgeClient,
     OpenAiCompatClient, RetryingJudgeClient, DEFAULT_HTTP_TIMEOUT,
 };
 pub use jury::{Jury, JuryMemberRecord, JuryVerdict};
