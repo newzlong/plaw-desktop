@@ -571,12 +571,18 @@ async fn cmd_run(
         let effective_judge_spec = judge_spec_override
             .clone()
             .unwrap_or_else(|| suite.default_judge.clone());
-        let judge = build_from_spec(&effective_judge_spec).with_context(|| {
+        let raw_judge = build_from_spec(&effective_judge_spec).with_context(|| {
             format!(
                 "building judge for suite '{}' (provider={}, model={})",
                 suite.name, effective_judge_spec.provider, effective_judge_spec.model
             )
         })?;
+        // Wrap with bounded retry so transient judge errors (timeout,
+        // 429 rate limit, connection reset) don't leave cases with
+        // empty metric_scores. 3 attempts × 1s/2s backoff catches the
+        // common case without doubling cost on permanent failures.
+        let judge: std::sync::Arc<dyn plaw_eval::judges::JudgeClient> =
+            std::sync::Arc::new(plaw_eval::judges::RetryingJudgeClient::new(raw_judge, 3));
 
         let mut cfg = RunnerConfig::new(suite.clone(), plaw, repo.clone());
         cfg.cancel = cancel.clone();

@@ -55,6 +55,85 @@ pub trait JudgeClient: Send + Sync {
     async fn complete(&self, system: &str, user: &str) -> Result<JudgeCompletion>;
 }
 
+/// Wraps any [`JudgeClient`] with bounded retry + exponential backoff.
+///
+/// Why: in the post-Phase-2 baseline (run d5ae203b) 173/400 cases had
+/// silent metric-scoring failures because long-response cases triggered
+/// transient judge errors (timeout / 429 rate-limit / connection reset).
+/// A bounded retry catches those without doubling cost on permanent
+/// failures. We blanket-retry on any `Err` rather than introspecting
+/// reqwest error variants — the trait surface returns `anyhow::Error`
+/// so concrete error types are erased here, and the small cost of
+/// retrying a deterministic-failure case 3 times is negligible.
+///
+/// Backoff is `base_delay * 2^(attempt - 1)`: 1s, 2s, 4s by default.
+pub struct RetryingJudgeClient {
+    inner: std::sync::Arc<dyn JudgeClient>,
+    max_attempts: u32,
+    base_delay: Duration,
+}
+
+impl RetryingJudgeClient {
+    /// Wrap `inner` so its `complete` is retried up to `max_attempts`
+    /// times on error. `max_attempts == 1` is equivalent to no retry.
+    pub fn new(inner: std::sync::Arc<dyn JudgeClient>, max_attempts: u32) -> Self {
+        Self {
+            inner,
+            max_attempts: max_attempts.max(1),
+            base_delay: Duration::from_secs(1),
+        }
+    }
+
+    pub fn with_base_delay(mut self, delay: Duration) -> Self {
+        self.base_delay = delay;
+        self
+    }
+}
+
+#[async_trait]
+impl JudgeClient for RetryingJudgeClient {
+    fn family(&self) -> JudgeFamily {
+        self.inner.family()
+    }
+    fn model(&self) -> &str {
+        self.inner.model()
+    }
+    async fn complete(&self, system: &str, user: &str) -> Result<JudgeCompletion> {
+        let mut last_err: Option<anyhow::Error> = None;
+        for attempt in 0..self.max_attempts {
+            if attempt > 0 {
+                let delay = self
+                    .base_delay
+                    .saturating_mul(1u32 << (attempt - 1).min(8));
+                tracing::debug!(
+                    attempt,
+                    delay_ms = delay.as_millis() as u64,
+                    "retrying judge call after error"
+                );
+                tokio::time::sleep(delay).await;
+            }
+            match self.inner.complete(system, user).await {
+                Ok(c) => {
+                    if attempt > 0 {
+                        tracing::info!(
+                            attempt,
+                            model = self.inner.model(),
+                            "judge recovered after retry"
+                        );
+                    }
+                    return Ok(c);
+                }
+                Err(e) => {
+                    tracing::debug!(attempt, error = %e, "judge attempt failed");
+                    last_err = Some(e);
+                }
+            }
+        }
+        Err(last_err
+            .unwrap_or_else(|| anyhow!("RetryingJudgeClient: max_attempts is 0")))
+    }
+}
+
 /// Default per-call timeout if `with_timeout` isn't set.
 pub const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -370,5 +449,84 @@ mod tests {
         assert_eq!(r1.text, "A");
         assert_eq!(r2.text, "B");
         assert_eq!(r3.text, "A"); // wraps
+    }
+
+    /// Test-only judge that fails the first N calls then succeeds. Used
+    /// to verify [`RetryingJudgeClient`] retry-then-recover semantics.
+    struct FlakyJudge {
+        fail_first: std::sync::atomic::AtomicU32,
+        attempts: std::sync::atomic::AtomicU32,
+    }
+    impl FlakyJudge {
+        fn new(fail_first: u32) -> Self {
+            Self {
+                fail_first: std::sync::atomic::AtomicU32::new(fail_first),
+                attempts: std::sync::atomic::AtomicU32::new(0),
+            }
+        }
+        fn attempt_count(&self) -> u32 {
+            self.attempts.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+    #[async_trait]
+    impl JudgeClient for FlakyJudge {
+        fn family(&self) -> JudgeFamily {
+            JudgeFamily::Kimi
+        }
+        fn model(&self) -> &str {
+            "flaky"
+        }
+        async fn complete(&self, _system: &str, _user: &str) -> Result<JudgeCompletion> {
+            self.attempts
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let prev = self
+                .fail_first
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            if prev > 0 {
+                Err(anyhow!("simulated transient error"))
+            } else {
+                Ok(JudgeCompletion {
+                    text: "ok".into(),
+                    family: JudgeFamily::Kimi,
+                    model: "flaky".into(),
+                })
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn retrying_recovers_after_transient_failures() {
+        // Inner fails twice, succeeds on the 3rd. With max_attempts=3 the
+        // wrapper should report success.
+        let inner = std::sync::Arc::new(FlakyJudge::new(2));
+        let inner_dyn: std::sync::Arc<dyn JudgeClient> = inner.clone();
+        let retrying = RetryingJudgeClient::new(inner_dyn, 3)
+            .with_base_delay(std::time::Duration::from_millis(1));
+        let r = retrying.complete("sys", "user").await;
+        assert!(r.is_ok(), "expected recovery, got {:?}", r);
+        assert_eq!(inner.attempt_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn retrying_returns_last_error_when_all_attempts_fail() {
+        let inner = std::sync::Arc::new(FlakyJudge::new(10)); // always fails
+        let inner_dyn: std::sync::Arc<dyn JudgeClient> = inner.clone();
+        let retrying = RetryingJudgeClient::new(inner_dyn, 3)
+            .with_base_delay(std::time::Duration::from_millis(1));
+        let r = retrying.complete("sys", "user").await;
+        assert!(r.is_err());
+        // Exactly max_attempts calls were made — no infinite loop.
+        assert_eq!(inner.attempt_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn retrying_succeeds_first_try_without_extra_calls() {
+        let inner = std::sync::Arc::new(FlakyJudge::new(0)); // never fails
+        let inner_dyn: std::sync::Arc<dyn JudgeClient> = inner.clone();
+        let retrying = RetryingJudgeClient::new(inner_dyn, 3);
+        let r = retrying.complete("sys", "user").await;
+        assert!(r.is_ok());
+        // No retry needed — only 1 inner call.
+        assert_eq!(inner.attempt_count(), 1);
     }
 }

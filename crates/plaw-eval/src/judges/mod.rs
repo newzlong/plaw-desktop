@@ -9,7 +9,7 @@ pub mod pairwise;
 pub use builder::{api_key_env_var, build_from_spec};
 pub use client::{
     AnthropicClient, JudgeClient, JudgeCompletion, JudgeFamily, MockJudgeClient,
-    OpenAiCompatClient, DEFAULT_HTTP_TIMEOUT,
+    OpenAiCompatClient, RetryingJudgeClient, DEFAULT_HTTP_TIMEOUT,
 };
 pub use jury::{Jury, JuryMemberRecord, JuryVerdict};
 pub use pairwise::{
