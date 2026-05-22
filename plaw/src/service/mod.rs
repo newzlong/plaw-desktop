@@ -1,3 +1,13 @@
+// Items in this module are reached only through the `plaw service ...`
+// CLI subcommand handler in `main.rs:1075` (`service::handle_command`).
+// main.rs is part of the bin, not the lib, so `cargo build --lib`'s
+// dead-code analysis can't trace the chain — the entry point and its
+// per-init-system helpers (systemd, launchd, openrc, Windows Task
+// Scheduler) all get flagged as dead. Module-level allow captures the
+// "this entire file is `plaw service install/start/stop` plumbing"
+// intent in one place rather than 42 per-item annotations.
+#![allow(dead_code)]
+
 use crate::config::Config;
 use anyhow::{bail, Context, Result};
 use std::fs;

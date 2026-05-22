@@ -1,3 +1,17 @@
+// Items in this module are reached only through the `plaw onboard ...`
+// and `plaw model ...` CLI subcommand handlers wired in `main.rs`
+// (specifically lines 788/790/792 for the wizard entry points and
+// 1025/1027/1031/1033/1034 for the model commands). main.rs is part
+// of the bin, not the lib, so `cargo build --lib`'s dead-code analysis
+// can't trace the chain — the 10 pub entry points and ~74 transitive
+// internal helpers (wizard step prompters, channel-specific setup
+// flows, model catalogue probing utilities) all get flagged as dead.
+//
+// Module-level allow captures the "this entire file is interactive-
+// setup-wizard plumbing" intent in one place rather than spread
+// across 84 per-item annotations.
+#![allow(dead_code)]
+
 use crate::config::schema::{
     default_nostr_relays, DingTalkConfig, IrcConfig, LarkReceiveMode, LinqConfig,
     NextcloudTalkConfig, NostrConfig, QQConfig, QQReceiveMode, SignalConfig, StreamMode,
