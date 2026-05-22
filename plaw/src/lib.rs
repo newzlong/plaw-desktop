@@ -33,7 +33,13 @@
     clippy::unused_self,
     clippy::cast_precision_loss,
     clippy::unnecessary_wraps,
-    dead_code
+    // dead_code removed 2026-05-23 — see docs/dead-code-audit-2026-05-04.md.
+    // Every formerly-dead item now carries either #[allow(dead_code)] with
+    // a rationale comment naming its future-wiring intent, or has been
+    // deleted, or is gated #[cfg(test)]. Future dead code surfaces as
+    // a normal compiler warning at point of declaration — the audit doc
+    // explains how to triage (CLI-only / feature-gated / dormant /
+    // genuinely dead).
 )]
 
 use clap::Subcommand;

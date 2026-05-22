@@ -151,10 +151,17 @@ impl NativeRuntime {
         }
     }
 
+    /// Accessor for the detected shell's kind label. Currently no
+    /// in-tree caller — would be consumed by a future doctor / status
+    /// surface.
+    #[allow(dead_code)]
     pub(crate) fn selected_shell_kind(&self) -> Option<&'static str> {
         self.shell.as_ref().map(|shell| shell.kind.as_str())
     }
 
+    /// Accessor for the detected shell's binary path. Same dormant
+    /// status as `selected_shell_kind`.
+    #[allow(dead_code)]
     pub(crate) fn selected_shell_program(&self) -> Option<&Path> {
         self.shell.as_ref().map(|shell| shell.program.as_path())
     }
