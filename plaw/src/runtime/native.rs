@@ -22,6 +22,7 @@ enum ShellKind {
 }
 
 impl ShellKind {
+    #[allow(dead_code)] // shell-kind label used by selected_shell_kind accessor
     fn as_str(self) -> &'static str {
         match self {
             ShellKind::Sh => "sh",

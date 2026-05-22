@@ -79,6 +79,7 @@ impl HttpRequestTool {
         result
     }
 
+    #[allow(dead_code)] // Helper for the unwired debug-trace path
     fn redact_headers_for_display(headers: &[(String, String)]) -> Vec<(String, String)> {
         headers
             .iter()

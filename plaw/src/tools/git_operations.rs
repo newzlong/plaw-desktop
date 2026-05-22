@@ -57,7 +57,9 @@ impl GitOperationsTool {
         )
     }
 
-    /// Check if an operation is read-only
+    /// Check if an operation is read-only. Currently no caller — kept for the
+    /// future autonomy-aware path that would auto-allow read-only git ops.
+    #[allow(dead_code)]
     fn is_read_only(&self, operation: &str) -> bool {
         matches!(
             operation,

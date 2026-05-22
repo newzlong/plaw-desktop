@@ -123,6 +123,7 @@ impl IpcDb {
         }
     }
 
+    #[allow(dead_code)] // accessor for the field; consumed only by tests today
     pub fn agent_id(&self) -> &str {
         &self.agent_id
     }

@@ -65,8 +65,15 @@ pub struct BrowserTool {
     allowed_domains: Vec<String>,
     session_name: Option<String>,
     backend: String,
+    // The three `native_*` fields are read only by the
+    // `#[cfg(feature = "browser-native")]` paths. Default builds omit
+    // the feature, so the fields are construction-time-set but
+    // dead-from-the-lib's-POV.
+    #[allow(dead_code)]
     native_headless: bool,
+    #[allow(dead_code)]
     native_webdriver_url: String,
+    #[allow(dead_code)]
     native_chrome_path: Option<String>,
     computer_use: ComputerUseConfig,
     #[cfg(feature = "browser-native")]
@@ -102,6 +109,7 @@ impl BrowserBackendKind {
         }
     }
 
+    #[allow(dead_code)] // backend label for logs / future telemetry
     fn as_str(self) -> &'static str {
         match self {
             Self::AgentBrowser => "agent_browser",
@@ -2384,6 +2392,8 @@ fn unavailable_action_for_backend_error(action: &str, backend: ResolvedBackend) 
     )
 }
 
+// Consumed only by the `#[cfg(feature = "browser-native")]` retry path.
+#[allow(dead_code)]
 fn is_recoverable_rust_native_error(err: &anyhow::Error) -> bool {
     let message = format!("{err:#}").to_ascii_lowercase();
 
