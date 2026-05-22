@@ -20,6 +20,7 @@ use std::fmt::Write;
 use std::sync::Arc;
 
 const COMPOSIO_API_BASE_V3: &str = "https://backend.composio.dev/api/v3";
+#[allow(dead_code)] // Legacy v2 base, retained for the get_connection_url_v2 path
 const COMPOSIO_API_BASE_V2: &str = "https://backend.composio.dev/api";
 const COMPOSIO_TOOL_VERSION_LATEST: &str = "latest";
 
@@ -486,6 +487,7 @@ impl ComposioTool {
         })
     }
 
+    #[allow(dead_code)] // Legacy v2 OAuth path, retained for fallback
     async fn get_connection_url_v2(
         &self,
         app_name: &str,

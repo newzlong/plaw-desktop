@@ -287,6 +287,7 @@ impl WasmRuntime {
         Ok(normalized)
     }
 
+    #[allow(dead_code)] // reached only by the runtime-wasm-feature-gated load path
     fn check_module_integrity(&self, module_name: &str, wasm_bytes: &[u8]) -> Result<String> {
         let digest = hex::encode(Sha256::digest(wasm_bytes));
         let normalized_pins = self.normalize_module_sha256_pins()?;
@@ -327,6 +328,7 @@ impl WasmRuntime {
         Ok(digest)
     }
 
+    #[allow(dead_code)] // reached only by the runtime-wasm-feature-gated load path
     fn validate_capabilities(&self, caps: &WasmCapabilities) -> Result<WasmCapabilities> {
         let default_hosts = self.normalize_hosts_with_policy(
             self.config.allowed_hosts.iter().map(String::as_str),
