@@ -1,3 +1,12 @@
+// Items in this module are reached only through the `plaw migrate ...`
+// CLI subcommand handler in `main.rs:1111` (`migration::handle_command`).
+// main.rs is part of the bin, not the lib, so `cargo build --lib`'s
+// dead-code analysis can't trace the chain — the entry point and all
+// its private helpers are flagged as dead. Module-level allow captures
+// the "this entire file is one-shot first-launch migration plumbing"
+// intent in one place rather than across ~19 per-item annotations.
+#![allow(dead_code)]
+
 use crate::config::Config;
 use crate::memory::{self, Memory, MemoryCategory};
 use anyhow::{bail, Context, Result};

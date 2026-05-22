@@ -1,3 +1,12 @@
+// Items in this module are reached only through the `plaw daemon`
+// CLI subcommand handler in `main.rs:904` (`daemon::run`). main.rs is
+// part of the bin, not the lib, so `cargo build --lib`'s dead-code
+// analysis can't trace the chain — the entry point and its background-
+// process supervisor helpers are flagged as dead. Module-level allow
+// captures the "this entire file is `plaw daemon` background-mode
+// plumbing" intent in one place.
+#![allow(dead_code)]
+
 use crate::config::Config;
 use anyhow::Result;
 use chrono::Utc;
