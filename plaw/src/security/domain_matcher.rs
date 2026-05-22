@@ -1,3 +1,11 @@
+// Dormant: `DomainMatcher::new` is constructed once at config-load
+// (config/schema.rs) but no runtime path calls the resulting matcher's
+// `is_gated`/`patterns` accessors. The dormant chain reaches `validate_pattern`
+// only through `security/estop.rs`, itself a dormant subsystem.
+// Module-level allow keeps the wiring intact for the eventual
+// `is_gated`-based access-control surface.
+#![allow(dead_code)]
+
 use anyhow::{bail, Result};
 use std::collections::BTreeSet;
 

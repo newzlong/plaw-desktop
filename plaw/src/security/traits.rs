@@ -1,4 +1,12 @@
 //! Sandbox trait for pluggable OS-level isolation.
+
+// Dormant subsystem: the Sandbox trait + NoopSandbox impl are scaffolding
+// for a future shell-execution isolation layer. No runtime caller wires
+// a sandbox today (the active path executes shell directly with autonomy/
+// allowlist gating). Module-level allow keeps the designed surface
+// intact for the eventual wiring without firing dead_code in the
+// meantime.
+#![allow(dead_code)]
 //!
 //! This module defines the [`Sandbox`] trait, which abstracts OS-level process
 //! isolation backends. Implementations wrap shell commands with platform-specific

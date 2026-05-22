@@ -1,5 +1,11 @@
 //! Auto-detection of available security features
 
+// Dormant: `create_sandbox` / `detect_best_sandbox` factories build the
+// Sandbox trait objects from security/traits.rs; no runtime caller
+// invokes them today. Module-level allow per the same dormant-subsystem
+// rationale as security/traits.rs.
+#![allow(dead_code)]
+
 use crate::config::{SandboxBackend, SecurityConfig};
 use crate::security::traits::Sandbox;
 use std::sync::Arc;

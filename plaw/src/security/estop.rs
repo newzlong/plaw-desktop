@@ -1,3 +1,11 @@
+// Dormant emergency-stop subsystem: EstopManager, EstopState,
+// EstopLevel, ResumeSelector, and helper utilities form a designed
+// kill-switch surface for the agent loop (gated by OTP via
+// security/otp.rs), but no runtime path constructs an EstopManager
+// today. The subsystem will land alongside the OTP and audit
+// subsystems as a unit (see security/traits.rs rationale).
+#![allow(dead_code)]
+
 use crate::config::EstopConfig;
 use crate::security::domain_matcher::DomainMatcher;
 use crate::security::otp::OtpValidator;

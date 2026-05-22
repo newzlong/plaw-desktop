@@ -1,3 +1,10 @@
+// Dormant 2FA subsystem: OtpValidator + TOTP primitives (base32
+// encode/decode, RFC 6238 code computation, secret file persistence)
+// designed for the security/estop.rs emergency-stop gate. No runtime
+// caller constructs an OtpValidator today. The subsystem will land as
+// a unit with estop + audit (see security/traits.rs rationale).
+#![allow(dead_code)]
+
 use crate::config::OtpConfig;
 use crate::security::secrets::SecretStore;
 use anyhow::{Context, Result};
