@@ -1,3 +1,13 @@
+// Items in this module are reached only through the `plaw doctor ...`
+// CLI subcommand handlers in `main.rs` (`doctor::run` at main.rs:1095,
+// `doctor::run_models` at main.rs:1082, `doctor::run_traces` at
+// main.rs:1088). main.rs is part of the bin, not the lib, so
+// `cargo build --lib`'s dead-code analysis can't trace the chain —
+// the entry points and all transitive helpers are flagged as dead.
+// Module-level allow captures the "this entire file is `plaw doctor`
+// diagnostic plumbing" intent in one place.
+#![allow(dead_code)]
+
 use crate::config::Config;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
