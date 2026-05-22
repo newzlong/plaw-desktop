@@ -1,3 +1,16 @@
+// Items in this module are reached only through the `plaw skills ...`
+// CLI subcommand handler in `main.rs:1108` (`skills::handle_command`).
+// main.rs is part of the bin, not the lib, so `cargo build --lib`'s
+// dead-code analysis can't trace the chain — the entry point and its
+// install / list / load / source-trust-check / git-metadata-removal
+// helpers all get flagged as dead. Verified no workspace sibling crate
+// (crates/*) uses skills::* either.
+//
+// Module-level allow captures the "this entire file is `plaw skills
+// install/list/search/load` plumbing" intent in one place rather
+// than 26 per-item annotations.
+#![allow(dead_code)]
+
 use anyhow::{Context, Result};
 use directories::UserDirs;
 use serde::{Deserialize, Serialize};

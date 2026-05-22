@@ -1,3 +1,10 @@
+// Clawhub skill-registry HTTP client. Consumed only by the
+// `skills/mod.rs` install / search functions, which are themselves
+// reached via the `plaw skills ...` CLI handler. Same reasoning as
+// the module-level allow on skills/mod.rs — the entire surface is
+// CLI plumbing, invisible to `cargo build --lib`'s dead-code pass.
+#![allow(dead_code)]
+
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::Path;
