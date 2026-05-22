@@ -66,6 +66,11 @@ pub use prompt_guard::{GuardAction, GuardResult, PromptGuard};
 
 /// Redact sensitive values for safe logging. Shows first 4 chars + "***" suffix.
 /// This function intentionally breaks the data-flow taint chain for static analysis.
+/// Currently no in-tree caller uses this helper (the `loop_/credentials.rs`
+/// `scrub_credentials` regex-based scrubber covers the inbound tool-result
+/// path; outbound channels use ad-hoc redaction). Kept as the canonical
+/// crate-level redact primitive for future call sites.
+#[allow(dead_code)]
 pub fn redact(value: &str) -> String {
     if value.len() <= 4 {
         "***".to_string()

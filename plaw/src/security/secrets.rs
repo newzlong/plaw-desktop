@@ -28,6 +28,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Length of the random encryption key in bytes (256-bit, matches `ChaCha20`).
+/// Production code receives the key length implicitly via `ChaCha20Poly1305`'s
+/// type-level constants; this constant exists for the test fixture that
+/// asserts the on-disk key file is hex-encoded to the expected length.
+/// Gated `#[cfg(test)]` so it doesn't fire dead_code in non-test builds.
+#[cfg(test)]
 const KEY_LEN: usize = 32;
 
 /// ChaCha20-Poly1305 nonce length in bytes.

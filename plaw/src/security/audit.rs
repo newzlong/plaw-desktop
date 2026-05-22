@@ -1,5 +1,11 @@
 //! Audit logging for security events
 
+// Dormant: `CommandExecutionLog`, `with_security` builder, and the
+// `buffer` field are designed audit-trail infrastructure that hasn't
+// been wired into the shell tool / agent loop yet. The audit subsystem
+// will land alongside the sandbox subsystem (see security/traits.rs).
+#![allow(dead_code)]
+
 use crate::config::AuditConfig;
 use anyhow::Result;
 use chrono::{DateTime, Utc};

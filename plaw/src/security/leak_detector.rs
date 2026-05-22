@@ -3,6 +3,13 @@
 //! Scans outbound messages for potential credential leaks before they are sent,
 //! preventing accidental exfiltration of API keys, tokens, passwords, and other
 //! sensitive values.
+
+// Dormant: `LeakDetector` + `LeakResult` form a designed outbound-leak
+// guard that hasn't been wired into the channel send paths yet. The
+// `loop_/credentials.rs` `scrub_credentials` helper covers the
+// inbound-tool-result direction today; the LeakDetector here is the
+// missing outbound counterpart waiting for channel-side integration.
+#![allow(dead_code)]
 //!
 //! Contributed from RustyClaw (MIT licensed).
 

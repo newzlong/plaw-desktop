@@ -44,6 +44,11 @@ pub enum GuardAction {
 }
 
 impl GuardAction {
+    /// Parse a config-string into the action enum. Currently no caller
+    /// dispatches from a config string — the action is read directly
+    /// from typed config. Kept for the eventual config-file or
+    /// CLI-flag wiring.
+    #[allow(dead_code)]
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "block" => Self::Block,

@@ -1,5 +1,9 @@
 //! Docker sandbox (container isolation)
 
+// Dormant: paired with security/traits.rs Sandbox trait. No active code
+// path constructs a DockerSandbox today (see security/traits.rs rationale).
+#![allow(dead_code)]
+
 use crate::security::traits::Sandbox;
 use std::process::Command;
 
