@@ -101,7 +101,9 @@ pub fn config_from_wizard_choice(choice: usize, devices: &[DiscoveredDevice]) ->
     }
 }
 
-/// Handle `plaw hardware` subcommands.
+/// Handle `plaw hardware` subcommands. Wired from `main.rs:1121`;
+/// lib-only build can't see the bin caller.
+#[allow(dead_code)]
 #[allow(clippy::module_name_repetitions)]
 pub fn handle_command(cmd: crate::HardwareCommands, _config: &Config) -> Result<()> {
     #[cfg(not(feature = "hardware"))]

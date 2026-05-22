@@ -15,6 +15,10 @@ use tokio::process::Command;
 /// - `ssh -R 80:localhost:{port} serveo.net`
 pub struct CustomTunnel {
     start_command: String,
+    /// Optional URL to poll for tunnel-up confirmation. Set from config
+    /// but never read — the active CustomTunnel implementation skips
+    /// health polling and just exits when start_command fails.
+    #[allow(dead_code)]
     health_url: Option<String>,
     url_pattern: Option<String>,
     proc: SharedProcess,

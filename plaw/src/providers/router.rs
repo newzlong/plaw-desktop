@@ -22,6 +22,10 @@ pub struct RouterProvider {
     routes: HashMap<String, (usize, String)>, // hint → (provider_index, model)
     providers: Vec<(String, Box<dyn Provider>)>,
     default_index: usize,
+    /// Stored at construction (from config); the active routing path
+    /// uses `default_index` directly into `providers` and doesn't read
+    /// this label back. Kept for future debug/observability surfaces.
+    #[allow(dead_code)]
     default_model: String,
     /// Vision support override from config (`None` = defer to providers).
     vision_override: Option<bool>,

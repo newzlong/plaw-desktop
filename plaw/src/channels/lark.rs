@@ -1822,6 +1822,10 @@ fn parse_post_content_details(content: &str) -> Option<ParsedPostContent> {
     }
 }
 
+/// Thin wrapper around `parse_post_content_details` returning only the
+/// text portion. Currently no caller uses the text-only shape — all
+/// active call sites consume the full details struct.
+#[allow(dead_code)]
 fn parse_post_content(content: &str) -> Option<String> {
     parse_post_content_details(content).map(|details| details.text)
 }

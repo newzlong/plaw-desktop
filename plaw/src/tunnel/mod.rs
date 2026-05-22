@@ -47,6 +47,11 @@ pub trait Tunnel: Send + Sync {
 /// Wraps a spawned tunnel child process so implementations can share it.
 pub(crate) struct TunnelProcess {
     pub child: tokio::process::Child,
+    /// Public URL of the tunnel as parsed from the backend's stdout.
+    /// Set at process-spawn time; no consumer reads it back today (each
+    /// backend returns the URL directly from `start()`). Kept for the
+    /// future shared-process status surface.
+    #[allow(dead_code)]
     pub public_url: String,
 }
 
@@ -56,7 +61,10 @@ pub(crate) fn new_shared_process() -> SharedProcess {
     Arc::new(Mutex::new(None))
 }
 
-/// Kill a shared tunnel process if running.
+/// Kill a shared tunnel process if running. Helper for tunnel backends
+/// that manage subprocesses; currently no backend calls it (the active
+/// CustomTunnel relies on Drop). Kept for future explicit shutdown.
+#[allow(dead_code)]
 pub(crate) async fn kill_shared(proc: &SharedProcess) -> Result<()> {
     let mut guard = proc.lock().await;
     if let Some(ref mut tp) = *guard {

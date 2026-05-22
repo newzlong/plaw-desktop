@@ -204,6 +204,10 @@ fn first_nonempty(text: Option<&str>) -> Option<String> {
     })
 }
 
+/// Returns the user-supplied system prompt or falls back to the default
+/// Codex instructions. Currently unused — the active call site supplies
+/// instructions inline; kept for the eventual config-driven path.
+#[allow(dead_code)]
 fn resolve_instructions(system_prompt: Option<&str>) -> String {
     first_nonempty(system_prompt).unwrap_or_else(|| DEFAULT_CODEX_INSTRUCTIONS.to_string())
 }
