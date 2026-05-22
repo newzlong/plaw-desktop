@@ -1,3 +1,12 @@
+// Items in this module are reached only through the `plaw integration ...`
+// CLI subcommand handler in `main.rs:1106` (`integrations::handle_command`).
+// main.rs is part of the bin, not the lib, so `cargo build --lib`'s
+// dead-code analysis can't trace the chain — the entry point and its
+// list / search / filter helpers are flagged as dead. Module-level
+// allow captures the "this entire file is `plaw integration` CLI
+// plumbing" intent in one place.
+#![allow(dead_code)]
+
 pub mod registry;
 
 use crate::config::Config;

@@ -1,3 +1,14 @@
+// Nightly memory-consolidation cron job builder. The job constants
+// (DEFAULT_SCHEDULE_EXPR, CONSOLIDATION_JOB_NAME, CONSOLIDATION_PROMPT)
+// and the two job-construction helpers (create_consolidation_job,
+// create_consolidation_job_with_schedule) are exercised by this
+// module's own tests but have no in-tree caller yet — the auto-install
+// path that would register this job at first launch hasn't shipped.
+// Module-level allow keeps the dormant-feature shape intact (the
+// tests pin the job-construction contract for when wiring lands)
+// without firing dead_code in the meantime.
+#![allow(dead_code)]
+
 use crate::config::Config;
 use crate::cron::{add_agent_job, CronJob, Schedule, SessionTarget};
 use anyhow::Result;

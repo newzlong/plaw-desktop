@@ -442,6 +442,10 @@ struct ConverseOutputMessage {
 enum ResponseContentBlock {
     ToolUse(ResponseToolUseWrapper),
     Text(TextBlock),
+    /// Catch-all for unrecognised block kinds; serde consumes the payload
+    /// so deserialization doesn't fail on schema additions, even though
+    /// no consumer reads the inner Value back out.
+    #[allow(dead_code)]
     Other(serde_json::Value),
 }
 
@@ -973,7 +977,11 @@ impl BedrockProvider {
     }
 
     /// Send a signed request to the ConverseStream endpoint and return the raw
-    /// response for event-stream parsing.
+    /// response for event-stream parsing. The streaming code path is wired
+    /// scaffolding for a future `stream_chat` capability; no in-tree caller
+    /// uses it yet (the non-streaming `Converse` endpoint above is the
+    /// only active path).
+    #[allow(dead_code)]
     async fn send_converse_stream_request(
         &self,
         credentials: &AwsCredentials,
@@ -1131,6 +1139,9 @@ struct DeltaContent {
 }
 
 /// Convert a Bedrock converse-stream byte response into a stream of `StreamChunk`s.
+/// Paired with `send_converse_stream_request` — both are dormant scaffolding
+/// for the future streaming code path; no in-tree caller invokes them yet.
+#[allow(dead_code)]
 fn bedrock_event_stream_to_chunks(
     response: reqwest::Response,
     count_tokens: bool,
