@@ -1,5 +1,14 @@
 //! Board registry — maps USB VID/PID to known board names and architectures.
 
+// `lookup_board` / `known_boards` are consumed by `hardware/discover.rs`
+// and `hardware/introspect.rs`, both of which are gated behind
+// `#[cfg(feature = "hardware")]` in `hardware/mod.rs`. In the default
+// build (which omits the "hardware" feature) those modules are
+// excluded from compilation, leaving this registry's symbols
+// unreferenced. Module-level allow captures that intentional
+// feature-gating in one place rather than per-item.
+#![allow(dead_code)]
+
 /// Information about a known board.
 #[derive(Debug, Clone)]
 pub struct BoardInfo {

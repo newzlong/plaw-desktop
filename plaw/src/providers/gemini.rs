@@ -166,6 +166,11 @@ struct GeminiUsageMetadata {
 
 /// Response envelope for the internal cloudcode-pa API.
 /// The internal API nests the standard response under a `response` field.
+/// Currently no in-tree caller deserializes via this envelope — the
+/// active code path hits the public Gemini API directly, which returns
+/// `GenerateContentResponse` at top level. Kept for the future internal
+/// cloudcode-pa code path.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct InternalGenerateContentResponse {
     response: GenerateContentResponse,
@@ -636,7 +641,10 @@ impl GeminiProvider {
         })
     }
 
-    /// Get the Gemini CLI config directory (~/.gemini)
+    /// Get the Gemini CLI config directory (~/.gemini). Currently only
+    /// exercised by the gemini_cli_dir_returns_path unit test; the
+    /// production OAuth-reuse path uses different lookup helpers.
+    #[allow(dead_code)]
     fn gemini_cli_dir() -> Option<PathBuf> {
         UserDirs::new().map(|u| u.home_dir().join(".gemini"))
     }
