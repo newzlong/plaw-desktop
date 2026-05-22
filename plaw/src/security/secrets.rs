@@ -126,6 +126,10 @@ impl SecretStore {
     }
 
     /// Check if a value uses the legacy `enc:` format that should be migrated.
+    /// Currently no in-tree caller — the migration path that consumed this
+    /// predicate hasn't shipped. Pinned by tests below; kept for the eventual
+    /// auto-migrate-on-read code path.
+    #[allow(dead_code)]
     pub fn needs_migration(value: &str) -> bool {
         value.starts_with("enc:")
     }
@@ -168,7 +172,10 @@ impl SecretStore {
         value.starts_with("enc2:") || value.starts_with("enc:")
     }
 
-    /// Check if a value uses the secure `enc2:` format.
+    /// Check if a value uses the secure `enc2:` format. Same dormant
+    /// status as `needs_migration` — paired predicate for the migration
+    /// path that hasn't shipped.
+    #[allow(dead_code)]
     pub fn is_secure_encrypted(value: &str) -> bool {
         value.starts_with("enc2:")
     }

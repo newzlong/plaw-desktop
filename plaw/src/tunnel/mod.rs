@@ -32,13 +32,22 @@ pub trait Tunnel: Send + Sync {
     /// Returns the public URL on success.
     async fn start(&self, local_host: &str, local_port: u16) -> Result<String>;
 
-    /// Stop the tunnel process gracefully.
+    /// Stop the tunnel process gracefully. No in-tree caller — the
+    /// active path drops the Tunnel on shutdown and relies on Drop
+    /// impls for cleanup. Kept on the trait for the eventual explicit-
+    /// stop path (e.g. config-reload mid-runtime).
+    #[allow(dead_code)]
     async fn stop(&self) -> Result<()>;
 
-    /// Check if the tunnel is still alive.
+    /// Check if the tunnel is still alive. No in-tree caller — paired
+    /// with `stop()` for the future tunnel-supervisor path.
+    #[allow(dead_code)]
     async fn health_check(&self) -> bool;
 
-    /// Return the public URL if the tunnel is running.
+    /// Return the public URL if the tunnel is running. No in-tree
+    /// caller — `start()` returns the URL directly today; this getter
+    /// is for the eventual status surface.
+    #[allow(dead_code)]
     fn public_url(&self) -> Option<String>;
 }
 
