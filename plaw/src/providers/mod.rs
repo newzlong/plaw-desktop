@@ -916,7 +916,9 @@ fn resolve_provider_credential(name: &str, credential_override: Option<&str>) ->
 /// its supported environment/cached sources.
 ///
 /// This is intended for UX/status surfaces (e.g. dashboard) to reflect runtime-configured
-/// credentials without leaking secret values.
+/// credentials without leaking secret values. Currently no in-tree
+/// consumer — the doctor/status surfaces use other accessors.
+#[allow(dead_code)]
 pub(crate) fn provider_credential_available(name: &str, credential_override: Option<&str>) -> bool {
     if is_qwen_oauth_alias(name) {
         let override_value = credential_override

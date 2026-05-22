@@ -261,6 +261,10 @@ end tell"#
 
 /// Get the current max ROWID from the messages table.
 /// Uses rusqlite with parameterized queries for security (CWE-89 prevention).
+/// Dormant: paired with `fetch_new_messages` below; both are scaffolding
+/// for the iMessage poll loop that isn't wired into the channel listen
+/// path yet (the active path uses AppleScript-based send-only).
+#[allow(dead_code)]
 async fn get_max_rowid(db_path: &Path) -> anyhow::Result<i64> {
     let path = db_path.to_path_buf();
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<i64> {
@@ -279,6 +283,9 @@ async fn get_max_rowid(db_path: &Path) -> anyhow::Result<i64> {
 /// Fetch messages newer than `since_rowid`.
 /// Uses rusqlite with parameterized queries for security (CWE-89 prevention).
 /// The `since_rowid` parameter is bound safely, preventing SQL injection.
+/// Paired with `get_max_rowid` above — both dormant pending iMessage poll
+/// loop integration.
+#[allow(dead_code)]
 async fn fetch_new_messages(
     db_path: &Path,
     since_rowid: i64,

@@ -1,3 +1,10 @@
+// Dormant heartbeat subsystem: HeartbeatEngine + its run/tick methods
+// + config/observer fields form a designed background scheduler for
+// HEARTBEAT.md task execution. No runtime path constructs the engine
+// today — heartbeat support hasn't been wired into the daemon/agent
+// startup. Module-level allow keeps the dormant feature intact.
+#![allow(dead_code)]
+
 use crate::config::HeartbeatConfig;
 use crate::observability::{Observer, ObserverEvent};
 use anyhow::Result;

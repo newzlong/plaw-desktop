@@ -20,6 +20,9 @@ pub use store::{
 };
 pub use types::{CronJob, CronJobPatch, CronRun, DeliveryConfig, JobType, Schedule, SessionTarget};
 
+/// CLI entrypoint for `plaw cron ...` subcommands. Wired from
+/// `main.rs:1013`; lib-only build can't see the bin caller.
+#[allow(dead_code)]
 #[allow(clippy::needless_pass_by_value)]
 pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<()> {
     match command {

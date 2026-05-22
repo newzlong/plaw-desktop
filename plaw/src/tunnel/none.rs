@@ -1,7 +1,11 @@
 use super::Tunnel;
 use anyhow::Result;
 
-/// No-op tunnel — direct local access, no external exposure.
+/// No-op tunnel — direct local access, no external exposure. Constructed
+/// by `tunnel::create_tunnel` (gateway/mod.rs:595) for the default
+/// tunnel-disabled config; the lib's dead-code pass doesn't trace
+/// through the factory dispatch.
+#[allow(dead_code)]
 pub struct NoneTunnel;
 
 #[async_trait::async_trait]

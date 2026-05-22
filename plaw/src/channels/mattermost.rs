@@ -353,6 +353,11 @@ impl MattermostChannel {
 /// Checks two sources:
 /// 1. Text-based: looks for `@bot_username` in the message body (case-insensitive).
 /// 2. Metadata-based: checks the post's `metadata.mentions` array for the bot user ID.
+///
+/// Currently not invoked — the active Mattermost listen path treats all DMs as
+/// addressed-to-bot and skips mention parsing. Kept for future channel-message
+/// mention-gating.
+#[allow(dead_code)]
 fn contains_bot_mention_mm(
     text: &str,
     bot_user_id: &str,

@@ -211,12 +211,18 @@ impl ApprovalManager {
         log.push(entry);
     }
 
-    /// Get a snapshot of the audit log.
+    /// Get a snapshot of the audit log. Currently no in-tree consumer
+    /// reads the log back (audit data is collected for future dashboard
+    /// or `plaw doctor`-style export).
+    #[allow(dead_code)]
     pub fn audit_log(&self) -> Vec<ApprovalLogEntry> {
         self.audit_log.lock().clone()
     }
 
-    /// Get the current session allowlist.
+    /// Get the current session allowlist. Currently no in-tree consumer
+    /// inspects the allowlist contents directly; the lookup path uses
+    /// `is_*_granted` predicates.
+    #[allow(dead_code)]
     pub fn session_allowlist(&self) -> HashSet<String> {
         self.session_allowlist.lock().clone()
     }
@@ -234,6 +240,11 @@ impl ApprovalManager {
     }
 
     /// Check whether non-CLI session approval exists for a tool.
+    /// Currently no in-tree caller — the non-CLI approval flow uses
+    /// the per-request `await_non_cli_approval_decision` path
+    /// (loop_/non_cli_approval.rs) rather than a pre-granted session
+    /// allowlist. Kept for the eventual session-grant UX.
+    #[allow(dead_code)]
     pub fn is_non_cli_session_granted(&self, tool_name: &str) -> bool {
         let allowlist = self.non_cli_allowlist.lock();
         allowlist.contains(tool_name)

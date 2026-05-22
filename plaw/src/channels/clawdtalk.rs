@@ -24,7 +24,10 @@ pub struct ClawdTalkChannel {
     allowed_destinations: Vec<String>,
     /// HTTP client for Telnyx API
     client: Client,
-    /// Webhook secret for verifying incoming calls
+    /// Webhook secret for verifying incoming calls. Set from config;
+    /// reader (webhook signature verifier) not yet wired into the
+    /// inbound path.
+    #[allow(dead_code)]
     webhook_secret: Option<String>,
 }
 

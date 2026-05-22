@@ -16,6 +16,9 @@ const ALLOWED_IMAGE_MIME_TYPES: &[&str] = &[
 #[derive(Debug, Clone)]
 pub struct PreparedMessages {
     pub messages: Vec<ChatMessage>,
+    /// Computed during prepare; consumers haven't started branching on it
+    /// yet (e.g. for vision-routing or cost estimation).
+    #[allow(dead_code)]
     pub contains_images: bool,
 }
 
@@ -93,6 +96,9 @@ pub fn count_image_markers(messages: &[ChatMessage]) -> usize {
         .sum()
 }
 
+/// Convenience predicate. Currently no caller — count_image_markers is
+/// the active accessor.
+#[allow(dead_code)]
 pub fn contains_image_markers(messages: &[ChatMessage]) -> bool {
     count_image_markers(messages) > 0
 }

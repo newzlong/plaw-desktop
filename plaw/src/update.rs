@@ -8,7 +8,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// GitHub repository for releases
+/// GitHub repository for releases. Currently no direct reader — the
+/// API URL constant below inlines the path; this constant is kept for
+/// future user-facing display ("update available — see github.com/{REPO}").
+#[allow(dead_code)]
 const GITHUB_REPO: &str = "plaw-labs/plaw";
 const GITHUB_API_RELEASES: &str =
     "https://api.github.com/repos/plaw-labs/plaw/releases/latest";
