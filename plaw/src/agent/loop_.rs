@@ -273,13 +273,20 @@ pub(crate) async fn run_tool_call_loop(
             (prepared_messages.messages.clone(), model.to_string())
         };
 
-        let chat_future = provider.chat(
+        // Use the streaming-capable entry point: providers that override it
+        // (Anthropic today, others later) push each text_delta to on_delta
+        // as it arrives over SSE — chunk events flow to the WebSocket
+        // before the full response finishes. Providers that don't override
+        // chat_streaming inherit the default impl that delegates to chat(),
+        // so non-streaming providers behave identically to before.
+        let chat_future = provider.chat_streaming(
             ChatRequest {
                 messages: &effective_messages,
                 tools: request_tools,
             },
             &effective_model,
             temperature,
+            on_delta.as_ref(),
         );
 
         let chat_result = if let Some(token) = cancellation_token.as_ref() {

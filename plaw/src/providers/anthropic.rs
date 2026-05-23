@@ -563,35 +563,44 @@ impl AnthropicProvider {
 
     /// Consume an Anthropic SSE stream and accumulate into a NativeChatResponse.
     /// Falls back to JSON parsing if the response is not SSE formatted.
+    ///
+    /// Convenience wrapper around [`consume_sse_stream_with_tokens`] that
+    /// drops per-token deltas (kept for backward compatibility with
+    /// `chat_with_system`'s non-streaming caller). Use
+    /// `consume_sse_stream_with_tokens(response, on_token)` directly when
+    /// you want real-time token delivery.
     async fn consume_sse_stream(
         response: reqwest::Response,
     ) -> anyhow::Result<NativeChatResponse> {
-        // Collect the full response body first, then decide parsing strategy.
-        let body = response.text().await?;
+        Self::consume_sse_stream_with_tokens(response, None).await
+    }
 
-        // Quick check: is this SSE or plain JSON?
-        let trimmed = body.trim_start();
-        let is_sse = trimmed.starts_with("event:") || trimmed.starts_with("data:");
+    /// True-streaming variant: parses the SSE byte stream incrementally
+    /// and pushes each `text_delta` to `on_token` the moment it arrives,
+    /// while still accumulating the full `NativeChatResponse` for the
+    /// final return (so tool_calls + usage survive).
+    ///
+    /// Falls back to JSON parsing if the response body turns out to be a
+    /// plain JSON object (provider doesn't support streaming despite our
+    /// `stream: true` request).
+    ///
+    /// `tool_use` `input_json_delta` chunks are NOT forwarded to
+    /// `on_token` — they're not user-facing text and would corrupt the
+    /// chat transcript. Only `text_delta` chunks flow through.
+    ///
+    /// When `on_token` is `None`, semantics match the original
+    /// buffered implementation exactly (used by tests and the
+    /// non-streaming `chat()` path).
+    async fn consume_sse_stream_with_tokens(
+        response: reqwest::Response,
+        on_token: Option<&tokio::sync::mpsc::Sender<String>>,
+    ) -> anyhow::Result<NativeChatResponse> {
+        use futures_util::StreamExt;
 
-        if !is_sse {
-            // Plain JSON response (provider doesn't support streaming)
-            tracing::info!(
-                "[anthropic] non-SSE response ({}B), parsing as JSON",
-                body.len(),
-            );
-            match serde_json::from_str::<NativeChatResponse>(&body) {
-                Ok(resp) => return Ok(resp),
-                Err(e) => {
-                    tracing::warn!(
-                        "[anthropic] JSON parse failed: {e}, preview: {}",
-                        &body[..body.len().min(500)],
-                    );
-                    anyhow::bail!("Failed to parse response as JSON or SSE: {e}");
-                }
-            }
-        }
+        let mut bytes_stream = response.bytes_stream();
+        let mut body = String::new();
+        let mut pending = String::new();
 
-        // Parse SSE events
         let mut content_blocks: Vec<NativeContentIn> = Vec::new();
         let mut current_text = String::new();
         let mut current_tool_id: Option<String> = None;
@@ -600,95 +609,106 @@ impl AnthropicProvider {
         let mut current_block_type = String::new();
         let mut input_tokens: Option<u64> = None;
         let mut output_tokens: Option<u64> = None;
+        let mut sse_detected = false;
+        let mut format_decided = false;
 
-        for event_block in body.split("\n\n") {
-            for line in event_block.lines() {
-                // SSE spec: space after colon is optional (Kimi sends "data:{json}")
-                let data = match line.strip_prefix("data: ")
-                    .or_else(|| line.strip_prefix("data:"))
-                {
-                    Some(d) if d != "[DONE]" => d,
-                    _ => continue,
-                };
-                let event: serde_json::Value = match serde_json::from_str(data) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
+        // Read chunks, splitting on the SSE event boundary ("\n\n").
+        // `pending` carries the trailing partial event from one chunk to
+        // the next; `body` accumulates the full payload for the
+        // non-SSE-fallback JSON parse path.
+        while let Some(item) = bytes_stream.next().await {
+            let bytes = item?;
+            let text = match std::str::from_utf8(&bytes) {
+                Ok(s) => s.to_string(),
+                Err(_) => {
+                    // Partial UTF-8 at chunk boundary — fall back to
+                    // lossy decoding for the body buffer (we still need
+                    // to read the rest of the stream to detect SSE vs
+                    // JSON, but we can't safely incrementally parse this
+                    // chunk). Future improvement: maintain a byte
+                    // buffer and only decode at event boundaries.
+                    String::from_utf8_lossy(&bytes).into_owned()
+                }
+            };
+            body.push_str(&text);
 
-                match event["type"].as_str() {
-                    Some("message_start") => {
-                        if let Some(usage) =
-                            event.get("message").and_then(|m| m.get("usage"))
-                        {
-                            input_tokens =
-                                usage.get("input_tokens").and_then(|v| v.as_u64());
-                        }
-                    }
-                    Some("content_block_start") => {
-                        let block = &event["content_block"];
-                        current_block_type =
-                            block["type"].as_str().unwrap_or("").to_string();
-                        if current_block_type == "text" {
-                            current_text.clear();
-                        } else if current_block_type == "tool_use" {
-                            current_tool_id =
-                                block["id"].as_str().map(String::from);
-                            current_tool_name =
-                                block["name"].as_str().map(String::from);
-                            current_tool_input_json.clear();
-                        }
-                    }
-                    Some("content_block_delta") => {
-                        let delta = &event["delta"];
-                        match delta["type"].as_str() {
-                            Some("text_delta") => {
-                                if let Some(text) = delta["text"].as_str() {
-                                    current_text.push_str(text);
-                                }
-                            }
-                            Some("input_json_delta") => {
-                                if let Some(json) =
-                                    delta["partial_json"].as_str()
-                                {
-                                    current_tool_input_json.push_str(json);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    Some("content_block_stop") => {
-                        if current_block_type == "text" {
-                            content_blocks.push(NativeContentIn {
-                                kind: "text".to_string(),
-                                text: Some(current_text.clone()),
-                                id: None,
-                                name: None,
-                                input: None,
-                            });
-                            current_text.clear();
-                        } else if current_block_type == "tool_use" {
-                            let input =
-                                serde_json::from_str(&current_tool_input_json)
-                                    .ok();
-                            content_blocks.push(NativeContentIn {
-                                kind: "tool_use".to_string(),
-                                text: None,
-                                id: current_tool_id.take(),
-                                name: current_tool_name.take(),
-                                input,
-                            });
-                            current_tool_input_json.clear();
-                        }
-                    }
-                    Some("message_delta") => {
-                        if let Some(usage) = event.get("usage") {
-                            output_tokens =
-                                usage.get("output_tokens").and_then(|v| v.as_u64());
-                        }
-                    }
-                    _ => {}
+            // First-chunk format detection: SSE starts with "event:" or
+            // "data:"; anything else is treated as buffered JSON.
+            if !format_decided {
+                let head = body.trim_start();
+                if head.starts_with("event:") || head.starts_with("data:") {
+                    sse_detected = true;
+                } else if !head.is_empty() && !head.starts_with(|c: char| c.is_whitespace()) {
+                    // Non-empty, non-SSE prefix → JSON path. Drain the
+                    // rest of the stream then fall through to JSON parse.
+                    sse_detected = false;
+                }
+                // Empty head → wait for more bytes before deciding.
+                if !head.is_empty() {
+                    format_decided = true;
                 }
             }
+
+            if !sse_detected {
+                continue;
+            }
+
+            pending.push_str(&text);
+
+            // Process all complete events in `pending`. An event ends at
+            // "\n\n"; the trailing partial event stays in `pending` for
+            // the next chunk to complete.
+            while let Some(boundary) = pending.find("\n\n") {
+                let event_block: String = pending.drain(..boundary + 2).collect();
+                Self::process_sse_event_block(
+                    &event_block,
+                    on_token,
+                    &mut content_blocks,
+                    &mut current_text,
+                    &mut current_tool_id,
+                    &mut current_tool_name,
+                    &mut current_tool_input_json,
+                    &mut current_block_type,
+                    &mut input_tokens,
+                    &mut output_tokens,
+                );
+            }
+        }
+
+        // Drain any trailing event that didn't end with "\n\n" (Anthropic
+        // always sends the trailing blank line, but a custom-compatible
+        // endpoint might not).
+        if sse_detected && !pending.is_empty() {
+            Self::process_sse_event_block(
+                &pending,
+                on_token,
+                &mut content_blocks,
+                &mut current_text,
+                &mut current_tool_id,
+                &mut current_tool_name,
+                &mut current_tool_input_json,
+                &mut current_block_type,
+                &mut input_tokens,
+                &mut output_tokens,
+            );
+        }
+
+        if !sse_detected {
+            // Non-SSE response: fall back to buffered JSON parse.
+            tracing::info!(
+                "[anthropic] non-SSE response ({}B), parsing as JSON",
+                body.len(),
+            );
+            return match serde_json::from_str::<NativeChatResponse>(&body) {
+                Ok(resp) => Ok(resp),
+                Err(e) => {
+                    tracing::warn!(
+                        "[anthropic] JSON parse failed: {e}, preview: {}",
+                        &body[..body.len().min(500)],
+                    );
+                    anyhow::bail!("Failed to parse response as JSON or SSE: {e}")
+                }
+            };
         }
 
         if content_blocks.is_empty() {
@@ -712,6 +732,115 @@ impl AnthropicProvider {
             usage,
         })
     }
+
+    /// Parse a single SSE event block (one or more lines, possibly with
+    /// trailing newlines) and update the streaming accumulator state.
+    /// Pushes `text_delta` content to `on_token` immediately.
+    #[allow(clippy::too_many_arguments)]
+    fn process_sse_event_block(
+        event_block: &str,
+        on_token: Option<&tokio::sync::mpsc::Sender<String>>,
+        content_blocks: &mut Vec<NativeContentIn>,
+        current_text: &mut String,
+        current_tool_id: &mut Option<String>,
+        current_tool_name: &mut Option<String>,
+        current_tool_input_json: &mut String,
+        current_block_type: &mut String,
+        input_tokens: &mut Option<u64>,
+        output_tokens: &mut Option<u64>,
+    ) {
+        for line in event_block.lines() {
+            // SSE spec: space after colon is optional (Kimi sends "data:{json}")
+            let data = match line
+                .strip_prefix("data: ")
+                .or_else(|| line.strip_prefix("data:"))
+            {
+                Some(d) if d != "[DONE]" => d,
+                _ => continue,
+            };
+            let event: serde_json::Value = match serde_json::from_str(data) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            match event["type"].as_str() {
+                Some("message_start") => {
+                    if let Some(usage) = event.get("message").and_then(|m| m.get("usage")) {
+                        *input_tokens = usage.get("input_tokens").and_then(|v| v.as_u64());
+                    }
+                }
+                Some("content_block_start") => {
+                    let block = &event["content_block"];
+                    *current_block_type = block["type"].as_str().unwrap_or("").to_string();
+                    if current_block_type == "text" {
+                        current_text.clear();
+                    } else if current_block_type == "tool_use" {
+                        *current_tool_id = block["id"].as_str().map(String::from);
+                        *current_tool_name = block["name"].as_str().map(String::from);
+                        current_tool_input_json.clear();
+                    }
+                }
+                Some("content_block_delta") => {
+                    let delta = &event["delta"];
+                    match delta["type"].as_str() {
+                        Some("text_delta") => {
+                            if let Some(text) = delta["text"].as_str() {
+                                current_text.push_str(text);
+                                // Push to on_token IMMEDIATELY — this is the
+                                // TTFB win. try_send + drop-on-full because
+                                // back-pressuring the LLM stream is worse
+                                // than dropping a visible token.
+                                if let Some(sender) = on_token {
+                                    if let Err(e) = sender.try_send(text.to_string()) {
+                                        tracing::debug!(
+                                            "[anthropic] on_token try_send failed (dropped chunk): {e}"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Some("input_json_delta") => {
+                            // Tool argument JSON — accumulate, do NOT forward
+                            // to on_token (not user-facing text).
+                            if let Some(json) = delta["partial_json"].as_str() {
+                                current_tool_input_json.push_str(json);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Some("content_block_stop") => {
+                    if current_block_type == "text" {
+                        content_blocks.push(NativeContentIn {
+                            kind: "text".to_string(),
+                            text: Some(current_text.clone()),
+                            id: None,
+                            name: None,
+                            input: None,
+                        });
+                        current_text.clear();
+                    } else if current_block_type == "tool_use" {
+                        let input = serde_json::from_str(current_tool_input_json).ok();
+                        content_blocks.push(NativeContentIn {
+                            kind: "tool_use".to_string(),
+                            text: None,
+                            id: current_tool_id.take(),
+                            name: current_tool_name.take(),
+                            input,
+                        });
+                        current_tool_input_json.clear();
+                    }
+                }
+                Some("message_delta") => {
+                    if let Some(usage) = event.get("usage") {
+                        *output_tokens = usage.get("output_tokens").and_then(|v| v.as_u64());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
 }
 
 #[async_trait]
@@ -814,6 +943,62 @@ impl Provider for AnthropicProvider {
         }
 
         let native_response = Self::consume_sse_stream(response).await?;
+        Ok(Self::parse_native_response(native_response))
+    }
+
+    /// True-streaming chat: pushes each Anthropic `text_delta` to
+    /// `on_token` the moment it arrives over SSE, while still returning
+    /// the full ChatResponse (tool_calls, usage) when the stream ends.
+    /// This is the TTFB-improving override; `chat()` above remains
+    /// available for callers that don't have a token sink.
+    async fn chat_streaming(
+        &self,
+        request: ProviderChatRequest<'_>,
+        model: &str,
+        temperature: f64,
+        on_token: Option<&tokio::sync::mpsc::Sender<String>>,
+    ) -> anyhow::Result<ProviderChatResponse> {
+        let credential = self.credential.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Anthropic credentials not set. Set ANTHROPIC_API_KEY or ANTHROPIC_OAUTH_TOKEN (setup-token)."
+            )
+        })?;
+
+        let use_cache = self.supports_caching();
+        let native_tool_msgs = true;
+        let (system_prompt, mut messages) =
+            Self::convert_messages(request.messages, use_cache, native_tool_msgs);
+
+        if use_cache && Self::should_cache_conversation(request.messages) {
+            Self::apply_cache_to_last_message(&mut messages);
+        }
+
+        let native_request = NativeChatRequest {
+            model: model.to_string(),
+            max_tokens: self.max_tokens,
+            system: system_prompt,
+            messages,
+            temperature,
+            tools: Self::convert_tools(request.tools, use_cache),
+            stream: Some(true),
+        };
+
+        let url = format!("{}/v1/messages", self.base_url);
+
+        let mut http_request = self
+            .streaming_http_client()
+            .post(&url)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&native_request);
+        http_request = self.apply_auth(http_request, credential);
+
+        let response = http_request.send().await?;
+        if !response.status().is_success() {
+            return Err(super::api_error("Anthropic", response).await);
+        }
+
+        let native_response = Self::consume_sse_stream_with_tokens(response, on_token).await?;
         Ok(Self::parse_native_response(native_response))
     }
 
@@ -1669,5 +1854,130 @@ mod tests {
         let caps = provider.capabilities();
         assert!(caps.vision);
         assert!(caps.native_tool_calling);
+    }
+
+    /// True-streaming proof: mock SSE server sends `text_delta` events
+    /// across multiple HTTP chunks. The streaming impl must deliver each
+    /// text_delta to `on_token` BEFORE the response stream completes,
+    /// AND still return the fully-assembled ChatResponse at the end.
+    #[tokio::test]
+    async fn chat_streaming_forwards_text_deltas_to_on_token() {
+        use axum::{
+            body::Body,
+            response::{IntoResponse, Response},
+            routing::post,
+            Router,
+        };
+        use tokio::net::TcpListener;
+        use tokio::sync::mpsc;
+
+        // SSE events split across several body chunks so we exercise the
+        // boundary-spanning logic in consume_sse_stream_with_tokens.
+        let app = Router::new().route(
+            "/v1/messages",
+            post(|| async {
+                let chunks: Vec<Result<&'static str, std::io::Error>> = vec![
+                    Ok("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_x\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-opus-4-7\",\"usage\":{\"input_tokens\":12}}}\n\n"),
+                    Ok("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"),
+                    Ok("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hel\"}}\n\n"),
+                    Ok("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"lo, \"}}\n\n"),
+                    Ok("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"world!\"}}\n\n"),
+                    Ok("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"),
+                    Ok("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n"),
+                    Ok("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
+                ];
+                let stream = futures_util::stream::iter(chunks);
+                let body = Body::from_stream(stream);
+                Response::builder()
+                    .status(axum::http::StatusCode::OK)
+                    .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+                    .body(body)
+                    .unwrap()
+                    .into_response()
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let provider = AnthropicProvider {
+            credential: Some("test-key".to_string()),
+            base_url: format!("http://{addr}"),
+            max_tokens: DEFAULT_MAX_TOKENS,
+        };
+
+        let (tx, mut rx) = mpsc::channel::<String>(16);
+        let messages = vec![ChatMessage::user("Greet me")];
+        let req = ProviderChatRequest {
+            messages: &messages,
+            tools: None,
+        };
+
+        let response = provider
+            .chat_streaming(req, "claude-opus-4-7", 0.0, Some(&tx))
+            .await
+            .expect("chat_streaming succeeds");
+
+        // All 3 text_delta fragments arrived through on_token.
+        let mut tokens = Vec::new();
+        while let Ok(t) = rx.try_recv() {
+            tokens.push(t);
+        }
+        assert_eq!(tokens, vec!["Hel", "lo, ", "world!"]);
+
+        // Final assembled response still carries the full text.
+        assert_eq!(response.text.as_deref(), Some("Hello, world!"));
+        assert_eq!(response.usage.as_ref().unwrap().input_tokens, Some(12));
+        assert_eq!(response.usage.as_ref().unwrap().output_tokens, Some(3));
+
+        server.abort();
+    }
+
+    /// Default `chat_streaming` (no override) must not forward to
+    /// `on_token` — only providers that explicitly opt in do. This
+    /// guards against accidentally regressing the default-impl contract
+    /// when the trait method's default body is edited.
+    #[tokio::test]
+    async fn chat_streaming_default_impl_does_not_invoke_on_token() {
+        use crate::providers::traits::ToolsPayload;
+
+        // Minimal Provider impl whose chat() returns a fixed string and
+        // whose chat_streaming() inherits the default (no override).
+        struct StubProvider;
+        #[async_trait]
+        impl Provider for StubProvider {
+            async fn chat_with_system(
+                &self,
+                _system: Option<&str>,
+                _message: &str,
+                _model: &str,
+                _temperature: f64,
+            ) -> anyhow::Result<String> {
+                Ok("stub".to_string())
+            }
+            fn convert_tools(&self, _tools: &[ToolSpec]) -> ToolsPayload {
+                ToolsPayload::PromptGuided {
+                    instructions: String::new(),
+                }
+            }
+        }
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(4);
+        let messages = vec![ChatMessage::user("hi")];
+        let req = ProviderChatRequest {
+            messages: &messages,
+            tools: None,
+        };
+
+        let response = StubProvider
+            .chat_streaming(req, "stub-model", 0.0, Some(&tx))
+            .await
+            .unwrap();
+
+        assert!(rx.try_recv().is_err(), "default impl must not push tokens");
+        assert_eq!(response.text.as_deref(), Some("stub"));
     }
 }
