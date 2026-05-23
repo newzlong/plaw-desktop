@@ -1,5 +1,8 @@
 #![warn(clippy::all, clippy::pedantic)]
-#![forbid(unsafe_code)]
+// `deny` (not `forbid`) so audited per-module `#![allow(unsafe_code)]`
+// exceptions can opt in — currently only `security::windows_job`. Same
+// policy as lib.rs (PR #17, 2026-05-23). See [[project-unsafe-code-policy]].
+#![deny(unsafe_code)]
 #![allow(
     clippy::assigning_clones,
     clippy::bool_to_int_with_if,

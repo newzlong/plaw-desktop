@@ -4142,6 +4142,18 @@ pub struct QQConfig {
     /// Event receive mode: "webhook" (default) or "websocket".
     #[serde(default)]
     pub receive_mode: QQReceiveMode,
+    /// INBOUND shared secret for the `/qq` webhook endpoint. The pre-existing
+    /// `X-Bot-Appid` header check protects against accidentally cross-wired
+    /// bots but NOT against a determined attacker — `app_id` is a public
+    /// identifier visible in QQ's developer console. Configure this secret
+    /// here AND on the QQ webhook URL (as a query string or `X-Webhook-Secret`
+    /// header) for cryptographic-strength auth.
+    ///
+    /// When `None` AND the gateway is bound to a non-loopback address,
+    /// the handler rejects with 401 — secure-by-default. Loopback-only
+    /// deployments work without a secret.
+    #[serde(default)]
+    pub webhook_secret: Option<crate::security::Secret>,
 }
 
 impl ChannelConfig for QQConfig {
@@ -9407,6 +9419,7 @@ default_model = "legacy-model"
             app_secret: "secret".into(),
             allowed_users: vec!["*".into()],
             receive_mode: QQReceiveMode::Websocket,
+            webhook_secret: None,
         };
         let toml_str = toml::to_string(&qc).unwrap();
         let parsed: QQConfig = toml::from_str(&toml_str).unwrap();

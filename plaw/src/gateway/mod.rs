@@ -313,6 +313,11 @@ pub struct AppState {
     /// requests — secure-by-default invariant for the only webhook
     /// endpoint whose upstream (WATI) does not sign callbacks.
     pub wati_webhook_secret_hash: Option<Arc<str>>,
+    /// QQ webhook inbound secret hash. Adds cryptographic auth on top of
+    /// the existing X-Bot-Appid check (which is a public ID, not a
+    /// secret). When `None`, the `/qq` handler rejects all non-loopback
+    /// requests.
+    pub qq_webhook_secret_hash: Option<Arc<str>>,
     /// Shared SecretStore used by `Secret` newtype `reveal()` calls.
     /// Built from `config.config_path` + `config.secrets.encrypt` at
     /// gateway startup so handlers don't have to re-derive the path
@@ -566,6 +571,26 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
                 None
             }
         });
+    // qq.webhook_secret — same Secret-newtype reveal pattern as wati.
+    let qq_webhook_secret_hash: Option<Arc<str>> = config
+        .channels_config
+        .qq
+        .as_ref()
+        .and_then(|qq_cfg| qq_cfg.webhook_secret.as_ref())
+        .and_then(|secret| match secret.reveal(secret_store.as_ref()) {
+            Ok(plaintext) => {
+                let trimmed = plaintext.trim();
+                (!trimmed.is_empty()).then(|| Arc::<str>::from(hash_webhook_secret(trimmed)))
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "Failed to decrypt channels.qq.webhook_secret — \
+                     handler will reject all non-loopback requests"
+                );
+                None
+            }
+        });
 
     // QQ channel (if configured)
     let qq_channel: Option<Arc<QQChannel>> = config.channels_config.qq.as_ref().map(|qq_cfg| {
@@ -740,6 +765,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         secret_store,
         qq: qq_channel,
         qq_webhook_enabled,
+        qq_webhook_secret_hash,
         observer: broadcast_observer,
         tools_registry,
         tools_registry_exec,
@@ -2014,6 +2040,7 @@ async fn handle_nextcloud_talk_webhook(
 /// POST /qq — incoming QQ Bot webhook (validation + events)
 async fn handle_qq_webhook(
     State(state): State<AppState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
@@ -2029,6 +2056,47 @@ async fn handle_qq_webhook(
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "QQ webhook mode not enabled"})),
         );
+    }
+
+    // ── Secure-by-default invariant ──
+    // `app_id` is a public identifier in QQ's developer console — the
+    // X-Bot-Appid check below catches cross-wiring mistakes but NOT
+    // forgeries. Require a configured webhook_secret for non-loopback
+    // requests. Same pattern as PR #20 (WATI) / PR #22 (Linq, Nextcloud).
+    if state.qq_webhook_secret_hash.is_none() && !peer_addr.ip().is_loopback() {
+        tracing::warn!(
+            peer = %peer_addr,
+            "QQ webhook: rejected non-loopback request — no webhook_secret configured"
+        );
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "Unauthorized — configure channels.qq.webhook_secret for non-local access"
+            })),
+        );
+    }
+    if let Some(ref secret_hash) = state.qq_webhook_secret_hash {
+        let header_hash = headers
+            .get("X-Webhook-Secret")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(hash_webhook_secret);
+        match header_hash {
+            Some(val) if constant_time_eq(&val, secret_hash.as_ref()) => {}
+            _ => {
+                tracing::warn!(
+                    peer = %peer_addr,
+                    "QQ webhook: rejected — invalid or missing X-Webhook-Secret"
+                );
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({
+                        "error": "Unauthorized — invalid or missing X-Webhook-Secret header"
+                    })),
+                );
+            }
+        }
     }
 
     let app_id_header = headers
@@ -2202,6 +2270,7 @@ mod tests {
             secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
+            qq_webhook_secret_hash: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             tools_registry_exec: Arc::new(Vec::new()),
@@ -2263,6 +2332,7 @@ mod tests {
             secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
+            qq_webhook_secret_hash: None,
             observer,
             tools_registry: Arc::new(Vec::new()),
             tools_registry_exec: Arc::new(Vec::new()),
@@ -2310,6 +2380,7 @@ mod tests {
             secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
+            qq_webhook_secret_hash: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             tools_registry_exec: Arc::new(Vec::new()),
@@ -2358,6 +2429,7 @@ mod tests {
             secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
+            qq_webhook_secret_hash: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             tools_registry_exec: Arc::new(Vec::new()),
@@ -2832,6 +2904,7 @@ Reminder set successfully."#;
             secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
+            qq_webhook_secret_hash: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             tools_registry_exec: Arc::new(Vec::new()),
@@ -2904,6 +2977,7 @@ Reminder set successfully."#;
             secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
+            qq_webhook_secret_hash: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             tools_registry_exec: Arc::new(Vec::new()),
@@ -2958,6 +3032,7 @@ Reminder set successfully."#;
             secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
+            qq_webhook_secret_hash: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             tools_registry_exec: Arc::new(Vec::new()),
@@ -3017,6 +3092,7 @@ Reminder set successfully."#;
             secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
+            qq_webhook_secret_hash: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             tools_registry_exec: Arc::new(Vec::new()),
@@ -3081,6 +3157,7 @@ Reminder set successfully."#;
             secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
+            qq_webhook_secret_hash: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             tools_registry_exec: Arc::new(Vec::new()),
@@ -3167,6 +3244,7 @@ Reminder set successfully."#;
             secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
+            qq_webhook_secret_hash: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             tools_registry_exec: Arc::new(Vec::new()),
@@ -3225,6 +3303,7 @@ Reminder set successfully."#;
             secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
+            qq_webhook_secret_hash: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             tools_registry_exec: Arc::new(Vec::new()),
@@ -3288,6 +3367,7 @@ Reminder set successfully."#;
             secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
+            qq_webhook_secret_hash: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             tools_registry_exec: Arc::new(Vec::new()),
@@ -3356,6 +3436,7 @@ Reminder set successfully."#;
             secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
+            qq_webhook_secret_hash: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             tools_registry_exec: Arc::new(Vec::new()),
@@ -3421,6 +3502,7 @@ Reminder set successfully."#;
             secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
+            qq_webhook_secret_hash: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             tools_registry_exec: Arc::new(Vec::new()),
@@ -3483,6 +3565,7 @@ Reminder set successfully."#;
             secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
+            qq_webhook_secret_hash: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             tools_registry_exec: Arc::new(Vec::new()),
@@ -3497,6 +3580,7 @@ Reminder set successfully."#;
 
         let response = handle_qq_webhook(
             State(state),
+            test_connect_info(),
             HeaderMap::new(),
             Bytes::from_static(br#"{"op":13,"d":{"plain_token":"p","event_ts":"1"}}"#),
         )
@@ -3539,6 +3623,7 @@ Reminder set successfully."#;
             secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: Some(qq),
             qq_webhook_enabled: true,
+            qq_webhook_secret_hash: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             tools_registry_exec: Arc::new(Vec::new()),
@@ -3556,6 +3641,7 @@ Reminder set successfully."#;
 
         let response = handle_qq_webhook(
             State(state),
+            test_connect_info(),
             headers,
             Bytes::from_static(
                 br#"{"op":13,"d":{"plain_token":"Arq0D5A61EgUu4OxUvOp","event_ts":"1725442341"}}"#,
@@ -4008,6 +4094,7 @@ Reminder set successfully."#;
             )),
             qq: None,
             qq_webhook_enabled: false,
+            qq_webhook_secret_hash: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             tools_registry_exec: Arc::new(Vec::new()),
@@ -4175,6 +4262,87 @@ Reminder set successfully."#;
             test_public_connect_info(),
             HeaderMap::new(),
             axum::body::Bytes::from("{}"),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ── QQ webhook secure-by-default ──
+
+    fn qq_test_state(qq_webhook_secret_hash: Option<Arc<str>>) -> AppState {
+        let mut state = wati_test_state(None);
+        state.qq = Some(Arc::new(QQChannel::new(
+            "11111111".into(),
+            "DG5g3B4j9X2KOErG".into(),
+            vec!["*".into()],
+        )));
+        state.qq_webhook_enabled = true;
+        state.qq_webhook_secret_hash = qq_webhook_secret_hash;
+        state.wati = None;
+        state
+    }
+
+    #[tokio::test]
+    async fn qq_loopback_without_secret_passes_auth_gate() {
+        let state = qq_test_state(None);
+        let response = handle_qq_webhook(
+            State(state),
+            test_connect_info(),
+            HeaderMap::new(),
+            Bytes::from_static(br#"{"op":13,"d":{"plain_token":"p","event_ts":"1"}}"#),
+        )
+        .await
+        .into_response();
+        // Auth gate passes — handler may then fail body checks but NOT 401.
+        assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn qq_non_loopback_without_secret_rejects_with_401() {
+        let state = qq_test_state(None);
+        let response = handle_qq_webhook(
+            State(state),
+            test_public_connect_info(),
+            HeaderMap::new(),
+            Bytes::from_static(br#"{}"#),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn qq_correct_secret_passes_auth_from_non_loopback() {
+        let secret = generate_test_secret();
+        let state = qq_test_state(Some(Arc::from(hash_webhook_secret(&secret))));
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Webhook-Secret", HeaderValue::from_str(&secret).unwrap());
+        let response = handle_qq_webhook(
+            State(state),
+            test_public_connect_info(),
+            headers,
+            Bytes::from_static(
+                br#"{"op":13,"d":{"plain_token":"Arq0D5A61EgUu4OxUvOp","event_ts":"1"}}"#,
+            ),
+        )
+        .await
+        .into_response();
+        assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn qq_wrong_secret_rejects_with_401() {
+        let valid = generate_test_secret();
+        let wrong = generate_test_secret();
+        let state = qq_test_state(Some(Arc::from(hash_webhook_secret(&valid))));
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Webhook-Secret", HeaderValue::from_str(&wrong).unwrap());
+        let response = handle_qq_webhook(
+            State(state),
+            test_public_connect_info(),
+            headers,
+            Bytes::from_static(br#"{}"#),
         )
         .await
         .into_response();
