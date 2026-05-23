@@ -300,6 +300,16 @@ impl Tool for ShellTool {
         })
     }
 
+    fn idempotency(&self) -> super::traits::Idempotency {
+        // Shell commands can do anything — observable result is not safe
+        // to assume reproducible across calls.
+        super::traits::Idempotency::NonIdempotent
+    }
+
+    fn side_effects(&self) -> super::traits::SideEffectClass {
+        super::traits::SideEffectClass::LocalExecute
+    }
+
     #[allow(clippy::incompatible_msrv)]
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let command = extract_command_argument(&args)

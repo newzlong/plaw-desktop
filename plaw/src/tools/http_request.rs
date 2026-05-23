@@ -185,6 +185,16 @@ impl Tool for HttpRequestTool {
         })
     }
 
+    fn side_effects(&self) -> super::traits::SideEffectClass {
+        // Worst case: POST/PUT/DELETE to an external endpoint. Even GET
+        // can have server-side side effects in poorly-designed APIs.
+        super::traits::SideEffectClass::NetworkWrite
+    }
+
+    // `idempotency()` deliberately falls through to `Unknown` — it depends
+    // on the HTTP verb in `args["method"]`, which the static trait method
+    // can't see. A future args-aware audit hook can branch on the verb.
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let url = args
             .get("url")

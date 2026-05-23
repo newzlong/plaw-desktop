@@ -42,6 +42,14 @@ impl Tool for GlobSearchTool {
         })
     }
 
+    fn idempotency(&self) -> super::traits::Idempotency {
+        super::traits::Idempotency::Idempotent
+    }
+
+    fn side_effects(&self) -> super::traits::SideEffectClass {
+        super::traits::SideEffectClass::ReadOnly
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let pattern = args
             .get("pattern")
