@@ -114,30 +114,13 @@ pub fn hydrate_from_snapshot(workspace_dir: &Path) -> Result<usize> {
     let conn = Connection::open(&db_path)?;
     conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
 
-    // Initialize schema (same as SqliteMemory::init_schema)
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS memories (
-            id         TEXT PRIMARY KEY,
-            key        TEXT NOT NULL UNIQUE,
-            content    TEXT NOT NULL,
-            category   TEXT NOT NULL DEFAULT 'core',
-            embedding  BLOB,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_mem_key ON memories(key);
-        CREATE INDEX IF NOT EXISTS idx_mem_cat ON memories(category);
-        CREATE INDEX IF NOT EXISTS idx_mem_updated ON memories(updated_at);
-
-        CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts
-            USING fts5(key, content, content='memories', content_rowid='rowid');
-
-        CREATE TABLE IF NOT EXISTS embedding_cache (
-            content_hash TEXT PRIMARY KEY,
-            embedding    BLOB NOT NULL,
-            created_at   TEXT NOT NULL
-        );",
-    )?;
+    // Route through the single source of truth for brain.db schema. Before
+    // this PR, snapshot.rs maintained its own inline duplicate of the
+    // schema, which had drifted from production: it lacked the FTS5 sync
+    // triggers and the embedding_cache.accessed_at column. Calling the
+    // shared helper guarantees hydrated DBs have the same shape that
+    // SqliteMemory expects on subsequent opens.
+    super::sqlite::init_brain_db_schema(&conn)?;
 
     let now = Local::now().to_rfc3339();
     let mut hydrated = 0;
