@@ -728,7 +728,7 @@ fn default_model_for_provider(provider: &str) -> String {
         "venice" => "zai-org-glm-5".into(),
         "groq" => "llama-3.3-70b-versatile".into(),
         "mistral" => "mistral-large-latest".into(),
-        "deepseek" => "deepseek-chat".into(),
+        "deepseek" => "deepseek-v4-pro".into(),
         "xai" => "grok-4-1-fast-reasoning".into(),
         "perplexity" => "sonar-pro".into(),
         "fireworks" => "accounts/fireworks/models/llama-v3p3-70b-instruct".into(),
@@ -879,12 +879,20 @@ fn curated_models_for_provider(provider_name: &str) -> Vec<(String, String)> {
         ],
         "deepseek" => vec![
             (
+                "deepseek-v4-pro".to_string(),
+                "DeepSeek V4 Pro (latest flagship, thinking on by default — recommended)".to_string(),
+            ),
+            (
+                "deepseek-v4-flash".to_string(),
+                "DeepSeek V4 Flash (faster, lower cost)".to_string(),
+            ),
+            (
                 "deepseek-chat".to_string(),
-                "DeepSeek Chat (mapped to V3.2 non-thinking)".to_string(),
+                "DeepSeek Chat (legacy V3.2 alias — deprecated 2026-07-24)".to_string(),
             ),
             (
                 "deepseek-reasoner".to_string(),
-                "DeepSeek Reasoner (mapped to V3.2 thinking)".to_string(),
+                "DeepSeek Reasoner (legacy V3.2 thinking alias — deprecated 2026-07-24)".to_string(),
             ),
         ],
         "hunyuan" => vec![

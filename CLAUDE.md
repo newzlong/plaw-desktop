@@ -95,43 +95,63 @@ cd src-tauri; cargo tauri build
 - `requirements.md` — 17 条需求（Portable、Setup Wizard、Provider、Channel、Skills、Agents、Cron 等）
 - `design.md` — 架构图、启动流程、组件接口、正确性属性
 
-## AI 模型配置（Kimi K2.5 直连）
+## AI 模型配置（Provider 无关）
 
-Plaw Desktop 直连 Kimi Coder 的 Kimi K2.5 API，**不走 ECS 中转**（与数字人平台不同）。
-用户在 Setup Wizard 中填入自己的 Kimi API Key。
+Plaw Desktop **不针对特定模型特化** — Setup Wizard 列出多个 Provider，用户选择并填入对应 API Key。
+配置写入 `config.toml`，Plaw 启动时按 Provider 名找对应工厂构造 client。
 
-### Plaw config.toml 关键配置
+**当前推荐默认（2026-05-23）**：DeepSeek V4 Pro，国内可直连无延迟，质量在国产模型里最强。
+其它已支持 Provider：Anthropic（Claude）、OpenAI、Kimi K2.5、Google Gemini、本地 Ollama、AWS Bedrock 等。
+
+> ⚠️ 推荐默认会随时间变化（半年内大概率被 V5 / Sonnet 5 / GPT-X 替代）。**所有切换路径都是配置改动，
+> 不是代码改动** — 改 `config.toml` 的 `default_provider` + `default_model` 即可，无需重新编译。
+
+### Plaw config.toml 关键配置（当前推荐：DeepSeek V4 Pro）
 ```toml
-api_key = "<用户的 Kimi API Key>"                          # 真实 Key，如 sk-xxx
-default_provider = "anthropic-custom:https://api.moonshot.cn"  # Kimi 官方 API（Anthropic 兼容格式）
-default_model = "kimi-k2.5"
+api_key = "<用户 API Key>"            # sk-xxx，发给所选 Provider
+default_provider = "deepseek"         # 工厂名，对应 src/providers/mod.rs 的 case 分支
+default_model = "deepseek-v4-pro"     # Provider 接受的 model 字段值
 default_temperature = 0.7
 
 [provider]
 reasoning_level = "medium"
 ```
 
-### 链路（直连，无中转）
-```
-Plaw (x-api-key: sk-xxx)
-  → POST https://api.moonshot.cn/v1/messages
-  → Kimi K2.5 (Anthropic 兼容格式)
-  → 流式 SSE 回传
+### 同等支持的其它 Provider 示例
+```toml
+# Anthropic Claude
+default_provider = "anthropic"
+default_model = "claude-sonnet-4-6"
+
+# Kimi K2.5 (Anthropic-兼容 API)
+default_provider = "anthropic-custom:https://api.moonshot.cn"
+default_model = "kimi-k2.5"
+
+# OpenAI
+default_provider = "openai"
+default_model = "gpt-4o"
+
+# 本地 Ollama
+default_provider = "ollama"
+default_model = "qwen2.5:14b"
 ```
 
-### 要点
-- `api_key` = 用户自己的 Kimi API Key（sk-xxx），直接发给 Kimi
-- Provider 格式：`anthropic-custom:<base_url>`，Plaw 自动拼 `/v1/messages`
-- Kimi Coder 的 API 兼容 Anthropic Messages 格式
-- 模型名 `kimi-k2.5`（Kimi K2.5 Coder）
-- Web Search 用 Bing RSS（中国可用，无需 VPN）
-- 也可支持其他 Provider（OpenAI、Anthropic、DeepSeek 等），在 Setup Wizard 选择
+### 通用要点
+- `api_key` = 用户自己的 Provider API Key，直接发给对应 Provider，**不经任何中转**
+- Provider 工厂注册在 `plaw/src/providers/mod.rs`，加新 Provider 不改 agent loop
+- Web Search 用 Bing RSS（中国可用，无需 VPN）— 与 LLM Provider 无关
+- 不在代码里硬编码任何 model 名 / provider 别名；用户改 config 就能切
 
 ### Setup Wizard 流程
-1. 选择 Provider（默认 Kimi Coder）
-2. 填入 API Key（sk-xxx）
-3. 可选：测试连接（发一条测试请求验证 Key 有效）
+1. 选择 Provider（推荐默认 = DeepSeek V4 Pro，但所有支持的 Provider 都列出来）
+2. 填入对应 API Key
+3. 可选：测试连接（发一条最小请求验证 Key 有效）
 4. 生成 config.toml → 启动 Plaw
+
+### Eval 模型选择
+plaw-eval 的判断模型（judge）通过 `PLAW_EVAL_JUDGE=provider:model` env var 控制，
+默认走 `evals/<suite>/cases.toml` 的 `[default_judge]`。同理：**不绑定单一模型**，
+半年后想换 judge 改一个 env var 即可。详见 `crates/plaw-eval-cli/src/main.rs --judge` 的帮助文本。
 
 ## Plaw WebSocket 协议（聊天 + 工具执行状态）
 
