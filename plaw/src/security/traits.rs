@@ -34,6 +34,32 @@ pub trait Sandbox: Send + Sync {
     /// (e.g., missing wrapper binary, invalid policy file).
     fn wrap_command(&self, cmd: &mut Command) -> std::io::Result<()>;
 
+    /// Post-spawn hook called by [`crate::tools::ShellTool`] immediately after
+    /// the child process is spawned, before it is awaited. Receives the child
+    /// process ID so the sandbox can assign it to a resource container
+    /// (e.g. Windows Job Object, Linux cgroup) by PID lookup.
+    ///
+    /// Default implementation is a no-op so existing backends
+    /// ([`NoopSandbox`], Linux/macOS sandboxes that operate entirely
+    /// pre-spawn via [`wrap_command`](Sandbox::wrap_command)) need no change.
+    /// The Windows Job Object backend uses this hook to call
+    /// `AssignProcessToJobObject` on the freshly-spawned PID — that platform's
+    /// isolation mechanism is fundamentally post-spawn-only (an already-running
+    /// process is adopted into a job; there is no pre-spawn flag equivalent
+    /// to firejail's wrapper-binary approach).
+    ///
+    /// # Errors
+    ///
+    /// Returns `std::io::Error` if the post-spawn step fails. Callers should
+    /// log and continue rather than killing the child: by the time this hook
+    /// fires the process is already executing, and aborting the tool execution
+    /// because sandbox attachment failed would be surprising for users who
+    /// configured the sandbox optimistically. The active backend's `name()`
+    /// in logs lets operators tell whether isolation actually took effect.
+    fn after_spawn(&self, _pid: u32) -> std::io::Result<()> {
+        Ok(())
+    }
+
     /// Check if this sandbox backend is available on the current platform.
     ///
     /// Returns `true` when all required kernel features, binaries, and

@@ -70,6 +70,18 @@ pub fn create_sandbox(config: &SecurityConfig) -> Arc<dyn Sandbox> {
             tracing::warn!("Docker requested but not available, falling back to application-layer");
             Arc::new(super::traits::NoopSandbox)
         }
+        SandboxBackend::WindowsJobObject => {
+            #[cfg(target_os = "windows")]
+            {
+                if let Ok(sandbox) = super::windows_job::WindowsJobObjectSandbox::new() {
+                    return Arc::new(sandbox);
+                }
+            }
+            tracing::warn!(
+                "Windows Job Object requested but not available, falling back to application-layer"
+            );
+            Arc::new(super::traits::NoopSandbox)
+        }
         SandboxBackend::Auto | SandboxBackend::None => {
             // Auto-detect best available
             detect_best_sandbox()
@@ -106,6 +118,17 @@ fn detect_best_sandbox() -> Arc<dyn Sandbox> {
                 tracing::info!("Bubblewrap sandbox enabled");
                 return Arc::new(sandbox);
             }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Windows Job Object: kernel-level, no extra binaries needed.
+        // Always preferred over Docker on Windows because it has zero
+        // install surface and zero per-spawn overhead.
+        if let Ok(sandbox) = super::windows_job::WindowsJobObjectSandbox::probe() {
+            tracing::info!("Windows Job Object sandbox enabled");
+            return Arc::new(sandbox);
         }
     }
 

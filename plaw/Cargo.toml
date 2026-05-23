@@ -168,8 +168,18 @@ opentelemetry-otlp = { version = "0.31", default-features = false, features = ["
 tokio-serial = { version = "5", default-features = false, optional = true }
 
 # Windows registry access (read full user PATH for shell tool)
+# win32job: safe wrapper for the Job Object lifecycle (create, configure,
+#   assign by HANDLE, drop). Used by security/windows_job.rs.
+# windows-sys: needed for OpenProcess to convert PID→HANDLE (win32job
+#   takes HANDLE, but tokio::process::Child only exposes PID). The single
+#   unsafe call is scoped to security/windows_job.rs::open_process_handle.
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
+win32job = "2.0"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }
 
 # USB device enumeration (hardware discovery) — only on platforms nusb supports
 # (Linux, macOS, Windows). Android/Termux uses target_os="android" and is excluded.
