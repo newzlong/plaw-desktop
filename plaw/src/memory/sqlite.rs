@@ -17,6 +17,103 @@ use uuid::Uuid;
 /// Maximum allowed open timeout (seconds) to avoid unreasonable waits.
 const SQLITE_OPEN_TIMEOUT_CAP_SECS: u64 = 300;
 
+/// Versioned schema migrations for the shared `brain.db` (memories +
+/// embedding cache + FTS5). Each entry runs in its own transaction via
+/// [`crate::db::migrate`]. Add new migrations to the END of the slice with
+/// strictly increasing `version`; never reorder or rewrite existing entries
+/// (users already at version N would skip the changes).
+///
+/// **v1 baseline** uses `IF NOT EXISTS` everywhere so the migration is
+/// idempotent on pre-framework users who already have these objects. This
+/// is the single source of truth for `brain.db` schema — both
+/// [`SqliteMemory::with_embedder`] (production open) and
+/// [`super::snapshot::hydrate_from_snapshot`] (cold-boot rebuild from
+/// `MEMORY_SNAPSHOT.md`) call into [`init_brain_db_schema`] which
+/// applies this slice.
+pub(super) const MEMORIES_MIGRATIONS: &[crate::db::Migration] = &[crate::db::Migration {
+    version: 1,
+    description: "baseline memories + FTS5 + sync triggers + embedding_cache",
+    sql: "-- Core memories table
+        CREATE TABLE IF NOT EXISTS memories (
+            id          TEXT PRIMARY KEY,
+            key         TEXT NOT NULL UNIQUE,
+            content     TEXT NOT NULL,
+            category    TEXT NOT NULL DEFAULT 'core',
+            embedding   BLOB,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
+        CREATE INDEX IF NOT EXISTS idx_memories_key ON memories(key);
+
+        -- FTS5 full-text search (BM25 scoring)
+        CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+            key, content, content=memories, content_rowid=rowid
+        );
+
+        -- FTS5 triggers: keep in sync with memories table
+        CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+            INSERT INTO memories_fts(rowid, key, content)
+            VALUES (new.rowid, new.key, new.content);
+        END;
+        CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+            INSERT INTO memories_fts(memories_fts, rowid, key, content)
+            VALUES ('delete', old.rowid, old.key, old.content);
+        END;
+        CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+            INSERT INTO memories_fts(memories_fts, rowid, key, content)
+            VALUES ('delete', old.rowid, old.key, old.content);
+            INSERT INTO memories_fts(rowid, key, content)
+            VALUES (new.rowid, new.key, new.content);
+        END;
+
+        -- Embedding cache with LRU eviction
+        CREATE TABLE IF NOT EXISTS embedding_cache (
+            content_hash TEXT PRIMARY KEY,
+            embedding    BLOB NOT NULL,
+            created_at   TEXT NOT NULL,
+            accessed_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_cache_accessed ON embedding_cache(accessed_at);",
+}];
+
+/// Legacy ad-hoc column add for `memories.session_id`. Kept OUTSIDE the
+/// versioned migration slice because SQLite has no `ALTER TABLE ADD COLUMN
+/// IF NOT EXISTS`, and existing pre-framework users already have this
+/// column from this same runtime check. Folding it into a v2 Migration
+/// would fail on those users' next launch. Future schema changes (new
+/// columns, new tables) should go straight into `MEMORIES_MIGRATIONS` as
+/// v2+ — only this one legacy column stays outside.
+pub(super) fn ensure_session_id_column(conn: &Connection) -> anyhow::Result<()> {
+    let has_session_id: bool = conn
+        .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'")?
+        .query_row([], |row| row.get::<_, String>(0))?
+        .contains("session_id");
+    if !has_session_id {
+        conn.execute_batch(
+            "ALTER TABLE memories ADD COLUMN session_id TEXT;
+             CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id);",
+        )?;
+    }
+    Ok(())
+}
+
+/// Single source of truth for `brain.db` schema initialization.
+///
+/// Called by:
+/// - [`SqliteMemory::with_embedder`] — production open path.
+/// - [`super::snapshot::hydrate_from_snapshot`] — cold-boot rebuild from
+///   `MEMORY_SNAPSHOT.md` when `brain.db` is missing but the snapshot file
+///   exists. Before this helper existed, snapshot.rs maintained its own
+///   inline duplicate of the schema, which drifted from the production
+///   schema (it lacked the FTS5 sync triggers and the session_id column).
+///   Routing both paths through one function eliminates that drift.
+pub(super) fn init_brain_db_schema(conn: &Connection) -> anyhow::Result<()> {
+    crate::db::migrate(conn, "memories", MEMORIES_MIGRATIONS)?;
+    ensure_session_id_column(conn)?;
+    Ok(())
+}
+
 /// SQLite-backed persistent memory — the brain
 ///
 /// Full-stack search engine:
@@ -84,7 +181,7 @@ impl SqliteMemory {
              PRAGMA temp_store   = MEMORY;",
         )?;
 
-        Self::init_schema(&conn)?;
+        init_brain_db_schema(&conn)?;
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -125,68 +222,6 @@ impl SqliteMemory {
         };
 
         Ok(conn)
-    }
-
-    /// Initialize all tables: memories, FTS5, `embedding_cache`
-    fn init_schema(conn: &Connection) -> anyhow::Result<()> {
-        conn.execute_batch(
-            "-- Core memories table
-            CREATE TABLE IF NOT EXISTS memories (
-                id          TEXT PRIMARY KEY,
-                key         TEXT NOT NULL UNIQUE,
-                content     TEXT NOT NULL,
-                category    TEXT NOT NULL DEFAULT 'core',
-                embedding   BLOB,
-                created_at  TEXT NOT NULL,
-                updated_at  TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
-            CREATE INDEX IF NOT EXISTS idx_memories_key ON memories(key);
-
-            -- FTS5 full-text search (BM25 scoring)
-            CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-                key, content, content=memories, content_rowid=rowid
-            );
-
-            -- FTS5 triggers: keep in sync with memories table
-            CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
-                INSERT INTO memories_fts(rowid, key, content)
-                VALUES (new.rowid, new.key, new.content);
-            END;
-            CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
-                INSERT INTO memories_fts(memories_fts, rowid, key, content)
-                VALUES ('delete', old.rowid, old.key, old.content);
-            END;
-            CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
-                INSERT INTO memories_fts(memories_fts, rowid, key, content)
-                VALUES ('delete', old.rowid, old.key, old.content);
-                INSERT INTO memories_fts(rowid, key, content)
-                VALUES (new.rowid, new.key, new.content);
-            END;
-
-            -- Embedding cache with LRU eviction
-            CREATE TABLE IF NOT EXISTS embedding_cache (
-                content_hash TEXT PRIMARY KEY,
-                embedding    BLOB NOT NULL,
-                created_at   TEXT NOT NULL,
-                accessed_at  TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_cache_accessed ON embedding_cache(accessed_at);",
-        )?;
-
-        // Migration: add session_id column if not present (safe to run repeatedly)
-        let has_session_id: bool = conn
-            .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'")?
-            .query_row([], |row| row.get::<_, String>(0))?
-            .contains("session_id");
-        if !has_session_id {
-            conn.execute_batch(
-                "ALTER TABLE memories ADD COLUMN session_id TEXT;
-                 CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id);",
-            )?;
-        }
-
-        Ok(())
     }
 
     fn category_to_str(cat: &MemoryCategory) -> String {
@@ -793,6 +828,69 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mem = SqliteMemory::new(tmp.path()).unwrap();
         (tmp, mem)
+    }
+
+    // ── db::migrate framework wire-up tests (PR #11 reference pattern) ──
+
+    #[tokio::test]
+    async fn new_on_fresh_dir_creates_schema_and_sets_user_version_to_one() {
+        let (_tmp, mem) = temp_sqlite();
+
+        // Schema usable end-to-end (store + retrieve).
+        mem.store("smoke_test", "hello", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+        let got = mem.get("smoke_test").await.unwrap();
+        assert!(got.is_some(), "stored entry must be retrievable");
+
+        // PRAGMA user_version flipped from 0 to 1.
+        let conn = mem.conn.lock();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 1, "fresh brain.db must end at user_version = 1");
+
+        // session_id column was added by ensure_session_id_column (outside
+        // the versioned slice — legacy convention).
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(memories)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(
+            cols.iter().any(|c| c == "session_id"),
+            "session_id column must be present after init_brain_db_schema"
+        );
+    }
+
+    #[tokio::test]
+    async fn reopen_is_idempotent_no_schema_rebuild() {
+        let tmp = TempDir::new().unwrap();
+        {
+            let mem = SqliteMemory::new(tmp.path()).unwrap();
+            mem.store("survived", "across reopen", MemoryCategory::Core, None)
+                .await
+                .unwrap();
+        }
+
+        // Reopen the same workspace — db::migrate sees user_version = 1,
+        // ensure_session_id_column sees the column already there, both
+        // no-op. The previously stored entry survives.
+        let mem = SqliteMemory::new(tmp.path()).unwrap();
+        let got = mem.get("survived").await.unwrap();
+        assert_eq!(
+            got.as_ref().map(|e| e.content.as_str()),
+            Some("across reopen"),
+            "entry from previous open must survive idempotent reopen"
+        );
+
+        let conn = mem.conn.lock();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 1, "reopen must leave user_version unchanged");
     }
 
     #[tokio::test]
