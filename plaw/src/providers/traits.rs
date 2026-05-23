@@ -378,6 +378,41 @@ pub trait Provider: Send + Sync {
         })
     }
 
+    /// Streaming variant of [`chat`] — providers that support SSE/chunked
+    /// responses push each user-facing text fragment to `on_token` as it
+    /// arrives, while still returning the fully-assembled `ChatResponse`
+    /// when the stream completes (so tool_calls/usage stay available for
+    /// the agent loop).
+    ///
+    /// Default implementation ignores `on_token` and delegates to
+    /// [`chat`] — providers that don't yet have a real streaming
+    /// implementation behave exactly as before (one buffered response at
+    /// the end of the LLM call). Override this method to opt into real
+    /// SSE streaming: per-token TTFB drops from "wait for end" to
+    /// "first byte after model's first emitted chunk".
+    ///
+    /// `on_token` content is sent verbatim to the WebSocket layer as a
+    /// `{"type":"chunk","content":<text>}` event by `gateway::ws`. Do
+    /// NOT include sentinel prefixes (those are reserved for progress
+    /// hints and tool-call cards). Tool-call argument JSON fragments
+    /// (`input_json_delta` in Anthropic's SSE) MUST NOT be forwarded
+    /// here — they are not user-facing text and would corrupt the chat
+    /// transcript. Only forward text content blocks.
+    ///
+    /// Channel-full handling: callers should use `try_send` and drop on
+    /// full rather than `send().await` — chat tokens are progress
+    /// hints, not load-bearing state; back-pressuring the LLM stream is
+    /// worse than dropping a few visible tokens.
+    async fn chat_streaming(
+        &self,
+        request: ChatRequest<'_>,
+        model: &str,
+        temperature: f64,
+        _on_token: Option<&tokio::sync::mpsc::Sender<String>>,
+    ) -> anyhow::Result<ChatResponse> {
+        self.chat(request, model, temperature).await
+    }
+
     /// Whether provider supports native tool calls over API.
     fn supports_native_tools(&self) -> bool {
         self.capabilities().native_tool_calling
