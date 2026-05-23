@@ -1604,6 +1604,7 @@ async fn handle_whatsapp_message(
 /// POST /linq — incoming message webhook (iMessage/RCS/SMS via Linq)
 async fn handle_linq_webhook(
     State(state): State<AppState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
@@ -1613,6 +1614,25 @@ async fn handle_linq_webhook(
             Json(serde_json::json!({"error": "Linq not configured"})),
         );
     };
+
+    // ── Secure-by-default invariant ──
+    // When `linq.signing_secret` is unset AND the request comes from a
+    // non-loopback peer, reject with 401. Without this gate the handler
+    // silently skips signature verification on misconfigured public
+    // deployments, letting any attacker POST forged Linq payloads to
+    // trigger LLM calls + auto-replies.
+    if state.linq_signing_secret.is_none() && !peer_addr.ip().is_loopback() {
+        tracing::warn!(
+            peer = %peer_addr,
+            "Linq webhook: rejected non-loopback request — no signing_secret configured"
+        );
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "Unauthorized — configure channels.linq.signing_secret for non-local access"
+            })),
+        );
+    }
 
     let body_str = String::from_utf8_lossy(&body);
 
@@ -1870,6 +1890,7 @@ async fn handle_wati_webhook(
 /// POST /nextcloud-talk — incoming message webhook (Nextcloud Talk bot API)
 async fn handle_nextcloud_talk_webhook(
     State(state): State<AppState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
@@ -1879,6 +1900,25 @@ async fn handle_nextcloud_talk_webhook(
             Json(serde_json::json!({"error": "Nextcloud Talk not configured"})),
         );
     };
+
+    // ── Secure-by-default invariant ──
+    // When `nextcloud_talk.webhook_secret` is unset AND the request comes
+    // from a non-loopback peer, reject with 401. See PR #20's WATI handler
+    // for the same pattern applied to a channel where the upstream doesn't
+    // sign at all; here the upstream (Nextcloud Talk) DOES sign via HMAC
+    // but we can't verify without the shared secret.
+    if state.nextcloud_talk_webhook_secret.is_none() && !peer_addr.ip().is_loopback() {
+        tracing::warn!(
+            peer = %peer_addr,
+            "Nextcloud Talk webhook: rejected non-loopback request — no webhook_secret configured"
+        );
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "Unauthorized — configure channels.nextcloud_talk.webhook_secret for non-local access"
+            })),
+        );
+    }
 
     let body_str = String::from_utf8_lossy(&body);
 
@@ -3330,6 +3370,7 @@ Reminder set successfully."#;
 
         let response = handle_nextcloud_talk_webhook(
             State(state),
+            test_connect_info(),
             HeaderMap::new(),
             Bytes::from_static(br#"{"type":"message"}"#),
         )
@@ -3402,9 +3443,14 @@ Reminder set successfully."#;
             HeaderValue::from_str(invalid_signature).unwrap(),
         );
 
-        let response = handle_nextcloud_talk_webhook(State(state), headers, Bytes::from(body))
-            .await
-            .into_response();
+        let response = handle_nextcloud_talk_webhook(
+            State(state),
+            test_connect_info(),
+            headers,
+            Bytes::from(body),
+        )
+        .await
+        .into_response();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(provider_impl.calls.load(Ordering::SeqCst), 0);
     }
@@ -4047,6 +4093,92 @@ Reminder set successfully."#;
         .await
         .into_response();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // ── Linq webhook secure-by-default ──
+
+    fn linq_test_state(signing_secret: Option<Arc<str>>) -> AppState {
+        let mut state = wati_test_state(None);
+        state.linq = Some(Arc::new(crate::channels::linq::LinqChannel::new(
+            "linq-test-token".into(),
+            "+15551234567".into(),
+            vec!["*".into()],
+        )));
+        state.linq_signing_secret = signing_secret;
+        state.wati = None;
+        state
+    }
+
+    #[tokio::test]
+    async fn linq_loopback_without_secret_passes_auth_gate() {
+        let state = linq_test_state(None);
+        let response = handle_linq_webhook(
+            State(state),
+            test_connect_info(),
+            HeaderMap::new(),
+            axum::body::Bytes::from("{}"),
+        )
+        .await
+        .into_response();
+        // Auth gate passes — body parsing may still 400, but NOT 401.
+        assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn linq_non_loopback_without_secret_rejects_with_401() {
+        let state = linq_test_state(None);
+        let response = handle_linq_webhook(
+            State(state),
+            test_public_connect_info(),
+            HeaderMap::new(),
+            axum::body::Bytes::from("{}"),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ── Nextcloud Talk webhook secure-by-default ──
+
+    fn nextcloud_talk_test_state(webhook_secret: Option<Arc<str>>) -> AppState {
+        let mut state = wati_test_state(None);
+        state.nextcloud_talk =
+            Some(Arc::new(crate::channels::nextcloud_talk::NextcloudTalkChannel::new(
+                "https://example.invalid".into(),
+                "nc-app-token".into(),
+                vec!["*".into()],
+            )));
+        state.nextcloud_talk_webhook_secret = webhook_secret;
+        state.wati = None;
+        state
+    }
+
+    #[tokio::test]
+    async fn nextcloud_talk_loopback_without_secret_passes_auth_gate() {
+        let state = nextcloud_talk_test_state(None);
+        let response = handle_nextcloud_talk_webhook(
+            State(state),
+            test_connect_info(),
+            HeaderMap::new(),
+            axum::body::Bytes::from("{}"),
+        )
+        .await
+        .into_response();
+        assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn nextcloud_talk_non_loopback_without_secret_rejects_with_401() {
+        let state = nextcloud_talk_test_state(None);
+        let response = handle_nextcloud_talk_webhook(
+            State(state),
+            test_public_connect_info(),
+            HeaderMap::new(),
+            axum::body::Bytes::from("{}"),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     /// Non-loopback request with a WRONG secret header: 401 (constant-time
