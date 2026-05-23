@@ -246,12 +246,23 @@ The original sketch proposed making `loop_::tool_io::append_calibration_reminder
 
 **Implication for the RFC.** The `NodeId::PerToolCalibrationReminder` variant in `agent/prompt_dag.rs` keeps its reservation (cheap to keep, signals intent) but is not wired. The §4.4 row for it stays as a documented future possibility, not a planned PR.
 
-### 5.4 PR-4: model L1 scaffold as `IntentScaffold` node
+### 5.4 PR-4: model L1 scaffold as `IntentScaffold` node *(deferred)*
 
-- Existing `apply_intent_scaffold` in `agent::intent` keeps producing the user-message-prepended scaffold.
-- New `IntentScaffold` node *also* adds a one-line "(intent: WrongPremise)" hint to the system prompt at the position §4.3 declares, so the LLM sees a consistent picture.
-- Gate: `applies` returns true only when classification fired AND the chosen intent has a scaffold body.
-- Eval: T-3 / T-6 / T-10 scores tracked; intent-routing-enabled cases compared against intent-routing-disabled.
+**Status:** deferred indefinitely after closer review post PR-2B.
+
+The original sketch proposed adding a one-line intent hint to the system prompt at the `IntentScaffold` node position so the LLM would see a consistent picture between the system-level rule context and the user-message-level scaffold body. Closer inspection while planning the implementation surfaced the same class of obstacles that deferred PR-3:
+
+1. **System prompt is built once and cached.** [`Agent::turn`](../src/agent/agent.rs) builds the system prompt only when `self.history.is_empty()` and stores the result at `history[0]` for the rest of the conversation. To make an intent hint refresh per turn, the system prompt would have to be rebuilt and `history[0]` swapped out every turn — a behavior change that breaks LLM-side prompt caching (Anthropic / OpenRouter cache the system+early-history), distorts cost accounting, and complicates streaming-trace observability that assumes the system prompt is invariant within a conversation.
+
+2. **Provider compatibility for mid-conversation system messages.** The alternative — injecting a fresh system message between iterations rather than rebuilding `history[0]` — is rejected by several providers that expect at most one leading system message. Some accept mid-conversation `system` role messages, some silently downgrade them to `user`, and some bail. The current single-cached-system-prompt invariant sidesteps this entirely.
+
+3. **The per-turn scaffold already works where it lives.** [`apply_intent_scaffold`](../src/agent/intent.rs) prepends the full scaffold body to the user message every turn at agent.rs:567. The LLM sees the intent context in the right place for the right turn. Adding a *second* (and necessarily stale, per #1) copy in the system prompt is redundant signal at best and conflicting signal at worst when the intent shifts mid-conversation.
+
+4. **YAGNI: no concrete failure mode is asking for this.** The Phase 2 eval cases that drove the L1 design (math-003, ambiguity-001, etc.) are addressed by the existing user-message-prepend wiring. There is no eval gap that a system-prompt-side hint would close.
+
+**Decision.** L1 stays as the user-message-prepend mechanism in `apply_intent_scaffold`. The DAG model proved its worth on static system-prompt composition (PR-1 / PR-2A / PR-2B); per-turn dynamic content placement remains a separate concern that the user-message scaffold path handles well today.
+
+**Implication for the RFC.** The `NodeId::IntentScaffold` variant in `agent/prompt_dag.rs` keeps its reservation (cheap to keep, signals intent for some future per-turn-rebuild architecture) but is not wired. The §4.3 dependency row for it stays as a documented future possibility, not a planned PR. Combined with PR-3's deferral, the two iteration-time concerns (L1 and L4) will jointly inform a unified per-turn-injection abstraction whenever PR-5's L2 (freshness) and L3 (grounding) are written — three concrete users will then exist to design against.
 
 ### 5.5 PR-5: add `ToolFreshnessMetadata` and `GroundingVerifierTail` nodes (L2 + L3)
 
@@ -292,7 +303,7 @@ Each PR is a standalone refactor with its own eval-parity gate; revert is `git r
 
 ## 10. Decision criteria for proceeding
 
-The decision criteria below were the ones the *original* draft used to gate adoption. As of 2026-05-04 the proposal has been **partially adopted**: PR-1 (skeleton), PR-2A (9 nodes), and PR-2B (production wiring through `SystemPromptBuilder` shim) have shipped, with byte-parity gates held under eight realistic-fixture tests. PR-3 is deferred per §5.3. PR-4 / PR-5 remain optional and gated on the criteria below:
+The decision criteria below were the ones the *original* draft used to gate adoption. As of 2026-05-23 the proposal has been **partially adopted with two iteration-time deferrals**: PR-1 (skeleton), PR-2A (9 nodes), and PR-2B (production wiring through `SystemPromptBuilder` shim) have shipped, with byte-parity gates held under eight realistic-fixture tests. PR-3 (L4 reminder) and PR-4 (L1 scaffold) are deferred per §5.3 and §5.4 — both hit the same wall: per-turn dynamic content doesn't fit the once-per-conversation system-prompt model that the DAG layer composes. PR-5 remains optional and gated on the criteria below:
 
 - a concrete blocker for L2 / L3 lands that the current ordered-vector / DAG-of-static-sections model can't express, or
 - a second collision case in the same shape as math-003 ↔ ambiguity-001 surfaces from a future eval pass that L1 + the existing system-prompt rules can't separate, or
