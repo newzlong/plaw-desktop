@@ -64,6 +64,7 @@ pub mod subagent_spawn;
 pub mod task_plan;
 pub mod traits;
 pub mod url_validation;
+pub mod validation;
 pub mod wasm_module;
 pub mod web_fetch;
 pub mod web_search_tool;

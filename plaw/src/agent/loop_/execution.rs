@@ -111,8 +111,10 @@ async fn execute_one_tool(
         progress_log.push(hint.clone());
     }
 
-    // Execute the tool
-    let tool_future = tool.execute(call_arguments);
+    // Execute the tool. `execute_validated` short-circuits with a structured
+    // validation error before dispatching to the tool body if args don't
+    // match `parameters_schema()`.
+    let tool_future = tool.execute_validated(call_arguments);
     let tool_result = if let Some(token) = cancellation_token {
         tokio::select! {
             () = token.cancelled() => return Err(ToolLoopCancelled.into()),

@@ -1963,12 +1963,14 @@ mod tests {
         }
 
         fn parameters_schema(&self) -> serde_json::Value {
+            // Permissive schema — DelayTool is a generic mock registered under
+            // various names ("shell", "delay_a", etc.) and tests pass diverse
+            // arg shapes ({"command":...} for shell-impersonation tests,
+            // {"value":...} for parallel-execution tests). Tool::execute_validated
+            // would reject {"command":...} if we required "value" here.
             serde_json::json!({
                 "type": "object",
-                "properties": {
-                    "value": { "type": "string" }
-                },
-                "required": ["value"]
+                "additionalProperties": true
             })
         }
 
