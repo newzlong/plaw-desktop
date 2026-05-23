@@ -1,6 +1,10 @@
 # Dead-Code Audit — 2026-05-04
 
-> **Status:** Findings document, not a refactor plan.
+> **Status:** Findings snapshot. The audit was resolved 2026-05-23
+> (356 → 0 warnings; crate-level `#![allow(dead_code)]` removed).
+> See [`dead-code-hygiene.md`](./dead-code-hygiene.md) for the
+> ongoing maintainer guide that codifies what to do when the lint
+> now fires at compile time.
 > **Scope:** Whole `plaw` crate (`cargo build --lib`).
 > **Trigger:** Three dead-code findings surfaced during F-4 / F-7 work
 > (`PROGRESS_MIN_INTERVAL_MS`, `build_assistant_history_with_tool_calls`,
