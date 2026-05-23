@@ -313,6 +313,11 @@ pub struct AppState {
     /// requests — secure-by-default invariant for the only webhook
     /// endpoint whose upstream (WATI) does not sign callbacks.
     pub wati_webhook_secret_hash: Option<Arc<str>>,
+    /// Shared SecretStore used by `Secret` newtype `reveal()` calls.
+    /// Built from `config.config_path` + `config.secrets.encrypt` at
+    /// gateway startup so handlers don't have to re-derive the path
+    /// per call.
+    pub secret_store: Arc<crate::security::SecretStore>,
     pub qq: Option<Arc<QQChannel>>,
     pub qq_webhook_enabled: bool,
     /// Observability backend for metrics scraping
@@ -363,6 +368,19 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let actual_port = listener.local_addr()?.port();
     let display_addr = format!("{host}:{actual_port}");
+
+    // SecretStore for the lazy-reveal `Secret` newtype. Created once
+    // from `config.config_path` + `config.secrets.encrypt`, shared via
+    // AppState so handlers can decrypt on demand. See
+    // [`crate::security::secret`] module docs for the contract.
+    let secret_store_plaw_dir = config
+        .config_path
+        .parent()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let secret_store: Arc<crate::security::SecretStore> = Arc::new(
+        crate::security::SecretStore::new(&secret_store_plaw_dir, config.secrets.encrypt),
+    );
 
     let provider: Arc<dyn Provider> = Arc::from(providers::create_resilient_provider_with_options(
         config.default_provider.as_deref().unwrap_or("openrouter"),
@@ -527,15 +545,26 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
                 wati_cfg.allowed_numbers.clone(),
             ))
         });
+    // wati.webhook_secret is the first config field that uses the
+    // `Secret` newtype — reveal via SecretStore before hashing.
     let wati_webhook_secret_hash: Option<Arc<str>> = config
         .channels_config
         .wati
         .as_ref()
-        .and_then(|wati_cfg| {
-            wati_cfg.webhook_secret.as_ref().and_then(|raw| {
-                let trimmed = raw.trim();
+        .and_then(|wati_cfg| wati_cfg.webhook_secret.as_ref())
+        .and_then(|secret| match secret.reveal(secret_store.as_ref()) {
+            Ok(plaintext) => {
+                let trimmed = plaintext.trim();
                 (!trimmed.is_empty()).then(|| Arc::<str>::from(hash_webhook_secret(trimmed)))
-            })
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "Failed to decrypt channels.wati.webhook_secret — \
+                     handler will reject all non-loopback requests"
+                );
+                None
+            }
         });
 
     // QQ channel (if configured)
@@ -708,6 +737,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         nextcloud_talk_webhook_secret,
         wati: wati_channel,
         wati_webhook_secret_hash,
+        secret_store,
         qq: qq_channel,
         qq_webhook_enabled,
         observer: broadcast_observer,
@@ -2129,6 +2159,7 @@ mod tests {
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
+            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -2189,6 +2220,7 @@ mod tests {
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
+            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
             observer,
@@ -2235,6 +2267,7 @@ mod tests {
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
+            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -2282,6 +2315,7 @@ mod tests {
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
+            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -2755,6 +2789,7 @@ Reminder set successfully."#;
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
+            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -2826,6 +2861,7 @@ Reminder set successfully."#;
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
+            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -2879,6 +2915,7 @@ Reminder set successfully."#;
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
+            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -2937,6 +2974,7 @@ Reminder set successfully."#;
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
+            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -3000,6 +3038,7 @@ Reminder set successfully."#;
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
+            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -3085,6 +3124,7 @@ Reminder set successfully."#;
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
+            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -3142,6 +3182,7 @@ Reminder set successfully."#;
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
+            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -3204,6 +3245,7 @@ Reminder set successfully."#;
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
+            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -3271,6 +3313,7 @@ Reminder set successfully."#;
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
+            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -3334,6 +3377,7 @@ Reminder set successfully."#;
             nextcloud_talk_webhook_secret: Some(Arc::from(secret)),
             wati: None,
             wati_webhook_secret_hash: None,
+            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -3390,6 +3434,7 @@ Reminder set successfully."#;
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
+            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -3445,6 +3490,7 @@ Reminder set successfully."#;
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
+            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
             qq: Some(qq),
             qq_webhook_enabled: true,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -3910,6 +3956,10 @@ Reminder set successfully."#;
             nextcloud_talk_webhook_secret: None,
             wati,
             wati_webhook_secret_hash,
+            secret_store: Arc::new(crate::security::SecretStore::new(
+                std::path::Path::new(""),
+                false,
+            )),
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),

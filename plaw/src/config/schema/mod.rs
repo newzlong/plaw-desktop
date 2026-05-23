@@ -3413,12 +3413,19 @@ pub struct WatiConfig {
     /// `X-Webhook-Secret` header if WATI's UI allows). The handler then
     /// requires the same value on every incoming POST.
     ///
+    /// Stored as a [`crate::security::Secret`] so the on-disk form is
+    /// the encrypted `enc2:` ciphertext blob; the plaintext is only
+    /// reconstituted via `.reveal(&SecretStore)` at the secret-hash
+    /// computation site. This is the first field in the codebase to
+    /// adopt the `Secret` newtype — see [`crate::security::secret`] for
+    /// the lazy-reveal contract.
+    ///
     /// When `None` AND the gateway is bound to a non-loopback address,
     /// the handler rejects all requests with 401 — that's the
     /// secure-by-default invariant for this endpoint. Loopback-only
     /// deployments (typical desktop use) work without a secret.
     #[serde(default)]
-    pub webhook_secret: Option<String>,
+    pub webhook_secret: Option<crate::security::Secret>,
 }
 
 fn default_wati_api_url() -> String {
