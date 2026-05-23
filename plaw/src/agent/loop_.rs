@@ -238,7 +238,8 @@ pub(crate) async fn run_tool_call_loop(
 
         let llm_started_at = Instant::now();
 
-        // Fire void hook before LLM call
+        // Fire void observational hook (existing observers rely on this for
+        // logging the unmodified `history`; we keep it firing for back-compat).
         if let Some(hooks) = hooks {
             hooks.fire_llm_input(history, model).await;
         }
@@ -251,12 +252,33 @@ pub(crate) async fn run_tool_call_loop(
             None
         };
 
+        // Modifying `before_llm_call` hook: lets hooks rewrite the message
+        // list (e.g. redact, summarize) or swap the model. Always clones so
+        // the existing borrow chain `&prepared_messages.messages` stays
+        // intact when hooks=None; allocation cost is negligible next to a
+        // network round-trip. Cancel from any hook aborts the turn.
+        let (effective_messages, effective_model) = if let Some(hooks) = hooks {
+            match hooks
+                .run_before_llm_call(prepared_messages.messages.clone(), model.to_string())
+                .await
+            {
+                crate::hooks::HookResult::Continue(pair) => pair,
+                crate::hooks::HookResult::Cancel(reason) => {
+                    return Err(anyhow::anyhow!(
+                        "LLM call cancelled by before_llm_call hook: {reason}"
+                    ));
+                }
+            }
+        } else {
+            (prepared_messages.messages.clone(), model.to_string())
+        };
+
         let chat_future = provider.chat(
             ChatRequest {
-                messages: &prepared_messages.messages,
+                messages: &effective_messages,
                 tools: request_tools,
             },
-            model,
+            &effective_model,
             temperature,
         );
 
