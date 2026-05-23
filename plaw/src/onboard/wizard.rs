@@ -5010,6 +5010,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     app_secret,
                     allowed_users,
                     receive_mode,
+                    webhook_secret: None,
                 });
             }
             ChannelMenuChoice::LarkFeishu => {
@@ -7450,6 +7451,7 @@ mod tests {
             app_secret: "app-secret".into(),
             allowed_users: vec!["*".into()],
             receive_mode: crate::config::schema::QQReceiveMode::Websocket,
+            webhook_secret: None,
         });
         assert!(has_launchable_channels(&channels));
 
