@@ -103,163 +103,182 @@ impl RusqliteStore {
         Ok(store)
     }
 
-    /// Initialize all database tables
+    /// Initialize all database tables via the crate-wide `db::migrate`
+    /// framework. The full schema lives in [`WHATSAPP_MIGRATIONS`] as a
+    /// v1 baseline; future schema changes append as v2+.
     fn init_schema(&self) -> anyhow::Result<()> {
         let conn = self.conn.lock();
-        to_store_err!(conn.execute_batch(
-            "-- Main device table
-            CREATE TABLE IF NOT EXISTS device (
-                id INTEGER PRIMARY KEY,
-                lid TEXT,
-                pn TEXT,
-                registration_id INTEGER NOT NULL,
-                noise_key BLOB NOT NULL,
-                identity_key BLOB NOT NULL,
-                signed_pre_key BLOB NOT NULL,
-                signed_pre_key_id INTEGER NOT NULL,
-                signed_pre_key_signature BLOB NOT NULL,
-                adv_secret_key BLOB NOT NULL,
-                account BLOB,
-                push_name TEXT NOT NULL,
-                app_version_primary INTEGER NOT NULL,
-                app_version_secondary INTEGER NOT NULL,
-                app_version_tertiary INTEGER NOT NULL,
-                app_version_last_fetched_ms INTEGER NOT NULL,
-                edge_routing_info BLOB,
-                props_hash TEXT
-            );
-
-            -- Signal identity keys
-            CREATE TABLE IF NOT EXISTS identities (
-                address TEXT NOT NULL,
-                key BLOB NOT NULL,
-                device_id INTEGER NOT NULL,
-                PRIMARY KEY (address, device_id)
-            );
-
-            -- Signal protocol sessions
-            CREATE TABLE IF NOT EXISTS sessions (
-                address TEXT NOT NULL,
-                record BLOB NOT NULL,
-                device_id INTEGER NOT NULL,
-                PRIMARY KEY (address, device_id)
-            );
-
-            -- Pre-keys for key exchange
-            CREATE TABLE IF NOT EXISTS prekeys (
-                id INTEGER NOT NULL,
-                key BLOB NOT NULL,
-                uploaded INTEGER NOT NULL DEFAULT 0,
-                device_id INTEGER NOT NULL,
-                PRIMARY KEY (id, device_id)
-            );
-
-            -- Signed pre-keys
-            CREATE TABLE IF NOT EXISTS signed_prekeys (
-                id INTEGER NOT NULL,
-                record BLOB NOT NULL,
-                device_id INTEGER NOT NULL,
-                PRIMARY KEY (id, device_id)
-            );
-
-            -- Sender keys for group messaging
-            CREATE TABLE IF NOT EXISTS sender_keys (
-                address TEXT NOT NULL,
-                record BLOB NOT NULL,
-                device_id INTEGER NOT NULL,
-                PRIMARY KEY (address, device_id)
-            );
-
-            -- App state sync keys
-            CREATE TABLE IF NOT EXISTS app_state_keys (
-                key_id BLOB NOT NULL,
-                key_data BLOB NOT NULL,
-                device_id INTEGER NOT NULL,
-                PRIMARY KEY (key_id, device_id)
-            );
-
-            -- App state versions
-            CREATE TABLE IF NOT EXISTS app_state_versions (
-                name TEXT NOT NULL,
-                state_data BLOB NOT NULL,
-                device_id INTEGER NOT NULL,
-                PRIMARY KEY (name, device_id)
-            );
-
-            -- App state mutation MACs
-            CREATE TABLE IF NOT EXISTS app_state_mutation_macs (
-                name TEXT NOT NULL,
-                version INTEGER NOT NULL,
-                index_mac BLOB NOT NULL,
-                value_mac BLOB NOT NULL,
-                device_id INTEGER NOT NULL,
-                PRIMARY KEY (name, index_mac, device_id)
-            );
-
-            -- LID to phone number mapping
-            CREATE TABLE IF NOT EXISTS lid_pn_mapping (
-                lid TEXT NOT NULL,
-                phone_number TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-                learning_source TEXT NOT NULL,
-                updated_at INTEGER NOT NULL,
-                device_id INTEGER NOT NULL,
-                PRIMARY KEY (lid, device_id)
-            );
-
-            -- SKDM recipients tracking
-            CREATE TABLE IF NOT EXISTS skdm_recipients (
-                group_jid TEXT NOT NULL,
-                device_jid TEXT NOT NULL,
-                device_id INTEGER NOT NULL,
-                created_at INTEGER NOT NULL,
-                PRIMARY KEY (group_jid, device_jid, device_id)
-            );
-
-            -- Device registry for multi-device
-            CREATE TABLE IF NOT EXISTS device_registry (
-                user_id TEXT NOT NULL,
-                devices_json TEXT NOT NULL,
-                timestamp INTEGER NOT NULL,
-                phash TEXT,
-                device_id INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL,
-                PRIMARY KEY (user_id, device_id)
-            );
-
-            -- Base keys for collision detection
-            CREATE TABLE IF NOT EXISTS base_keys (
-                address TEXT NOT NULL,
-                message_id TEXT NOT NULL,
-                base_key BLOB NOT NULL,
-                device_id INTEGER NOT NULL,
-                created_at INTEGER NOT NULL,
-                PRIMARY KEY (address, message_id, device_id)
-            );
-
-            -- Sender key status for lazy deletion
-            CREATE TABLE IF NOT EXISTS sender_key_status (
-                group_jid TEXT NOT NULL,
-                participant TEXT NOT NULL,
-                device_id INTEGER NOT NULL,
-                marked_at INTEGER NOT NULL,
-                PRIMARY KEY (group_jid, participant, device_id)
-            );
-
-            -- Trusted contact tokens
-            CREATE TABLE IF NOT EXISTS tc_tokens (
-                jid TEXT NOT NULL,
-                token BLOB NOT NULL,
-                token_timestamp INTEGER NOT NULL,
-                sender_timestamp INTEGER,
-                device_id INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL,
-                PRIMARY KEY (jid, device_id)
-            );",
-        ))?;
+        crate::db::migrate(&conn, "whatsapp_storage", WHATSAPP_MIGRATIONS)?;
         Ok(())
     }
 }
+
+/// Versioned schema migrations for the `whatsapp_storage` (Signal protocol +
+/// WhatsApp app-state) backend. Each entry runs in its own transaction via
+/// [`crate::db::migrate`]. Add new migrations to the END of the slice with
+/// strictly increasing `version`; never reorder or rewrite existing entries
+/// (users already at version N would skip the changes).
+///
+/// **v1 baseline** preserves the exact original `init_schema` body — 15
+/// tables covering Signal identity/sessions/pre-keys/sender-keys, WhatsApp
+/// app-state sync, LID/PN mapping, SKDM tracking, multi-device registry,
+/// base-key collision detection, sender-key lazy deletion, and trusted-
+/// contact tokens. All tables use `IF NOT EXISTS` so the migration is
+/// idempotent on pre-framework users who already have these objects.
+#[cfg(feature = "whatsapp-web")]
+const WHATSAPP_MIGRATIONS: &[crate::db::Migration] = &[crate::db::Migration {
+    version: 1,
+    description: "baseline Signal + WhatsApp app-state tables (15 tables)",
+    sql: "-- Main device table
+        CREATE TABLE IF NOT EXISTS device (
+            id INTEGER PRIMARY KEY,
+            lid TEXT,
+            pn TEXT,
+            registration_id INTEGER NOT NULL,
+            noise_key BLOB NOT NULL,
+            identity_key BLOB NOT NULL,
+            signed_pre_key BLOB NOT NULL,
+            signed_pre_key_id INTEGER NOT NULL,
+            signed_pre_key_signature BLOB NOT NULL,
+            adv_secret_key BLOB NOT NULL,
+            account BLOB,
+            push_name TEXT NOT NULL,
+            app_version_primary INTEGER NOT NULL,
+            app_version_secondary INTEGER NOT NULL,
+            app_version_tertiary INTEGER NOT NULL,
+            app_version_last_fetched_ms INTEGER NOT NULL,
+            edge_routing_info BLOB,
+            props_hash TEXT
+        );
+
+        -- Signal identity keys
+        CREATE TABLE IF NOT EXISTS identities (
+            address TEXT NOT NULL,
+            key BLOB NOT NULL,
+            device_id INTEGER NOT NULL,
+            PRIMARY KEY (address, device_id)
+        );
+
+        -- Signal protocol sessions
+        CREATE TABLE IF NOT EXISTS sessions (
+            address TEXT NOT NULL,
+            record BLOB NOT NULL,
+            device_id INTEGER NOT NULL,
+            PRIMARY KEY (address, device_id)
+        );
+
+        -- Pre-keys for key exchange
+        CREATE TABLE IF NOT EXISTS prekeys (
+            id INTEGER NOT NULL,
+            key BLOB NOT NULL,
+            uploaded INTEGER NOT NULL DEFAULT 0,
+            device_id INTEGER NOT NULL,
+            PRIMARY KEY (id, device_id)
+        );
+
+        -- Signed pre-keys
+        CREATE TABLE IF NOT EXISTS signed_prekeys (
+            id INTEGER NOT NULL,
+            record BLOB NOT NULL,
+            device_id INTEGER NOT NULL,
+            PRIMARY KEY (id, device_id)
+        );
+
+        -- Sender keys for group messaging
+        CREATE TABLE IF NOT EXISTS sender_keys (
+            address TEXT NOT NULL,
+            record BLOB NOT NULL,
+            device_id INTEGER NOT NULL,
+            PRIMARY KEY (address, device_id)
+        );
+
+        -- App state sync keys
+        CREATE TABLE IF NOT EXISTS app_state_keys (
+            key_id BLOB NOT NULL,
+            key_data BLOB NOT NULL,
+            device_id INTEGER NOT NULL,
+            PRIMARY KEY (key_id, device_id)
+        );
+
+        -- App state versions
+        CREATE TABLE IF NOT EXISTS app_state_versions (
+            name TEXT NOT NULL,
+            state_data BLOB NOT NULL,
+            device_id INTEGER NOT NULL,
+            PRIMARY KEY (name, device_id)
+        );
+
+        -- App state mutation MACs
+        CREATE TABLE IF NOT EXISTS app_state_mutation_macs (
+            name TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            index_mac BLOB NOT NULL,
+            value_mac BLOB NOT NULL,
+            device_id INTEGER NOT NULL,
+            PRIMARY KEY (name, index_mac, device_id)
+        );
+
+        -- LID to phone number mapping
+        CREATE TABLE IF NOT EXISTS lid_pn_mapping (
+            lid TEXT NOT NULL,
+            phone_number TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            learning_source TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            device_id INTEGER NOT NULL,
+            PRIMARY KEY (lid, device_id)
+        );
+
+        -- SKDM recipients tracking
+        CREATE TABLE IF NOT EXISTS skdm_recipients (
+            group_jid TEXT NOT NULL,
+            device_jid TEXT NOT NULL,
+            device_id INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (group_jid, device_jid, device_id)
+        );
+
+        -- Device registry for multi-device
+        CREATE TABLE IF NOT EXISTS device_registry (
+            user_id TEXT NOT NULL,
+            devices_json TEXT NOT NULL,
+            timestamp INTEGER NOT NULL,
+            phash TEXT,
+            device_id INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (user_id, device_id)
+        );
+
+        -- Base keys for collision detection
+        CREATE TABLE IF NOT EXISTS base_keys (
+            address TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            base_key BLOB NOT NULL,
+            device_id INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (address, message_id, device_id)
+        );
+
+        -- Sender key status for lazy deletion
+        CREATE TABLE IF NOT EXISTS sender_key_status (
+            group_jid TEXT NOT NULL,
+            participant TEXT NOT NULL,
+            device_id INTEGER NOT NULL,
+            marked_at INTEGER NOT NULL,
+            PRIMARY KEY (group_jid, participant, device_id)
+        );
+
+        -- Trusted contact tokens
+        CREATE TABLE IF NOT EXISTS tc_tokens (
+            jid TEXT NOT NULL,
+            token BLOB NOT NULL,
+            token_timestamp INTEGER NOT NULL,
+            sender_timestamp INTEGER,
+            device_id INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (jid, device_id)
+        );",
+}];
 
 #[cfg(feature = "whatsapp-web")]
 #[async_trait]
@@ -1273,6 +1292,56 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let store = RusqliteStore::new(tmp.path()).unwrap();
         assert_eq!(store.device_id, 1);
+    }
+
+    // ── db::migrate framework wire-up tests (PR #11 reference pattern) ──
+
+    #[cfg(feature = "whatsapp-web")]
+    #[test]
+    fn new_on_fresh_dir_creates_schema_and_sets_user_version_to_one() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = RusqliteStore::new(tmp.path()).unwrap();
+        let conn = store.conn.lock();
+
+        let v: i64 = conn
+            .query_row("PRAGMA user_version;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 1, "fresh DB must end at user_version = 1");
+
+        // All 15 v1 tables must exist.
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type='table' AND name IN (\
+                     'device','identities','sessions','prekeys','signed_prekeys',\
+                     'sender_keys','app_state_keys','app_state_versions',\
+                     'app_state_mutation_macs','lid_pn_mapping','skdm_recipients',\
+                     'device_registry','base_keys','sender_key_status','tc_tokens')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 15, "all 15 v1 baseline tables must be created");
+    }
+
+    #[cfg(feature = "whatsapp-web")]
+    #[test]
+    fn reopen_is_idempotent_no_schema_rebuild() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+
+        // First open creates schema + user_version=1.
+        {
+            let _store = RusqliteStore::new(tmp.path()).unwrap();
+        }
+
+        // Reopen the same file — db::migrate sees user_version = 1,
+        // skips all migrations, leaves the schema and the version intact.
+        let store2 = RusqliteStore::new(tmp.path()).unwrap();
+        let conn = store2.conn.lock();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 1, "reopen must leave user_version unchanged");
     }
 
     #[cfg(feature = "whatsapp-web")]
