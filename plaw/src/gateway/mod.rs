@@ -308,6 +308,11 @@ pub struct AppState {
     /// Nextcloud Talk webhook secret for signature verification
     pub nextcloud_talk_webhook_secret: Option<Arc<str>>,
     pub wati: Option<Arc<WatiChannel>>,
+    /// WATI inbound webhook secret hash (SHA-256 of the configured
+    /// secret). When `None`, the `/wati` handler rejects all non-loopback
+    /// requests — secure-by-default invariant for the only webhook
+    /// endpoint whose upstream (WATI) does not sign callbacks.
+    pub wati_webhook_secret_hash: Option<Arc<str>>,
     pub qq: Option<Arc<QQChannel>>,
     pub qq_webhook_enabled: bool,
     /// Observability backend for metrics scraping
@@ -522,6 +527,16 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
                 wati_cfg.allowed_numbers.clone(),
             ))
         });
+    let wati_webhook_secret_hash: Option<Arc<str>> = config
+        .channels_config
+        .wati
+        .as_ref()
+        .and_then(|wati_cfg| {
+            wati_cfg.webhook_secret.as_ref().and_then(|raw| {
+                let trimmed = raw.trim();
+                (!trimmed.is_empty()).then(|| Arc::<str>::from(hash_webhook_secret(trimmed)))
+            })
+        });
 
     // QQ channel (if configured)
     let qq_channel: Option<Arc<QQChannel>> = config.channels_config.qq.as_ref().map(|qq_cfg| {
@@ -692,6 +707,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         nextcloud_talk: nextcloud_talk_channel,
         nextcloud_talk_webhook_secret,
         wati: wati_channel,
+        wati_webhook_secret_hash,
         qq: qq_channel,
         qq_webhook_enabled,
         observer: broadcast_observer,
@@ -1699,13 +1715,66 @@ pub struct WatiVerifyQuery {
 }
 
 /// POST /wati — incoming WATI WhatsApp message webhook
-async fn handle_wati_webhook(State(state): State<AppState>, body: Bytes) -> impl IntoResponse {
+async fn handle_wati_webhook(
+    State(state): State<AppState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
     let Some(ref wati) = state.wati else {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "WATI not configured"})),
         );
     };
+
+    // ── Inbound auth (WATI does not sign callbacks) ──
+    //
+    // Three layers, in order:
+    //   1. Loopback bypass: local-only traffic skips both checks. Typical
+    //      desktop deployment hits this case.
+    //   2. Configured secret REQUIRED for non-loopback: if no
+    //      `wati.webhook_secret` is set, every non-loopback request is
+    //      401. This is the "secure-by-default" invariant.
+    //   3. Constant-time secret compare: if a secret IS configured,
+    //      every request (loopback or not) must present the matching
+    //      `X-Webhook-Secret` header.
+    let is_loopback = peer_addr.ip().is_loopback();
+    if state.wati_webhook_secret_hash.is_none() && !is_loopback {
+        tracing::warn!(
+            peer = %peer_addr,
+            "WATI webhook: rejected non-loopback request — no webhook_secret configured"
+        );
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "Unauthorized — configure channels.wati.webhook_secret for non-local access"
+            })),
+        );
+    }
+    if let Some(ref secret_hash) = state.wati_webhook_secret_hash {
+        let header_hash = headers
+            .get("X-Webhook-Secret")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(hash_webhook_secret);
+        match header_hash {
+            Some(val) if constant_time_eq(&val, secret_hash.as_ref()) => {}
+            _ => {
+                tracing::warn!(
+                    peer = %peer_addr,
+                    "WATI webhook: rejected request — invalid or missing X-Webhook-Secret"
+                );
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({
+                        "error": "Unauthorized — invalid or missing X-Webhook-Secret header"
+                    })),
+                );
+            }
+        }
+    }
 
     // Parse JSON body
     let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&body) else {
@@ -2059,6 +2128,7 @@ mod tests {
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            wati_webhook_secret_hash: None,
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -2118,6 +2188,7 @@ mod tests {
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            wati_webhook_secret_hash: None,
             qq: None,
             qq_webhook_enabled: false,
             observer,
@@ -2163,6 +2234,7 @@ mod tests {
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            wati_webhook_secret_hash: None,
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -2209,6 +2281,7 @@ mod tests {
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            wati_webhook_secret_hash: None,
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -2681,6 +2754,7 @@ Reminder set successfully."#;
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            wati_webhook_secret_hash: None,
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -2751,6 +2825,7 @@ Reminder set successfully."#;
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            wati_webhook_secret_hash: None,
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -2803,6 +2878,7 @@ Reminder set successfully."#;
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            wati_webhook_secret_hash: None,
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -2860,6 +2936,7 @@ Reminder set successfully."#;
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            wati_webhook_secret_hash: None,
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -2922,6 +2999,7 @@ Reminder set successfully."#;
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            wati_webhook_secret_hash: None,
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -3006,6 +3084,7 @@ Reminder set successfully."#;
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            wati_webhook_secret_hash: None,
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -3062,6 +3141,7 @@ Reminder set successfully."#;
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            wati_webhook_secret_hash: None,
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -3123,6 +3203,7 @@ Reminder set successfully."#;
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            wati_webhook_secret_hash: None,
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -3189,6 +3270,7 @@ Reminder set successfully."#;
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            wati_webhook_secret_hash: None,
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -3251,6 +3333,7 @@ Reminder set successfully."#;
             nextcloud_talk: Some(channel),
             nextcloud_talk_webhook_secret: Some(Arc::from(secret)),
             wati: None,
+            wati_webhook_secret_hash: None,
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -3306,6 +3389,7 @@ Reminder set successfully."#;
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            wati_webhook_secret_hash: None,
             qq: None,
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -3360,6 +3444,7 @@ Reminder set successfully."#;
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            wati_webhook_secret_hash: None,
             qq: Some(qq),
             qq_webhook_enabled: true,
             observer: Arc::new(crate::observability::NoopObserver),
@@ -3784,5 +3869,156 @@ Reminder set successfully."#;
 
         // Should be allowed again
         assert!(limiter.allow("burst-ip"));
+    }
+
+    // ── WATI webhook auth invariant tests ─────────────────────────
+    //
+    // WATI does not sign callbacks, so plaw can't verify origin
+    // cryptographically. The handler MUST enforce: no `wati.webhook_secret`
+    // configured → reject any non-loopback request with 401.
+
+    fn wati_test_state(wati_webhook_secret_hash: Option<Arc<str>>) -> AppState {
+        let provider_impl = Arc::new(MockProvider::default());
+        let provider: Arc<dyn Provider> = provider_impl;
+        let memory: Arc<dyn Memory> = Arc::new(MockMemory);
+        // Use a minimally-configured WatiChannel — outbound replies aren't
+        // exercised in these tests (handler rejects before reaching that
+        // path when auth fails).
+        let wati = Some(Arc::new(crate::channels::wati::WatiChannel::new(
+            "test-token".into(),
+            "https://example.invalid".into(),
+            None,
+            vec!["*".into()],
+        )));
+        AppState {
+            config: Arc::new(Mutex::new(Config::default())),
+            provider,
+            model: "test-model".into(),
+            temperature: 0.0,
+            mem: memory,
+            auto_save: false,
+            webhook_secret_hash: None,
+            pairing: Arc::new(PairingGuard::new(false, &[])),
+            trust_forwarded_headers: false,
+            rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
+            idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
+            whatsapp: None,
+            whatsapp_app_secret: None,
+            linq: None,
+            linq_signing_secret: None,
+            nextcloud_talk: None,
+            nextcloud_talk_webhook_secret: None,
+            wati,
+            wati_webhook_secret_hash,
+            qq: None,
+            qq_webhook_enabled: false,
+            observer: Arc::new(crate::observability::NoopObserver),
+            tools_registry: Arc::new(Vec::new()),
+            tools_registry_exec: Arc::new(Vec::new()),
+            multimodal: crate::config::MultimodalConfig::default(),
+            max_tool_iterations: 10,
+            max_history_messages: 50,
+            max_context_tokens: 200_000,
+            cost_tracker: None,
+            event_tx: tokio::sync::broadcast::channel(16).0,
+            hooks: None,
+        }
+    }
+
+    /// Loopback request without a configured secret: handler should
+    /// proceed past auth (rejection only fires for non-loopback). The
+    /// payload here is empty so `parse_webhook_payload` returns no
+    /// messages and the handler responds 200 with status:ok — that's the
+    /// "made it past auth" signal we're checking for.
+    #[tokio::test]
+    async fn wati_loopback_without_secret_passes_auth() {
+        let state = wati_test_state(None);
+        let response = handle_wati_webhook(
+            State(state),
+            test_connect_info(),
+            HeaderMap::new(),
+            axum::body::Bytes::from("{}"),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// Non-loopback request without a configured secret: handler MUST
+    /// reject with 401. This is the secure-by-default invariant.
+    #[tokio::test]
+    async fn wati_non_loopback_without_secret_rejects_with_401() {
+        let state = wati_test_state(None);
+        let response = handle_wati_webhook(
+            State(state),
+            test_public_connect_info(),
+            HeaderMap::new(),
+            axum::body::Bytes::from("{}"),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Non-loopback request with secret configured but header missing:
+    /// 401. (Loopback bypass does NOT apply when a secret is set — the
+    /// secret check runs for every request.)
+    #[tokio::test]
+    async fn wati_secret_configured_but_header_missing_rejects() {
+        let secret = generate_test_secret();
+        let state = wati_test_state(Some(Arc::from(hash_webhook_secret(&secret))));
+        let response = handle_wati_webhook(
+            State(state),
+            test_public_connect_info(),
+            HeaderMap::new(),
+            axum::body::Bytes::from("{}"),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Non-loopback request with the CORRECT secret header: passes auth.
+    #[tokio::test]
+    async fn wati_correct_secret_passes_auth_from_non_loopback() {
+        let secret = generate_test_secret();
+        let state = wati_test_state(Some(Arc::from(hash_webhook_secret(&secret))));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Webhook-Secret",
+            HeaderValue::from_str(&secret).unwrap(),
+        );
+        let response = handle_wati_webhook(
+            State(state),
+            test_public_connect_info(),
+            headers,
+            axum::body::Bytes::from("{}"),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// Non-loopback request with a WRONG secret header: 401 (constant-time
+    /// compare rejects the mismatched hash).
+    #[tokio::test]
+    async fn wati_wrong_secret_rejects_with_401() {
+        let valid = generate_test_secret();
+        let wrong = generate_test_secret();
+        let state = wati_test_state(Some(Arc::from(hash_webhook_secret(&valid))));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Webhook-Secret",
+            HeaderValue::from_str(&wrong).unwrap(),
+        );
+        let response = handle_wati_webhook(
+            State(state),
+            test_public_connect_info(),
+            headers,
+            axum::body::Bytes::from("{}"),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }

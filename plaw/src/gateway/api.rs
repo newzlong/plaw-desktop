@@ -1032,6 +1032,7 @@ mod tests {
             api_url: "https://live-mt-server.wati.io".to_string(),
             tenant_id: Some("tenant-1".to_string()),
             allowed_numbers: vec!["*".to_string()],
+            webhook_secret: None,
         });
         let mut email = crate::channels::email_channel::EmailConfig::default();
         email.password = "email-real-password".to_string();
@@ -1117,6 +1118,7 @@ mod tests {
             api_url: "https://live-mt-server.wati.io".to_string(),
             tenant_id: Some("tenant-1".to_string()),
             allowed_numbers: vec!["*".to_string()],
+            webhook_secret: None,
         });
         let mut email = crate::channels::email_channel::EmailConfig::default();
         email.password = "email-real-password".to_string();
