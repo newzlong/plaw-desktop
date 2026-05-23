@@ -109,4 +109,123 @@ mod tests {
         assert_eq!(r.mean_diff, 0.0);
         assert!(!r.is_significant());
     }
+
+    // ── Property-based tests (proptest) ───────────────────────────────────
+    //
+    // The hand-tests above pin specific numerical examples (textbook
+    // paired-t, constant improvement, identity-no-diff). proptest scales
+    // those checks to thousands of arbitrary sample pairs and exercises
+    // four invariants that any correct paired-difference implementation
+    // must satisfy:
+    //
+    //   1. anti-symmetry: paired(a, b).mean_diff == -paired(b, a).mean_diff
+    //   2. identity: paired(a, a) has mean_diff == 0 and is never significant
+    //   3. translation invariance: adding constant c to both samples doesn't
+    //      change the statistic
+    //   4. CI containment: ci.lower <= mean_diff <= ci.upper, ci.lower <=
+    //      ci.upper (basic CI well-formedness)
+    //
+    // If any of these breaks, a downstream eval reading the paired
+    // result silently mis-ranks two configurations — the whole point of
+    // paired analysis is that the difference is detectable, so a broken
+    // detector serves the wrong call/no-call decision under noise.
+
+    use proptest::prelude::*;
+
+    /// Bound generated values away from extreme magnitudes so floating-
+    /// point arithmetic stays stable; eval scores are normally in [0, 1]
+    /// or low integer counts anyway.
+    fn finite_score() -> impl Strategy<Value = f64> {
+        -1000.0_f64..=1000.0_f64
+    }
+
+    proptest! {
+        /// Anti-symmetry: swapping a and b negates mean_diff but keeps |SE|
+        /// and CI width identical (subject to floating-point rounding).
+        #[test]
+        fn paired_difference_is_antisymmetric_in_inputs(
+            samples in prop::collection::vec((finite_score(), finite_score()), 2..50),
+        ) {
+            let a: Vec<f64> = samples.iter().map(|(x, _)| *x).collect();
+            let b: Vec<f64> = samples.iter().map(|(_, y)| *y).collect();
+            let r_ab = paired_difference(&a, &b, 0.05).unwrap();
+            let r_ba = paired_difference(&b, &a, 0.05).unwrap();
+            // mean_diff flips sign.
+            prop_assert!(
+                (r_ab.mean_diff + r_ba.mean_diff).abs() < 1e-9,
+                "mean_diff(a,b)={} should be -mean_diff(b,a)={}",
+                r_ab.mean_diff, r_ba.mean_diff
+            );
+            // SE is non-negative and equal.
+            prop_assert!((r_ab.se - r_ba.se).abs() < 1e-9);
+            // CI width is invariant; bounds flip sign.
+            let width_ab = r_ab.ci.upper - r_ab.ci.lower;
+            let width_ba = r_ba.ci.upper - r_ba.ci.lower;
+            prop_assert!((width_ab - width_ba).abs() < 1e-9);
+        }
+
+        /// Identity: paired(a, a) for any a has zero mean_diff and is
+        /// never significant. Catches a regression where the "no real
+        /// difference" case starts spuriously firing a positive call.
+        #[test]
+        fn paired_difference_of_identity_is_zero_and_insignificant(
+            a in prop::collection::vec(finite_score(), 2..50),
+        ) {
+            let r = paired_difference(&a, &a, 0.05).unwrap();
+            prop_assert_eq!(r.mean_diff, 0.0);
+            prop_assert_eq!(r.se, 0.0);
+            prop_assert!(!r.is_significant(),
+                "paired(a, a) must never be significant; CI was {:?}", r.ci);
+        }
+
+        /// Translation invariance: adding the same constant to every
+        /// sample of a AND b doesn't change the statistic. This is the
+        /// algebraic statement that "raising the baseline scale equally
+        /// on both arms shouldn't change whether they differ".
+        #[test]
+        fn paired_difference_is_translation_invariant(
+            samples in prop::collection::vec((finite_score(), finite_score()), 2..50),
+            shift in -100.0_f64..=100.0_f64,
+        ) {
+            let a: Vec<f64> = samples.iter().map(|(x, _)| *x).collect();
+            let b: Vec<f64> = samples.iter().map(|(_, y)| *y).collect();
+            let a_shifted: Vec<f64> = a.iter().map(|x| x + shift).collect();
+            let b_shifted: Vec<f64> = b.iter().map(|y| y + shift).collect();
+
+            let r_orig = paired_difference(&a, &b, 0.05).unwrap();
+            let r_shift = paired_difference(&a_shifted, &b_shifted, 0.05).unwrap();
+
+            prop_assert!(
+                (r_orig.mean_diff - r_shift.mean_diff).abs() < 1e-6,
+                "translation should preserve mean_diff: orig={}, shifted={}",
+                r_orig.mean_diff, r_shift.mean_diff
+            );
+            prop_assert!((r_orig.se - r_shift.se).abs() < 1e-6);
+        }
+
+        /// CI well-formedness: lower <= mean_diff <= upper, lower <= upper.
+        /// A CI that doesn't contain its own point estimate would be a
+        /// catastrophic statistical bug — the "confidence" semantic
+        /// requires the estimate to be inside.
+        #[test]
+        fn paired_difference_ci_contains_mean_diff(
+            samples in prop::collection::vec((finite_score(), finite_score()), 2..50),
+        ) {
+            let a: Vec<f64> = samples.iter().map(|(x, _)| *x).collect();
+            let b: Vec<f64> = samples.iter().map(|(_, y)| *y).collect();
+            let r = paired_difference(&a, &b, 0.05).unwrap();
+            // CI is well-ordered.
+            prop_assert!(
+                r.ci.lower <= r.ci.upper,
+                "CI lower ({}) must be <= upper ({})", r.ci.lower, r.ci.upper
+            );
+            // mean_diff is inside the CI (with a tiny tolerance for the
+            // degenerate SE=0 case where CI collapses to the point).
+            prop_assert!(
+                r.ci.lower - 1e-9 <= r.mean_diff && r.mean_diff <= r.ci.upper + 1e-9,
+                "mean_diff ({}) must be in CI [{}, {}]",
+                r.mean_diff, r.ci.lower, r.ci.upper
+            );
+        }
+    }
 }
