@@ -3089,6 +3089,12 @@ async fn process_channel_message(
             } else {
                 sanitized_response
             };
+            // Outbound credential leak guard. Final-payload scrub only; per-token
+            // draft updates (update_draft above) are not scrubbed because partial
+            // tokens can split a secret across deltas. The finalize_draft / send
+            // calls below use this scrubbed value, so the final committed
+            // message is clean.
+            let delivered_response = crate::security::scrub_outbound(&delivered_response);
             runtime_trace::record_event(
                 "channel_message_outbound",
                 Some(msg.channel.as_str()),
