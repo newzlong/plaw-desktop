@@ -1,10 +1,10 @@
-//! Auto-detection of available security features
-
-// Dormant: `create_sandbox` / `detect_best_sandbox` factories build the
-// Sandbox trait objects from security/traits.rs; no runtime caller
-// invokes them today. Module-level allow per the same dormant-subsystem
-// rationale as security/traits.rs.
-#![allow(dead_code)]
+//! Auto-detection of available sandbox backends.
+//!
+//! [`create_sandbox`] is called once at tool-registry construction time
+//! (`tools::all_tools_impl`) and the resulting `Arc<dyn Sandbox>` is shared
+//! by every [`crate::tools::ShellTool`] in the registry. Windows currently
+//! has no native sandbox impl in this module, so all Windows builds resolve
+//! to [`crate::security::NoopSandbox`].
 
 use crate::config::{SandboxBackend, SecurityConfig};
 use crate::security::traits::Sandbox;

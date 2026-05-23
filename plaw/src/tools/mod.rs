@@ -164,22 +164,33 @@ fn boxed_registry_from_arcs(tools: Vec<Arc<dyn Tool>>) -> Vec<Box<dyn Tool>> {
     tools.into_iter().map(ArcDelegatingTool::boxed).collect()
 }
 
-/// Create the default tool registry
+/// Create the default tool registry. Uses the noop sandbox; callers that
+/// want OS-level isolation should call [`default_tools_with_runtime`]
+/// directly with a sandbox built from [`crate::security::create_sandbox`].
 pub fn default_tools(security: Arc<SecurityPolicy>) -> Vec<Box<dyn Tool>> {
-    default_tools_with_runtime(security, Arc::new(NativeRuntime::new()))
+    default_tools_with_runtime(
+        security,
+        Arc::new(NativeRuntime::new()),
+        Arc::new(crate::security::NoopSandbox),
+    )
 }
 
-/// Create the default tool registry with explicit runtime adapter.
+/// Create the default tool registry with explicit runtime adapter and sandbox.
 pub fn default_tools_with_runtime(
     security: Arc<SecurityPolicy>,
     runtime: Arc<dyn RuntimeAdapter>,
+    sandbox: Arc<dyn crate::security::Sandbox>,
 ) -> Vec<Box<dyn Tool>> {
     let has_shell_access = runtime.has_shell_access();
     let has_filesystem_access = runtime.has_filesystem_access();
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();
 
     if has_shell_access {
-        tools.push(Box::new(ShellTool::new(security.clone(), runtime.clone())));
+        tools.push(Box::new(ShellTool::new(
+            security.clone(),
+            runtime.clone(),
+            sandbox.clone(),
+        )));
     }
     if has_filesystem_access {
         tools.push(Box::new(FileReadTool::new(security.clone())));
@@ -327,10 +338,20 @@ fn all_tools_impl(
         )),
     ];
 
+    // Build sandbox from config (auto-detect platform backend, or noop if
+    // the user disabled it / no backend available — see security/detect.rs).
+    // Stored in an Arc so ShellTool and ProcessTool share the same instance.
+    let sandbox = crate::security::create_sandbox(&root_config.security);
+    tracing::debug!(
+        sandbox = sandbox.name(),
+        "tool registry initialised with sandbox"
+    );
+
     if has_shell_access {
         tool_arcs.push(Arc::new(ShellTool::new_with_syscall_detector(
             security.clone(),
             runtime.clone(),
+            sandbox.clone(),
             Some(syscall_detector.clone()),
         )));
         tool_arcs.push(Arc::new(ProcessTool::new_with_syscall_detector(
@@ -674,7 +695,11 @@ mod tests {
         let security = Arc::new(SecurityPolicy::default());
         let runtime: Arc<dyn RuntimeAdapter> =
             Arc::new(WasmRuntime::new(WasmRuntimeConfig::default()));
-        let tools = default_tools_with_runtime(security, runtime);
+        let tools = default_tools_with_runtime(
+            security,
+            runtime,
+            Arc::new(crate::security::NoopSandbox),
+        );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"wasm_module"));
     }
@@ -684,7 +709,11 @@ mod tests {
         let security = Arc::new(SecurityPolicy::default());
         let runtime: Arc<dyn RuntimeAdapter> =
             Arc::new(WasmRuntime::new(WasmRuntimeConfig::default()));
-        let tools = default_tools_with_runtime(security, runtime);
+        let tools = default_tools_with_runtime(
+            security,
+            runtime,
+            Arc::new(crate::security::NoopSandbox),
+        );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(!names.contains(&"shell"));
         assert!(!names.contains(&"file_read"));
