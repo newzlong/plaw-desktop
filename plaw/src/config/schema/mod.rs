@@ -3395,7 +3395,10 @@ impl ChannelConfig for LinqConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WatiConfig {
     /// WATI API token (Bearer auth) used for OUTBOUND calls to WATI's REST API.
-    pub api_token: String,
+    ///
+    /// Stored as [`crate::security::Secret`] so on-disk form is `enc2:`
+    /// ciphertext. Plaintext lives only inside `reveal(&store)` return.
+    pub api_token: crate::security::Secret,
     /// WATI API base URL (default: https://live-mt-server.wati.io).
     #[serde(default = "default_wati_api_url")]
     pub api_url: String,

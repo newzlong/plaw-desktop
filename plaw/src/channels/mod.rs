@@ -3982,6 +3982,17 @@ fn collect_configured_channels(
     let _ = matrix_skip_context;
     let mut channels = Vec::new();
 
+    // SecretStore for Secret-newtype reveals. Built from config_path so
+    // we don't have to thread the store through every caller. Matches
+    // the pattern in `make_app_state` (gateway/mod.rs).
+    let secret_store_plaw_dir = config
+        .config_path
+        .parent()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let secret_store =
+        crate::security::SecretStore::new(&secret_store_plaw_dir, config.secrets.encrypt);
+
     if let Some(ref tg) = config.channels_config.telegram {
         let mut telegram = TelegramChannel::new(
             tg.bot_token.clone(),
@@ -4166,15 +4177,25 @@ fn collect_configured_channels(
     }
 
     if let Some(ref wati_cfg) = config.channels_config.wati {
-        channels.push(ConfiguredChannel {
-            display_name: "WATI",
-            channel: Arc::new(WatiChannel::new(
-                wati_cfg.api_token.clone(),
-                wati_cfg.api_url.clone(),
-                wati_cfg.tenant_id.clone(),
-                wati_cfg.allowed_numbers.clone(),
-            )),
-        });
+        match wati_cfg.api_token.reveal(&secret_store) {
+            Ok(api_token) => {
+                channels.push(ConfiguredChannel {
+                    display_name: "WATI",
+                    channel: Arc::new(WatiChannel::new(
+                        api_token,
+                        wati_cfg.api_url.clone(),
+                        wati_cfg.tenant_id.clone(),
+                        wati_cfg.allowed_numbers.clone(),
+                    )),
+                });
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "Failed to decrypt channels.wati.api_token — WATI channel skipped"
+                );
+            }
+        }
     }
 
     if let Some(ref nc) = config.channels_config.nextcloud_talk {

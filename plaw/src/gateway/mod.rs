@@ -540,15 +540,27 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         })
         .map(Arc::from);
 
-    // WATI channel (if configured)
-    let wati_channel: Option<Arc<WatiChannel>> =
-        config.channels_config.wati.as_ref().map(|wati_cfg| {
-            Arc::new(WatiChannel::new(
-                wati_cfg.api_token.clone(),
+    // WATI channel (if configured). api_token is a `Secret` newtype
+    // (PR #21 migration cont'd) — reveal once at channel construction;
+    // WatiChannel itself stores the plaintext for outbound API calls.
+    let wati_channel: Option<Arc<WatiChannel>> = config
+        .channels_config
+        .wati
+        .as_ref()
+        .and_then(|wati_cfg| match wati_cfg.api_token.reveal(secret_store.as_ref()) {
+            Ok(api_token) => Some(Arc::new(WatiChannel::new(
+                api_token,
                 wati_cfg.api_url.clone(),
                 wati_cfg.tenant_id.clone(),
                 wati_cfg.allowed_numbers.clone(),
-            ))
+            ))),
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "Failed to decrypt channels.wati.api_token — WATI channel disabled"
+                );
+                None
+            }
         });
     // wati.webhook_secret is the first config field that uses the
     // `Secret` newtype — reveal via SecretStore before hashing.

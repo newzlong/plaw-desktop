@@ -644,6 +644,27 @@ fn restore_required_secret(value: &mut String, current: &str) {
     }
 }
 
+/// Typed variant for `Secret` newtype fields (PR #21 lazy-reveal). Used by
+/// fields that have been migrated from `String`/`Option<String>` to
+/// `Secret`/`Option<Secret>`. The wire form is what reaches the UI, so
+/// `is_masked_secret` checks against `as_wire_str()`. Mask substitutes
+/// a fresh `Secret::from_wire(MASKED_SECRET)` so subsequent serde
+/// passes-through cleanly.
+fn mask_required_secret_typed(value: &mut crate::security::Secret) {
+    if !value.is_empty() {
+        *value = crate::security::Secret::from_wire(MASKED_SECRET.to_string());
+    }
+}
+
+fn restore_required_secret_typed(
+    value: &mut crate::security::Secret,
+    current: &crate::security::Secret,
+) {
+    if is_masked_secret(value.as_wire_str()) {
+        *value = current.clone();
+    }
+}
+
 fn restore_vec_secrets(values: &mut [String], current: &[String]) {
     for (idx, value) in values.iter_mut().enumerate() {
         if is_masked_secret(value) {
@@ -708,7 +729,7 @@ fn mask_sensitive_fields(config: &crate::config::Config) -> crate::config::Confi
         mask_optional_secret(&mut linq.signing_secret);
     }
     if let Some(wati) = masked.channels_config.wati.as_mut() {
-        mask_required_secret(&mut wati.api_token);
+        mask_required_secret_typed(&mut wati.api_token);
     }
     if let Some(nextcloud) = masked.channels_config.nextcloud_talk.as_mut() {
         mask_required_secret(&mut nextcloud.app_token);
@@ -853,7 +874,7 @@ fn restore_masked_sensitive_fields(
         incoming.channels_config.wati.as_mut(),
         current.channels_config.wati.as_ref(),
     ) {
-        restore_required_secret(&mut incoming_ch.api_token, &current_ch.api_token);
+        restore_required_secret_typed(&mut incoming_ch.api_token, &current_ch.api_token);
     }
     if let (Some(incoming_ch), Some(current_ch)) = (
         incoming.channels_config.nextcloud_talk.as_mut(),
@@ -1028,7 +1049,7 @@ mod tests {
             domain: Some("plaw.ngrok.app".to_string()),
         });
         cfg.channels_config.wati = Some(WatiConfig {
-            api_token: "wati-real-token".to_string(),
+            api_token: crate::security::Secret::from_wire("wati-real-token".to_string()),
             api_url: "https://live-mt-server.wati.io".to_string(),
             tenant_id: Some("tenant-1".to_string()),
             allowed_numbers: vec!["*".to_string()],
@@ -1076,7 +1097,7 @@ mod tests {
                 .channels_config
                 .wati
                 .as_ref()
-                .map(|value| value.api_token.as_str()),
+                .map(|value| value.api_token.as_wire_str()),
             Some(MASKED_SECRET)
         );
         assert_eq!(
@@ -1114,7 +1135,7 @@ mod tests {
             domain: Some("plaw.ngrok.app".to_string()),
         });
         current.channels_config.wati = Some(WatiConfig {
-            api_token: "wati-real-token".to_string(),
+            api_token: crate::security::Secret::from_wire("wati-real-token".to_string()),
             api_url: "https://live-mt-server.wati.io".to_string(),
             tenant_id: Some("tenant-1".to_string()),
             allowed_numbers: vec!["*".to_string()],
@@ -1173,7 +1194,7 @@ mod tests {
                 .channels_config
                 .wati
                 .as_ref()
-                .map(|value| value.api_token.as_str()),
+                .map(|value| value.api_token.as_wire_str()),
             Some("wati-real-token")
         );
         assert_eq!(
