@@ -4469,6 +4469,11 @@ pub enum SandboxBackend {
     Bubblewrap,
     /// Docker container isolation
     Docker,
+    /// Windows Job Object (kernel-level process container, Windows only).
+    /// Auto-kills child processes on plaw exit; foundation for future
+    /// `SetInformationJobObject` resource limits.
+    #[serde(rename = "windows-job-object")]
+    WindowsJobObject,
     /// No sandboxing (application-layer only)
     None,
 }

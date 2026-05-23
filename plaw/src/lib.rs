@@ -1,5 +1,11 @@
 #![warn(clippy::all, clippy::pedantic)]
-#![forbid(unsafe_code)]
+// `deny` (not `forbid`) so individual modules with a documented, audited
+// need for `unsafe` can opt in via `#![allow(unsafe_code)]`. The only
+// in-tree exception today is `security::windows_job` (Win32 Job Object
+// PID→HANDLE conversion via `OpenProcess`); search for `#![allow(unsafe_code)]`
+// to enumerate exceptions. Any new exception must come with a comment
+// stating why no safe wrapper exists and which APIs are called.
+#![deny(unsafe_code)]
 #![allow(
     clippy::assigning_clones,
     clippy::bool_to_int_with_if,

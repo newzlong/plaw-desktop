@@ -39,6 +39,8 @@ pub mod prompt_guard;
 pub mod secrets;
 pub mod syscall_anomaly;
 pub mod traits;
+#[cfg(target_os = "windows")]
+pub mod windows_job;
 
 #[allow(unused_imports)]
 pub use audit::{AuditEvent, AuditEventType, AuditLogger};

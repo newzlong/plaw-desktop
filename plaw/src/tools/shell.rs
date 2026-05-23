@@ -563,8 +563,50 @@ impl Tool for ShellTool {
             }
         }
 
-        let result =
-            tokio::time::timeout(Duration::from_secs(timeout_secs), cmd.output()).await;
+        // Spawn (rather than cmd.output()) so we can run the sandbox
+        // post-spawn hook between spawn and wait. Windows Job Object needs
+        // `AssignProcessToJobObject(job, pid)` after the process exists;
+        // there is no pre-spawn equivalent. NoopSandbox and Linux/macOS
+        // sandboxes use the default no-op `after_spawn` so this hook is
+        // free for them. See `security::traits::Sandbox::after_spawn` docs.
+        //
+        // `cmd.output()` would auto-pipe stdout/stderr for us, but `spawn()`
+        // inherits the parent's streams by default — set Piped explicitly
+        // so wait_with_output() can capture the bytes for ToolResult.
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .stdin(std::process::Stdio::null());
+
+        let child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("Failed to execute command: {e}")),
+                });
+            }
+        };
+
+        if let Some(pid) = child.id() {
+            if let Err(e) = self.sandbox.after_spawn(pid) {
+                // Fail-soft: the child is already running. Aborting the
+                // tool because sandbox attachment failed would surprise
+                // users; logging tells operators isolation didn't take.
+                tracing::warn!(
+                    sandbox = self.sandbox.name(),
+                    pid,
+                    error = %e,
+                    "post-spawn sandbox hook failed; child runs unrestricted"
+                );
+            }
+        }
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(timeout_secs),
+            child.wait_with_output(),
+        )
+        .await;
 
         match result {
             Ok(Ok(output)) => {
