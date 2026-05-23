@@ -290,7 +290,16 @@ max_run_history = 50
 
 ## 代理配置
 
-Claude Code 使用 HTTP 代理：`http://127.0.0.1:8118`
+本地 HTTP/SOCKS5 混合代理：**`http://127.0.0.1:7897`**（clash 混合端口）。
+
+设置（PowerShell）:
+```powershell
+$env:HTTPS_PROXY = 'http://127.0.0.1:7897'
+$env:HTTP_PROXY  = 'http://127.0.0.1:7897'
+```
+
+何时需要：`npx` / `npm install` / 任何外网 fetch 在国内路由超时时。`cargo build` 一般不需要。
+（历史值 `127.0.0.1:8118` 是早期 privoxy 配置，2026-05-23 起已替换。）
 
 ## 注意事项
 
@@ -298,5 +307,5 @@ Claude Code 使用 HTTP 代理：`http://127.0.0.1:8118`
 - 写大文件时分段写（代理对大响应不稳定，超 100 行要拆分）
 - `beforeDevCommand` 用对象格式 `{ "script": "pnpm dev", "cwd": "../web" }`
 - Windows 进程管理用 `powershell Stop-Process` 而非 bash `kill`
-- 打包前需要 `$env:HTTPS_PROXY = "http://127.0.0.1:8118"`（NSIS/WiX 从 GitHub 下载）
+- 打包前需要 `$env:HTTPS_PROXY = "http://127.0.0.1:7897"`（NSIS/WiX 从 GitHub 下载）
 - release 模式无 console 输出（`windows_subsystem = "windows"`），需文件日志调试
