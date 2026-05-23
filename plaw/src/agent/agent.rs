@@ -401,7 +401,7 @@ impl Agent {
         let start = Instant::now();
 
         let result = if let Some(tool) = self.tools.iter().find(|t| t.name() == call.name) {
-            match tool.execute(call.arguments.clone()).await {
+            match tool.execute_validated(call.arguments.clone()).await {
                 Ok(r) => {
                     self.observer.record_event(&ObserverEvent::ToolCall {
                         tool: call.name.clone(),

@@ -47,6 +47,30 @@ pub trait Tool: Send + Sync {
         self.execute(args).await
     }
 
+    /// Validate `args` against `parameters_schema()` and short-circuit with a
+    /// structured `ToolResult` error before [`Self::execute`] runs if they
+    /// don't conform. On validation success, delegates to [`Self::execute`].
+    ///
+    /// This is the call site the dispatcher should use — it gives the LLM a
+    /// machine-readable error so it can retry with corrected args instead of
+    /// guessing what `"Missing 'command' parameter"` meant. Tool authors do
+    /// not implement this; the default body covers all cases.
+    async fn execute_validated(
+        &self,
+        args: serde_json::Value,
+    ) -> anyhow::Result<ToolResult> {
+        if let Err(failures) =
+            crate::tools::validation::validate_against_schema(&args, &self.parameters_schema())
+        {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(crate::tools::validation::render_validation_error(&failures)),
+            });
+        }
+        self.execute(args).await
+    }
+
     /// Get the full spec for LLM registration
     fn spec(&self) -> ToolSpec {
         ToolSpec {
