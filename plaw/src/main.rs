@@ -61,6 +61,7 @@ mod coordination;
 mod cost;
 mod cron;
 mod daemon;
+mod db;
 mod doctor;
 mod gateway;
 mod goals;

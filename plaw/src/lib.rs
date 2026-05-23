@@ -54,6 +54,7 @@ pub mod coordination;
 pub(crate) mod cost;
 pub(crate) mod cron;
 pub(crate) mod daemon;
+pub mod db;
 pub(crate) mod doctor;
 pub mod gateway;
 pub mod goals;
