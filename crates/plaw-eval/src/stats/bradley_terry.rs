@@ -351,4 +351,156 @@ mod tests {
             );
         }
     }
+
+    // ── Property-based tests (proptest) ───────────────────────────────────
+    //
+    // Hand-tests above pin specific numerical examples. proptest scales
+    // those checks across thousands of arbitrary tournaments and exercises
+    // four invariants the MLE must satisfy:
+    //
+    //   1. probabilities sum to 1 (normalisation contract)
+    //   2. all scores are strictly positive (FLOOR > 0 enforcement)
+    //   3. ranking is invariant under shuffling the comparisons input
+    //   4. strict dominator: an entrant that wins every comparison it
+    //      participates in (and loses none) outranks the rest
+    //
+    // A broken MLE would silently mis-rank model configurations downstream
+    // — the whole purpose of Bradley-Terry is to extract a stable ranking
+    // from noisy pairwise data, so the ranking-invariance properties are
+    // load-bearing for any consumer that reads `BradleyTerryEstimate::ranking()`.
+
+    use proptest::prelude::*;
+
+    /// Generate an arbitrary tournament between 2-5 entrants with 3-30
+    /// comparisons. The generator never produces a degenerate single-
+    /// entrant set (MLE requires ≥2 distinct entrants).
+    fn arb_tournament() -> impl Strategy<Value = Vec<Comparison<u8>>> {
+        (2u8..=5u8).prop_flat_map(|n_entrants| {
+            prop::collection::vec(
+                (
+                    0u8..n_entrants,
+                    0u8..n_entrants,
+                    prop_oneof![
+                        Just(Winner::A),
+                        Just(Winner::B),
+                        Just(Winner::Tie),
+                    ],
+                )
+                    .prop_filter("a != b", |(a, b, _)| a != b)
+                    .prop_map(|(a, b, winner)| Comparison { a, b, winner }),
+                3..=30,
+            )
+        })
+    }
+
+    proptest! {
+        /// Normalisation contract: Σ scores == 1 (within float tolerance).
+        /// A consumer iterating over `ranking()` expects scores to be
+        /// directly comparable as probabilities of head-to-head wins.
+        #[test]
+        fn scores_sum_to_one(cs in arb_tournament()) {
+            let Some(est) = bradley_terry_mle(&cs, DEFAULT_MAX_ITERS, DEFAULT_TOLERANCE) else {
+                // Some tournaments are degenerate (all ties, or every
+                // comparison between the same single pair where the MLE
+                // can't separate). Skip — the public API documents None
+                // for these.
+                return Ok(());
+            };
+            let total: f64 = est.scores.values().sum();
+            prop_assert!(
+                (total - 1.0).abs() < 1e-6,
+                "scores must sum to 1.0; got {} from {:?}",
+                total, est.scores
+            );
+        }
+
+        /// All scores are strictly positive (FLOOR > 0 enforcement). A
+        /// zero or negative score would break log-odds calculations and
+        /// crash bootstrap CI computation downstream.
+        #[test]
+        fn all_scores_strictly_positive(cs in arb_tournament()) {
+            let Some(est) = bradley_terry_mle(&cs, DEFAULT_MAX_ITERS, DEFAULT_TOLERANCE) else {
+                return Ok(());
+            };
+            for (id, score) in &est.scores {
+                prop_assert!(*score > 0.0, "score for {id:?} must be > 0, got {score}");
+            }
+        }
+
+        /// Shuffle invariance: the same comparisons in a different order
+        /// produce the same ranking (modulo ties). Catches a regression
+        /// where the MLE initialisation or iteration order accidentally
+        /// becomes input-order-dependent.
+        #[test]
+        fn ranking_is_invariant_under_input_shuffle(
+            cs in arb_tournament(),
+            permutation_seed in any::<u64>(),
+        ) {
+            let Some(est_orig) = bradley_terry_mle(&cs, DEFAULT_MAX_ITERS, DEFAULT_TOLERANCE) else {
+                return Ok(());
+            };
+
+            // Deterministic shuffle using the permutation_seed.
+            let mut shuffled = cs.clone();
+            let mut rng_state = permutation_seed;
+            for i in (1..shuffled.len()).rev() {
+                rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let j = (rng_state >> 33) as usize % (i + 1);
+                shuffled.swap(i, j);
+            }
+
+            let est_shuffled = bradley_terry_mle(&shuffled, DEFAULT_MAX_ITERS, DEFAULT_TOLERANCE).unwrap();
+
+            // Compare entry by entry; the same MLE optimum should be
+            // reached up to convergence tolerance.
+            for (id, score_orig) in &est_orig.scores {
+                let score_shuf = est_shuffled.scores[id];
+                prop_assert!(
+                    (score_orig - score_shuf).abs() < 1e-4,
+                    "shuffled MLE diverged for {id:?}: orig={score_orig}, shuffled={score_shuf}"
+                );
+            }
+        }
+
+        /// Strict dominator: an entrant that wins every comparison it
+        /// participates in (no ties, no losses) ranks strictly higher
+        /// than every other entrant.
+        #[test]
+        fn strict_dominator_outranks_rest(
+            n_other in 1u8..=4u8,
+            wins_per_other in 1usize..=5usize,
+        ) {
+            // Build a tournament where entrant 0 beats every other entrant
+            // `wins_per_other` times. No ties, no losses for entrant 0.
+            let mut cs = Vec::new();
+            for other in 1..=n_other {
+                for _ in 0..wins_per_other {
+                    cs.push(Comparison {
+                        a: 0u8,
+                        b: other,
+                        winner: Winner::A,
+                    });
+                }
+            }
+            // Add some between-others comparisons so the rest are also
+            // ranked relative to each other (not just unrankable noise).
+            if n_other >= 2 {
+                cs.push(Comparison {
+                    a: 1u8,
+                    b: 2u8,
+                    winner: Winner::A,
+                });
+            }
+
+            let est = bradley_terry_mle(&cs, DEFAULT_MAX_ITERS, DEFAULT_TOLERANCE).unwrap();
+            let dominator_score = est.scores[&0u8];
+            for other in 1..=n_other {
+                let other_score = est.scores[&other];
+                prop_assert!(
+                    dominator_score > other_score,
+                    "dominator score {dominator_score} must exceed entrant-{other} score {other_score}"
+                );
+            }
+        }
+    }
 }
