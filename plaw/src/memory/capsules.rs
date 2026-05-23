@@ -45,6 +45,44 @@ pub struct CapsuleStore {
     conn: Arc<Mutex<Connection>>,
 }
 
+/// Versioned schema migrations for the `capsules` table. Each entry runs
+/// in its own transaction via [`crate::db::migrate`]. Add new migrations
+/// to the END of the slice with strictly increasing `version`; never
+/// reorder or rewrite existing entries (users already at version N would
+/// skip the changes).
+///
+/// **v1 baseline** uses `IF NOT EXISTS` everywhere so the migration is
+/// idempotent on pre-framework users who already have these objects.
+const CAPSULES_MIGRATIONS: &[crate::db::Migration] = &[crate::db::Migration {
+    version: 1,
+    description: "baseline capsules table + FTS5 index + sync triggers",
+    sql: "CREATE TABLE IF NOT EXISTS capsules (
+              id            TEXT PRIMARY KEY,
+              session_id    TEXT NOT NULL,
+              created_at    TEXT NOT NULL,
+              keywords      TEXT NOT NULL DEFAULT '[]',
+              summary       TEXT NOT NULL,
+              content       TEXT NOT NULL,
+              token_count   INTEGER NOT NULL DEFAULT 0,
+              message_count INTEGER NOT NULL DEFAULT 0
+          );
+          CREATE INDEX IF NOT EXISTS idx_capsules_session  ON capsules(session_id);
+          CREATE INDEX IF NOT EXISTS idx_capsules_created  ON capsules(created_at);
+
+          CREATE VIRTUAL TABLE IF NOT EXISTS capsules_fts USING fts5(
+              keywords, summary, content=capsules, content_rowid=rowid
+          );
+
+          CREATE TRIGGER IF NOT EXISTS capsules_ai AFTER INSERT ON capsules BEGIN
+              INSERT INTO capsules_fts(rowid, keywords, summary)
+              VALUES (new.rowid, new.keywords, new.summary);
+          END;
+          CREATE TRIGGER IF NOT EXISTS capsules_ad AFTER DELETE ON capsules BEGIN
+              INSERT INTO capsules_fts(capsules_fts, rowid, keywords, summary)
+              VALUES ('delete', old.rowid, old.keywords, old.summary);
+          END;",
+}];
+
 impl CapsuleStore {
     /// Open (or create) the capsule store inside the workspace memory directory.
     /// Reuses the same `brain.db` file as the memory system.
@@ -59,43 +97,30 @@ impl CapsuleStore {
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous  = NORMAL;",
         )?;
-        Self::init_schema(&conn)?;
+
+        // Versioned schema migrations via the crate-wide `db::migrate`
+        // framework. Reference impl for the other 10 rusqlite stores in
+        // plaw — see PR #10 for the framework + [[reference-gh-pr-create-flow]]
+        // for the cascade pattern.
+        crate::db::migrate(&conn, "capsules", CAPSULES_MIGRATIONS)
+            .context("CapsuleStore: schema migration failed")?;
+
+        // Legacy ad-hoc column add. Kept OUTSIDE the versioned migration
+        // slice because SQLite has no `ALTER TABLE ADD COLUMN IF NOT EXISTS`,
+        // and existing pre-framework users already have this column from a
+        // separate runtime check. Folding it into a v2 Migration would fail
+        // on those users' next launch. Future schema changes (new columns,
+        // new tables) should go straight into CAPSULES_MIGRATIONS as v2+.
+        Self::ensure_embedding_column(&conn)?;
+
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
     }
 
-    /// Create the capsules table and FTS5 index (idempotent).
-    fn init_schema(conn: &Connection) -> Result<()> {
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS capsules (
-                id            TEXT PRIMARY KEY,
-                session_id    TEXT NOT NULL,
-                created_at    TEXT NOT NULL,
-                keywords      TEXT NOT NULL DEFAULT '[]',
-                summary       TEXT NOT NULL,
-                content       TEXT NOT NULL,
-                token_count   INTEGER NOT NULL DEFAULT 0,
-                message_count INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE INDEX IF NOT EXISTS idx_capsules_session  ON capsules(session_id);
-            CREATE INDEX IF NOT EXISTS idx_capsules_created  ON capsules(created_at);
-
-            CREATE VIRTUAL TABLE IF NOT EXISTS capsules_fts USING fts5(
-                keywords, summary, content=capsules, content_rowid=rowid
-            );
-
-            CREATE TRIGGER IF NOT EXISTS capsules_ai AFTER INSERT ON capsules BEGIN
-                INSERT INTO capsules_fts(rowid, keywords, summary)
-                VALUES (new.rowid, new.keywords, new.summary);
-            END;
-            CREATE TRIGGER IF NOT EXISTS capsules_ad AFTER DELETE ON capsules BEGIN
-                INSERT INTO capsules_fts(capsules_fts, rowid, keywords, summary)
-                VALUES ('delete', old.rowid, old.keywords, old.summary);
-            END;",
-        )?;
-
-        // Migration: add embedding column for semantic search (idempotent)
+    /// Idempotent: adds the `embedding` column if it isn't there. Pre-dates
+    /// the [`crate::db::migrate`] framework — see comment in [`Self::new`].
+    fn ensure_embedding_column(conn: &Connection) -> Result<()> {
         let has_embedding: bool = conn
             .prepare("SELECT COUNT(*) FROM pragma_table_info('capsules') WHERE name='embedding'")?
             .query_row([], |row| row.get::<_, i64>(0))
@@ -104,7 +129,6 @@ impl CapsuleStore {
         if !has_embedding {
             conn.execute_batch("ALTER TABLE capsules ADD COLUMN embedding BLOB")?;
         }
-
         Ok(())
     }
 
@@ -309,5 +333,68 @@ impl CapsuleStore {
             self.store_embedding(&id, &emb)?;
         }
         Ok(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn sample_capsule() -> Capsule {
+        Capsule {
+            id: String::new(),
+            session_id: "sess-1".into(),
+            created_at: "2026-05-23T00:00:00Z".into(),
+            keywords: vec!["k1".into(), "k2".into()],
+            summary: "test capsule summary".into(),
+            content: "full conversation body".into(),
+            token_count: 42,
+            message_count: 3,
+        }
+    }
+
+    #[test]
+    fn new_on_fresh_dir_creates_schema_and_sets_user_version_to_one() {
+        let tmp = TempDir::new().unwrap();
+        let store = CapsuleStore::new(tmp.path()).expect("open should create schema");
+
+        // Inserting + retrieving validates schema is operational.
+        let id = store.store(&sample_capsule()).unwrap();
+        let loaded = store.get(&id).unwrap().expect("just-stored capsule must round-trip");
+        assert_eq!(loaded.summary, "test capsule summary");
+
+        // user_version should be 1 (set by db::migrate from the baseline migration).
+        let conn = store.conn.lock();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 1, "baseline migration must bump user_version to 1");
+    }
+
+    #[test]
+    fn reopen_is_idempotent_no_schema_rebuild() {
+        let tmp = TempDir::new().unwrap();
+        {
+            let store = CapsuleStore::new(tmp.path()).unwrap();
+            let _ = store.store(&sample_capsule()).unwrap();
+        }
+        // Reopen — db::migrate sees user_version >= target, skips re-running.
+        // If the migration ran again, CREATE TABLE IF NOT EXISTS would still
+        // succeed but ALTER TABLE for embedding (legacy ad-hoc) would fail
+        // if it weren't guarded. The fact that reopen works proves both the
+        // versioned migration and the ad-hoc embedding patch are idempotent.
+        let store = CapsuleStore::new(tmp.path()).expect("reopen must work");
+        let conn = store.conn.lock();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 1, "user_version unchanged after no-op migrate");
+
+        // And the previously-stored capsule is still there.
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM capsules;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
     }
 }
