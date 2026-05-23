@@ -17,30 +17,45 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 // ── IpcDb core ──────────────────────────────────────────────────
 
+// Connection-level PRAGMAs stay outside the versioned migration slice —
+// they're per-connection runtime tunables, not schema. They must run on
+// every open regardless of `PRAGMA user_version`.
 const PRAGMA_SQL: &str =
     "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;";
 
-const SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS agents (
-    agent_id  TEXT PRIMARY KEY,
-    role      TEXT,
-    status    TEXT DEFAULT 'online',
-    metadata  TEXT,
-    last_seen INTEGER
-);
-CREATE TABLE IF NOT EXISTS messages (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    from_agent TEXT NOT NULL,
-    to_agent   TEXT NOT NULL,
-    payload    TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    read       INTEGER DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS shared_state (
-    key        TEXT PRIMARY KEY,
-    value      TEXT NOT NULL,
-    owner      TEXT NOT NULL,
-    updated_at INTEGER NOT NULL
-);";
+/// Versioned schema migrations for the `agents_ipc` store. Each entry
+/// runs in its own transaction via [`crate::db::migrate`]. Add new
+/// migrations to the END of the slice with strictly increasing `version`;
+/// never reorder or rewrite existing entries (users already at version N
+/// would skip the changes).
+///
+/// **v1 baseline** uses `IF NOT EXISTS` everywhere so the migration is
+/// idempotent on pre-framework users who already have these objects.
+const AGENTS_IPC_MIGRATIONS: &[crate::db::Migration] = &[crate::db::Migration {
+    version: 1,
+    description: "baseline agents + messages + shared_state tables",
+    sql: "CREATE TABLE IF NOT EXISTS agents (
+              agent_id  TEXT PRIMARY KEY,
+              role      TEXT,
+              status    TEXT DEFAULT 'online',
+              metadata  TEXT,
+              last_seen INTEGER
+          );
+          CREATE TABLE IF NOT EXISTS messages (
+              id         INTEGER PRIMARY KEY AUTOINCREMENT,
+              from_agent TEXT NOT NULL,
+              to_agent   TEXT NOT NULL,
+              payload    TEXT NOT NULL,
+              created_at INTEGER NOT NULL,
+              read       INTEGER DEFAULT 0
+          );
+          CREATE TABLE IF NOT EXISTS shared_state (
+              key        TEXT PRIMARY KEY,
+              value      TEXT NOT NULL,
+              owner      TEXT NOT NULL,
+              updated_at INTEGER NOT NULL
+          );",
+}];
 
 /// Shared SQLite handle for IPC tools. Each Plaw process holds one instance.
 pub(crate) struct IpcDb {
@@ -61,8 +76,8 @@ impl IpcDb {
     fn init(conn: Connection, agent_id: String, staleness_secs: u64) -> Result<Self, String> {
         conn.execute_batch(PRAGMA_SQL)
             .map_err(|e| format!("failed to set pragmas: {e}"))?;
-        conn.execute_batch(SCHEMA_SQL)
-            .map_err(|e| format!("failed to create schema: {e}"))?;
+        crate::db::migrate(&conn, "agents_ipc", AGENTS_IPC_MIGRATIONS)
+            .map_err(|e| format!("failed to migrate agents_ipc schema: {e}"))?;
 
         let now = now_epoch();
         // Use UPDATE + INSERT to preserve existing role/metadata columns
@@ -592,6 +607,54 @@ mod tests {
         assert!(tables.contains(&"agents".to_string()));
         assert!(tables.contains(&"messages".to_string()));
         assert!(tables.contains(&"shared_state".to_string()));
+    }
+
+    // ── db::migrate framework wire-up tests (PR #11 reference pattern) ──
+
+    #[test]
+    fn new_on_fresh_dir_creates_schema_and_sets_user_version_to_one() {
+        let dir = TempDir::new().unwrap();
+        let db = test_db(&dir, "plaw_agent_a");
+        let conn = db.conn.lock().unwrap();
+
+        // PRAGMA user_version flipped from 0 to 1.
+        let v: i64 = conn
+            .query_row("PRAGMA user_version;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 1, "fresh DB must end at user_version = 1");
+    }
+
+    #[test]
+    fn reopen_is_idempotent_no_schema_rebuild() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("agents.db");
+        let db_path_str = db_path.to_str().unwrap();
+
+        // First open registers plaw_agent_a.
+        {
+            let _db = IpcDb::open_with_id(db_path_str, "plaw_agent_a", 300).unwrap();
+        }
+
+        // Reopen the same file with the same agent_id — db::migrate sees
+        // user_version = 1, skips all migrations. The previously-registered
+        // agent row must survive (init() does UPDATE-then-INSERT, so this
+        // is also exercising the no-duplicate-insert branch).
+        let db2 = IpcDb::open_with_id(db_path_str, "plaw_agent_a", 300).unwrap();
+        let conn = db2.conn.lock().unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM agents WHERE agent_id = ?1",
+                rusqlite::params!["plaw_agent_a"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "reopen must preserve existing agent row");
+
+        let v: i64 = conn
+            .query_row("PRAGMA user_version;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 1, "reopen must leave user_version unchanged");
     }
 
     #[test]
