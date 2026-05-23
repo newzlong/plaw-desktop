@@ -54,7 +54,7 @@ mod tests {
         };
 
         let discord = DiscordConfig {
-            bot_token: "token".into(),
+            bot_token: crate::security::Secret::from_wire("token".into()),
             guild_id: Some("123".into()),
             allowed_users: vec![],
             listen_to_bots: false,
