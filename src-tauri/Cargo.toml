@@ -17,7 +17,6 @@ tauri-plugin-fs = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-process = "2"
-tauri-plugin-shell = "2"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -33,3 +32,14 @@ hex = "0.4"
 flate2 = "1"
 tar = "0.4"
 rusqlite = { version = "0.37", features = ["bundled"] }
+
+# Match plaw's release-profile discipline. The Tauri wrapper binary
+# previously inherited rustc defaults (opt-level=3, codegen-units=16,
+# no LTO, panic=unwind, no strip) — those numbers undid most of the
+# size work the plaw crate puts into its own release profile.
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
