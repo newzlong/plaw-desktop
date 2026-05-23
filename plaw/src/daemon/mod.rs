@@ -435,7 +435,7 @@ mod tests {
         let mut config = Config::default();
         config.channels_config.mattermost = Some(crate::config::schema::MattermostConfig {
             url: "https://mattermost.example.com".into(),
-            bot_token: "token".into(),
+            bot_token: crate::security::Secret::from_wire("token".into()),
             channel_id: Some("channel-id".into()),
             allowed_users: vec!["*".into()],
             thread_replies: Some(true),

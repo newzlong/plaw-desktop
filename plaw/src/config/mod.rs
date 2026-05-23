@@ -64,7 +64,7 @@ mod tests {
 
         let lark = LarkConfig {
             app_id: "app-id".into(),
-            app_secret: "app-secret".into(),
+            app_secret: crate::security::Secret::from_wire("app-secret".into()),
             encrypt_key: None,
             verification_token: None,
             allowed_users: vec![],
@@ -79,7 +79,7 @@ mod tests {
         };
         let feishu = FeishuConfig {
             app_id: "app-id".into(),
-            app_secret: "app-secret".into(),
+            app_secret: crate::security::Secret::from_wire("app-secret".into()),
             encrypt_key: None,
             verification_token: None,
             allowed_users: vec![],

@@ -5191,8 +5191,9 @@ fn setup_channels() -> Result<ChannelsConfig> {
 
                 config.lark = Some(LarkConfig {
                     app_id,
-                    app_secret,
-                    verification_token,
+                    app_secret: crate::security::Secret::from_wire(app_secret),
+                    verification_token: verification_token
+                        .map(crate::security::Secret::from_wire),
                     encrypt_key: None,
                     allowed_users,
                     mention_only: false,
@@ -7436,7 +7437,7 @@ mod tests {
         channels.signal = None;
         channels.mattermost = Some(crate::config::schema::MattermostConfig {
             url: "https://mattermost.example.com".into(),
-            bot_token: "token".into(),
+            bot_token: crate::security::Secret::from_wire("token".into()),
             channel_id: Some("channel".into()),
             allowed_users: vec!["*".into()],
             thread_replies: Some(true),
