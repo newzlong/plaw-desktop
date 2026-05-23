@@ -1,18 +1,13 @@
 //! Sandbox trait for pluggable OS-level isolation.
-
-// Dormant subsystem: the Sandbox trait + NoopSandbox impl are scaffolding
-// for a future shell-execution isolation layer. No runtime caller wires
-// a sandbox today (the active path executes shell directly with autonomy/
-// allowlist gating). Module-level allow keeps the designed surface
-// intact for the eventual wiring without firing dead_code in the
-// meantime.
-#![allow(dead_code)]
 //!
 //! This module defines the [`Sandbox`] trait, which abstracts OS-level process
 //! isolation backends. Implementations wrap shell commands with platform-specific
 //! sandboxing (e.g., seccomp, AppArmor, namespaces) to limit the blast radius
-//! of tool execution. The agent runtime selects and applies a sandbox backend
-//! before executing any shell command.
+//! of tool execution. [`crate::tools::ShellTool`] applies a sandbox to every
+//! command via [`Sandbox::wrap_command`] before spawning; the active backend is
+//! selected at startup by [`crate::security::create_sandbox`] from the user's
+//! `[security.sandbox]` config (defaults to [`NoopSandbox`] when no platform
+//! backend is available — notably the entire Windows path today).
 
 use async_trait::async_trait;
 use std::process::Command;

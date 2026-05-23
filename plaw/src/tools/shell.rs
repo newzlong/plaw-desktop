@@ -181,22 +181,29 @@ const SAFE_ENV_VARS: &[&str] = &[
 pub struct ShellTool {
     security: Arc<SecurityPolicy>,
     runtime: Arc<dyn RuntimeAdapter>,
+    sandbox: Arc<dyn crate::security::Sandbox>,
     syscall_detector: Option<Arc<SyscallAnomalyDetector>>,
 }
 
 impl ShellTool {
-    pub fn new(security: Arc<SecurityPolicy>, runtime: Arc<dyn RuntimeAdapter>) -> Self {
-        Self::new_with_syscall_detector(security, runtime, None)
+    pub fn new(
+        security: Arc<SecurityPolicy>,
+        runtime: Arc<dyn RuntimeAdapter>,
+        sandbox: Arc<dyn crate::security::Sandbox>,
+    ) -> Self {
+        Self::new_with_syscall_detector(security, runtime, sandbox, None)
     }
 
     pub fn new_with_syscall_detector(
         security: Arc<SecurityPolicy>,
         runtime: Arc<dyn RuntimeAdapter>,
+        sandbox: Arc<dyn crate::security::Sandbox>,
         syscall_detector: Option<Arc<SyscallAnomalyDetector>>,
     ) -> Self {
         Self {
             security,
             runtime,
+            sandbox,
             syscall_detector,
         }
     }
@@ -376,6 +383,23 @@ impl Tool for ShellTool {
                 });
             }
         };
+
+        // Apply sandbox wrapping (e.g. firejail, bubblewrap, landlock) before
+        // we touch env or stdio. The trait operates on `std::process::Command`;
+        // `tokio::process::Command::as_std_mut()` exposes the inner std handle.
+        // NoopSandbox (the default on every platform until backend wiring is
+        // chosen) is a no-op; real backends prepend wrapper args / set env.
+        if let Err(e) = self.sandbox.wrap_command(cmd.as_std_mut()) {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!(
+                    "Failed to apply sandbox '{}': {e}",
+                    self.sandbox.name()
+                )),
+            });
+        }
+
         cmd.env_clear();
 
         // Source env vars from login environment (registry on Windows,
@@ -618,6 +642,10 @@ mod tests {
         Arc::new(NativeRuntime::new())
     }
 
+    fn test_sandbox() -> Arc<dyn crate::security::Sandbox> {
+        Arc::new(crate::security::NoopSandbox)
+    }
+
     fn test_syscall_detector(tmp: &TempDir) -> Arc<SyscallAnomalyDetector> {
         let log_path = tmp.path().join("shell-syscall-anomalies.log");
         let cfg = SyscallAnomalyConfig {
@@ -636,19 +664,70 @@ mod tests {
 
     #[test]
     fn shell_tool_name() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime());
+        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime(), test_sandbox());
         assert_eq!(tool.name(), "shell");
+    }
+
+    #[tokio::test]
+    async fn shell_invokes_sandbox_wrap_command_on_execute() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct CountingSandbox {
+            count: Arc<AtomicU32>,
+        }
+
+        impl crate::security::Sandbox for CountingSandbox {
+            fn wrap_command(
+                &self,
+                _cmd: &mut std::process::Command,
+            ) -> std::io::Result<()> {
+                self.count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn name(&self) -> &str {
+                "counting"
+            }
+            fn description(&self) -> &str {
+                "test sandbox that counts wrap_command invocations"
+            }
+        }
+
+        let count = Arc::new(AtomicU32::new(0));
+        let sandbox: Arc<dyn crate::security::Sandbox> = Arc::new(CountingSandbox {
+            count: count.clone(),
+        });
+        let tool = ShellTool::new(
+            test_security(AutonomyLevel::Supervised),
+            test_runtime(),
+            sandbox,
+        );
+
+        // Doesn't matter if the command itself succeeds or fails — we only
+        // need to confirm execute reached the wrap_command injection point.
+        // (`echo` works on both Windows cmd and Unix sh.)
+        let _ = tool
+            .execute(json!({"command": "echo sandbox-wire-smoke"}))
+            .await;
+
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "ShellTool::execute must invoke sandbox.wrap_command exactly once"
+        );
     }
 
     #[test]
     fn shell_tool_description() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime());
+        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime(), test_sandbox());
         assert!(!tool.description().is_empty());
     }
 
     #[test]
     fn shell_tool_schema_has_command() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime());
+        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime(), test_sandbox());
         let schema = tool.parameters_schema();
         assert!(schema["properties"]["command"].is_object());
         assert!(schema["required"]
@@ -676,7 +755,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_executes_allowed_command() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime());
+        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime(), test_sandbox());
         let result = tool
             .execute(json!({"command": "echo hello"}))
             .await
@@ -688,7 +767,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_executes_command_from_cmd_alias() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime());
+        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime(), test_sandbox());
         let result = tool
             .execute(json!({"cmd": "echo alias"}))
             .await
@@ -699,7 +778,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_blocks_disallowed_command() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime());
+        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime(), test_sandbox());
         let result = tool
             .execute(json!({"command": "rm -rf /"}))
             .await
@@ -711,7 +790,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_blocks_readonly() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::ReadOnly), test_runtime());
+        let tool = ShellTool::new(test_security(AutonomyLevel::ReadOnly), test_runtime(), test_sandbox());
         let result = tool
             .execute(json!({"command": "ls"}))
             .await
@@ -726,7 +805,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_missing_command_param() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime());
+        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime(), test_sandbox());
         let result = tool.execute(json!({})).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("command"));
@@ -734,14 +813,14 @@ mod tests {
 
     #[tokio::test]
     async fn shell_wrong_type_param() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime());
+        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime(), test_sandbox());
         let result = tool.execute(json!({"command": 123})).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn shell_captures_exit_code() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime());
+        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime(), test_sandbox());
         let result = tool
             .execute(json!({"command": "ls /nonexistent_dir_xyz"}))
             .await
@@ -751,7 +830,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_blocks_absolute_path_argument() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime());
+        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime(), test_sandbox());
         let result = tool
             .execute(json!({"command": "cat /etc/passwd"}))
             .await
@@ -766,7 +845,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_blocks_option_assignment_path_argument() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime());
+        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime(), test_sandbox());
         let result = tool
             .execute(json!({"command": "grep --file=/etc/passwd root ./src"}))
             .await
@@ -781,7 +860,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_blocks_short_option_attached_path_argument() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime());
+        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime(), test_sandbox());
         let result = tool
             .execute(json!({"command": "grep -f/etc/passwd root ./src"}))
             .await
@@ -796,7 +875,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_blocks_tilde_user_path_argument() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime());
+        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime(), test_sandbox());
         let result = tool
             .execute(json!({"command": "cat ~root/.ssh/id_rsa"}))
             .await
@@ -811,7 +890,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_blocks_input_redirection_path_bypass() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime());
+        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime(), test_sandbox());
         let result = tool
             .execute(json!({"command": "cat </etc/passwd"}))
             .await
@@ -877,7 +956,7 @@ mod tests {
         let _g1 = EnvGuard::set("API_KEY", "sk-test-secret-12345");
         let _g2 = EnvGuard::set("PLAW_API_KEY", "sk-test-secret-67890");
 
-        let tool = ShellTool::new(test_security_with_env_cmd(), test_runtime());
+        let tool = ShellTool::new(test_security_with_env_cmd(), test_runtime(), test_sandbox());
         let result = tool
             .execute(json!({"command": "env"}))
             .await
@@ -896,7 +975,7 @@ mod tests {
     #[cfg(unix)] // uses `env` command — see shell_does_not_leak_api_key
     #[tokio::test]
     async fn shell_preserves_path_and_home_for_env_command() {
-        let tool = ShellTool::new(test_security_with_env_cmd(), test_runtime());
+        let tool = ShellTool::new(test_security_with_env_cmd(), test_runtime(), test_sandbox());
 
         let result = tool
             .execute(json!({"command": "env"}))
@@ -915,7 +994,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_blocks_plain_variable_expansion() {
-        let tool = ShellTool::new(test_security_with_env_cmd(), test_runtime());
+        let tool = ShellTool::new(test_security_with_env_cmd(), test_runtime(), test_sandbox());
         let result = tool
             .execute(json!({"command": "echo $HOME"}))
             .await
@@ -975,7 +1054,7 @@ mod tests {
             ..SecurityPolicy::default()
         });
 
-        let tool = ShellTool::new(security.clone(), test_runtime());
+        let tool = ShellTool::new(security.clone(), test_runtime(), test_sandbox());
         let denied = tool
             .execute(json!({"command": "touch plaw_shell_approval_test"}))
             .await
@@ -1052,7 +1131,7 @@ mod tests {
             workspace_dir: std::env::temp_dir(),
             ..SecurityPolicy::default()
         });
-        let tool = ShellTool::new(security, test_runtime());
+        let tool = ShellTool::new(security, test_runtime(), test_sandbox());
         let result = tool
             .execute(json!({"command": "echo test"}))
             .await
@@ -1068,7 +1147,7 @@ mod tests {
             workspace_dir: std::env::temp_dir(),
             ..SecurityPolicy::default()
         });
-        let tool = ShellTool::new(security, test_runtime());
+        let tool = ShellTool::new(security, test_runtime(), test_sandbox());
         let result = tool
             .execute(json!({"command": "nonexistent_binary_xyz_12345"}))
             .await
@@ -1078,7 +1157,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_captures_stderr_output() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Full), test_runtime());
+        let tool = ShellTool::new(test_security(AutonomyLevel::Full), test_runtime(), test_sandbox());
         let result = tool
             .execute(json!({"command": "echo error_msg >&2"}))
             .await
@@ -1094,7 +1173,7 @@ mod tests {
             workspace_dir: std::env::temp_dir(),
             ..SecurityPolicy::default()
         });
-        let tool = ShellTool::new(security, test_runtime());
+        let tool = ShellTool::new(security, test_runtime(), test_sandbox());
 
         let r1 = tool
             .execute(json!({"command": "echo first"}))
@@ -1121,6 +1200,7 @@ mod tests {
         let tool = ShellTool::new_with_syscall_detector(
             test_security(AutonomyLevel::Full),
             test_runtime(),
+            test_sandbox(),
             Some(detector),
         );
 
