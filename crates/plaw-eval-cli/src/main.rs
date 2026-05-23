@@ -92,8 +92,13 @@ enum Command {
         #[arg(long, default_value_t = 1)]
         repetitions: usize,
 
-        /// Override the judge model (provider:model, e.g. `kimi:kimi-k2.5`).
-        #[arg(long)]
+        /// Override the judge model (provider:model, e.g.
+        /// `deepseek:deepseek-v4-pro`, `anthropic:claude-sonnet-4-6`,
+        /// `kimi:kimi-k2.5`). When unset, falls back to the
+        /// `PLAW_EVAL_JUDGE` env var, then to the suite's
+        /// `[default_judge]` block. This is the model-agnostic switch
+        /// lever — no eval suite TOML needs editing to change models.
+        #[arg(long, env = "PLAW_EVAL_JUDGE")]
         judge: Option<String>,
 
         /// Deterministic sampling seed.
