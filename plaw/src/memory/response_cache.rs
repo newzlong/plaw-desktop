@@ -5,7 +5,7 @@
 //! configurable TTL (default: 1 hour). The cache is optional and disabled by
 //! default — users opt in via `[memory] response_cache_enabled = true`.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{Duration, Local};
 use parking_lot::Mutex;
 use rusqlite::{params, Connection};
@@ -24,6 +24,30 @@ pub struct ResponseCache {
     max_entries: usize,
 }
 
+/// Versioned schema migrations for the `response_cache` store. Each entry
+/// runs in its own transaction via [`crate::db::migrate`]. Add new
+/// migrations to the END of the slice with strictly increasing `version`;
+/// never reorder or rewrite existing entries (users already at version N
+/// would skip the changes).
+///
+/// **v1 baseline** uses `IF NOT EXISTS` everywhere so the migration is
+/// idempotent on pre-framework users who already have these objects.
+const RESPONSE_CACHE_MIGRATIONS: &[crate::db::Migration] = &[crate::db::Migration {
+    version: 1,
+    description: "baseline response_cache table + accessed/created indexes",
+    sql: "CREATE TABLE IF NOT EXISTS response_cache (
+              prompt_hash TEXT PRIMARY KEY,
+              model       TEXT NOT NULL,
+              response    TEXT NOT NULL,
+              token_count INTEGER NOT NULL DEFAULT 0,
+              created_at  TEXT NOT NULL,
+              accessed_at TEXT NOT NULL,
+              hit_count   INTEGER NOT NULL DEFAULT 0
+          );
+          CREATE INDEX IF NOT EXISTS idx_rc_accessed ON response_cache(accessed_at);
+          CREATE INDEX IF NOT EXISTS idx_rc_created  ON response_cache(created_at);",
+}];
+
 impl ResponseCache {
     /// Open (or create) the response cache database.
     pub fn new(workspace_dir: &Path, ttl_minutes: u32, max_entries: usize) -> Result<Self> {
@@ -33,25 +57,17 @@ impl ResponseCache {
 
         let conn = Connection::open(&db_path)?;
 
+        // Connection-level PRAGMAs stay outside the versioned slice — they're
+        // per-connection runtime tunables, not schema. They must run on every
+        // open regardless of `user_version`.
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous  = NORMAL;
              PRAGMA temp_store   = MEMORY;",
         )?;
 
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS response_cache (
-                prompt_hash TEXT PRIMARY KEY,
-                model       TEXT NOT NULL,
-                response    TEXT NOT NULL,
-                token_count INTEGER NOT NULL DEFAULT 0,
-                created_at  TEXT NOT NULL,
-                accessed_at TEXT NOT NULL,
-                hit_count   INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE INDEX IF NOT EXISTS idx_rc_accessed ON response_cache(accessed_at);
-            CREATE INDEX IF NOT EXISTS idx_rc_created ON response_cache(created_at);",
-        )?;
+        crate::db::migrate(&conn, "response_cache", RESPONSE_CACHE_MIGRATIONS)
+            .context("ResponseCache: schema migration failed")?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -394,6 +410,52 @@ mod tests {
 
         let (count, _, _) = cache.stats().unwrap();
         assert_eq!(count, 0, "cache with max_entries=0 should evict everything");
+    }
+
+    // ── db::migrate framework wire-up tests (PR #11 reference pattern) ──
+
+    #[test]
+    fn new_on_fresh_dir_creates_schema_and_sets_user_version_to_one() {
+        let tmp = TempDir::new().unwrap();
+        let cache = ResponseCache::new(tmp.path(), 60, 100).unwrap();
+
+        // Schema is usable end-to-end.
+        let key = ResponseCache::cache_key("gpt-4", None, "fresh-db smoke");
+        cache.put(&key, "gpt-4", "ok", 3).unwrap();
+        assert_eq!(cache.get(&key).unwrap().as_deref(), Some("ok"));
+
+        // PRAGMA user_version flipped from 0 to 1.
+        let conn = cache.conn.lock();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 1, "fresh DB must end at user_version = 1");
+    }
+
+    #[test]
+    fn reopen_is_idempotent_no_schema_rebuild() {
+        let tmp = TempDir::new().unwrap();
+        let key;
+        {
+            let cache = ResponseCache::new(tmp.path(), 60, 100).unwrap();
+            key = ResponseCache::cache_key("gpt-4", None, "persistence test");
+            cache.put(&key, "gpt-4", "kept across reopen", 7).unwrap();
+        }
+
+        // Reopen the same workspace_dir — db::migrate sees user_version = 1,
+        // skips all migrations, and the previously stored entry survives.
+        let cache = ResponseCache::new(tmp.path(), 60, 100).unwrap();
+        assert_eq!(
+            cache.get(&key).unwrap().as_deref(),
+            Some("kept across reopen"),
+            "entry from previous open must survive idempotent reopen"
+        );
+
+        let conn = cache.conn.lock();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 1, "reopen must leave user_version unchanged");
     }
 
     #[test]
