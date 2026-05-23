@@ -704,7 +704,7 @@ fn mask_sensitive_fields(config: &crate::config::Config) -> crate::config::Confi
         mask_required_secret_typed(&mut telegram.bot_token);
     }
     if let Some(discord) = masked.channels_config.discord.as_mut() {
-        mask_required_secret(&mut discord.bot_token);
+        mask_required_secret_typed(&mut discord.bot_token);
     }
     if let Some(slack) = masked.channels_config.slack.as_mut() {
         mask_required_secret(&mut slack.bot_token);
@@ -828,7 +828,7 @@ fn restore_masked_sensitive_fields(
         incoming.channels_config.discord.as_mut(),
         current.channels_config.discord.as_ref(),
     ) {
-        restore_required_secret(&mut incoming_ch.bot_token, &current_ch.bot_token);
+        restore_required_secret_typed(&mut incoming_ch.bot_token, &current_ch.bot_token);
     }
     if let (Some(incoming_ch), Some(current_ch)) = (
         incoming.channels_config.slack.as_mut(),

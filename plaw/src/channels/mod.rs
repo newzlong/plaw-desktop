@@ -4029,21 +4029,31 @@ fn collect_configured_channels(
     }
 
     if let Some(ref dc) = config.channels_config.discord {
-        channels.push(ConfiguredChannel {
-            display_name: "Discord",
-            channel: Arc::new(
-                DiscordChannel::new(
-                    dc.bot_token.clone(),
-                    dc.guild_id.clone(),
-                    dc.allowed_users.clone(),
-                    dc.listen_to_bots,
-                    dc.effective_group_reply_mode().requires_mention(),
-                )
-                .with_group_reply_allowed_senders(dc.group_reply_allowed_sender_ids())
-                .with_transcription(config.transcription.clone())
-                .with_workspace_dir(config.workspace_dir.clone()),
-            ),
-        });
+        match dc.bot_token.reveal(&secret_store) {
+            Ok(bot_token) => {
+                channels.push(ConfiguredChannel {
+                    display_name: "Discord",
+                    channel: Arc::new(
+                        DiscordChannel::new(
+                            bot_token,
+                            dc.guild_id.clone(),
+                            dc.allowed_users.clone(),
+                            dc.listen_to_bots,
+                            dc.effective_group_reply_mode().requires_mention(),
+                        )
+                        .with_group_reply_allowed_senders(dc.group_reply_allowed_sender_ids())
+                        .with_transcription(config.transcription.clone())
+                        .with_workspace_dir(config.workspace_dir.clone()),
+                    ),
+                });
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "Failed to decrypt channels.discord.bot_token — Discord channel skipped"
+                );
+            }
+        }
     }
 
     if let Some(ref sl) = config.channels_config.slack {

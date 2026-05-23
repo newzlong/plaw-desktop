@@ -2753,7 +2753,11 @@ impl TelegramConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DiscordConfig {
     /// Discord bot token (from Discord Developer Portal).
-    pub bot_token: String,
+    ///
+    /// Stored as [`crate::security::Secret`] (PR #N — follows the
+    /// Telegram pattern). Readers reveal via SecretStore at channel
+    /// construction.
+    pub bot_token: crate::security::Secret,
     /// Optional guild (server) ID to restrict the bot to a single guild.
     pub guild_id: Option<String>,
     /// Allowed Discord user IDs. Empty = deny all.
@@ -4270,13 +4274,7 @@ fn decrypt_channel_secrets(
 ) -> Result<()> {
     // telegram.bot_token migrated to `Secret` newtype (PR #N — wati pattern):
     // no eager decrypt needed; readers call `.reveal(&store)` on demand.
-    if let Some(ref mut discord) = channels.discord {
-        decrypt_secret(
-            store,
-            &mut discord.bot_token,
-            "config.channels_config.discord.bot_token",
-        )?;
-    }
+    // discord.bot_token migrated to `Secret` newtype — no eager decrypt.
     if let Some(ref mut slack) = channels.slack {
         decrypt_secret(
             store,
@@ -4428,13 +4426,7 @@ fn encrypt_channel_secrets(
     // telegram.bot_token migrated to `Secret` — caller constructs via
     // `Secret::new_from_plaintext(...)` (encryption at construction) so
     // this auto-encrypt pass is a no-op for it.
-    if let Some(ref mut discord) = channels.discord {
-        encrypt_secret(
-            store,
-            &mut discord.bot_token,
-            "config.channels_config.discord.bot_token",
-        )?;
-    }
+    // discord.bot_token migrated to `Secret` — no auto-encrypt pass.
     if let Some(ref mut slack) = channels.slack {
         encrypt_secret(
             store,
@@ -6852,7 +6844,7 @@ tool_dispatcher = "xml"
     #[test]
     async fn discord_config_serde() {
         let dc = DiscordConfig {
-            bot_token: "discord-token".into(),
+            bot_token: crate::security::Secret::from_wire("discord-token".into()),
             guild_id: Some("12345".into()),
             allowed_users: vec![],
             listen_to_bots: false,
@@ -6861,14 +6853,14 @@ tool_dispatcher = "xml"
         };
         let json = serde_json::to_string(&dc).unwrap();
         let parsed: DiscordConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.bot_token, "discord-token");
+        assert_eq!(parsed.bot_token.as_wire_str(), "discord-token");
         assert_eq!(parsed.guild_id.as_deref(), Some("12345"));
     }
 
     #[test]
     async fn discord_config_optional_guild() {
         let dc = DiscordConfig {
-            bot_token: "tok".into(),
+            bot_token: crate::security::Secret::from_wire("tok".into()),
             guild_id: None,
             allowed_users: vec![],
             listen_to_bots: false,
@@ -7144,7 +7136,7 @@ guild_id = "123"
 "#;
         let parsed: DiscordConfig = toml::from_str(toml_str).unwrap();
         assert!(parsed.allowed_users.is_empty());
-        assert_eq!(parsed.bot_token, "tok");
+        assert_eq!(parsed.bot_token.as_wire_str(), "tok");
     }
 
     #[test]

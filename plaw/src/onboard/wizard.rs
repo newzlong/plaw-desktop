@@ -3955,7 +3955,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 }
 
                 config.discord = Some(DiscordConfig {
-                    bot_token: token,
+                    bot_token: crate::security::Secret::from_wire(token),
                     guild_id: if guild.is_empty() { None } else { Some(guild) },
                     allowed_users,
                     listen_to_bots: false,
