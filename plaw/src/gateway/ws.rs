@@ -643,7 +643,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 let context_used = std::cmp::max(api_based, estimated);
                 let done = serde_json::json!({
                     "type": "done",
-                    "full_response": safe_response,
+                    "full_response": crate::security::scrub_outbound(&safe_response),
                     "usage": {
                         "context_used": context_used,
                     },

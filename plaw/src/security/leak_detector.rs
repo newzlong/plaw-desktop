@@ -3,13 +3,11 @@
 //! Scans outbound messages for potential credential leaks before they are sent,
 //! preventing accidental exfiltration of API keys, tokens, passwords, and other
 //! sensitive values.
-
-// Dormant: `LeakDetector` + `LeakResult` form a designed outbound-leak
-// guard that hasn't been wired into the channel send paths yet. The
-// `loop_/credentials.rs` `scrub_credentials` helper covers the
-// inbound-tool-result direction today; the LeakDetector here is the
-// missing outbound counterpart waiting for channel-side integration.
-#![allow(dead_code)]
+//!
+//! The crate-level chokepoint is [`crate::security::scrub_outbound`], which is
+//! called from the gateway WS `done` event and from the channel
+//! `delivered_response` path. The detector here provides the pattern set;
+//! the chokepoint wraps it with a cached singleton and structured log on hit.
 //!
 //! Contributed from RustyClaw (MIT licensed).
 
@@ -50,6 +48,13 @@ impl LeakDetector {
     }
 
     /// Create a detector with custom sensitivity.
+    ///
+    /// Sensitivity gates the generic `password=`/`secret=`/`token=` regexes
+    /// (skipped when sensitivity <= 0.5). The strict patterns (API key
+    /// prefixes, AWS, JWT, PEM, DB URLs) always fire. Kept as a tunable hook
+    /// for future config exposure; currently only [`Self::new`] is called from
+    /// non-test code.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn with_sensitivity(sensitivity: f64) -> Self {
         Self {
             sensitivity: sensitivity.clamp(0.0, 1.0),
