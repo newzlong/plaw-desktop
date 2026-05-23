@@ -1,4 +1,5 @@
 use crate::config::ObservabilityConfig;
+use crate::observability::trace_context::TraceContext;
 use anyhow::Result;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -47,6 +48,18 @@ pub struct RuntimeTraceEvent {
     pub success: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Root identifier for a logical trace (cron fire, sub-agent spawn, etc.).
+    /// Shared across every event in the same trace; absent for events emitted
+    /// outside any [`crate::observability::trace_context::CURRENT_TRACE`] scope.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub trace_id: Option<String>,
+    /// Identifier of the current span. Distinct from [`Self::id`] (which is
+    /// per-event); a single span typically emits multiple events.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub span_id: Option<String>,
+    /// Parent span's identifier, if any. Empty at the root of a trace.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub parent_span_id: Option<String>,
     #[serde(default)]
     pub payload: Value,
 }
@@ -211,6 +224,10 @@ pub fn record_event(
         return;
     };
 
+    // Stamp the ambient trace context if one is active on this task.
+    // Absent outside any scope — those events get no trace fields, matching
+    // pre-trace-context JSONL output bit-for-bit.
+    let ctx = TraceContext::current();
     let event = RuntimeTraceEvent {
         id: Uuid::new_v4().to_string(),
         timestamp: Utc::now().to_rfc3339(),
@@ -221,6 +238,9 @@ pub fn record_event(
         turn_id: turn_id.map(str::to_string),
         success,
         message: message.map(str::to_string),
+        trace_id: ctx.as_ref().map(|c| c.trace_id.clone()),
+        span_id: ctx.as_ref().map(|c| c.span_id.clone()),
+        parent_span_id: ctx.as_ref().and_then(|c| c.parent_span_id.clone()),
         payload,
     };
 
@@ -375,6 +395,9 @@ mod tests {
                 turn_id: None,
                 success: None,
                 message: Some(format!("event-{i}")),
+                trace_id: None,
+                span_id: None,
+                parent_span_id: None,
                 payload: serde_json::json!({ "i": i }),
             };
             logger.append(&event).unwrap();
@@ -403,6 +426,9 @@ mod tests {
             turn_id: Some("turn-1".into()),
             success: Some(false),
             message: Some("boom".into()),
+            trace_id: None,
+            span_id: None,
+            parent_span_id: None,
             payload: serde_json::json!({ "error": "boom" }),
         };
         logger.append(&event).unwrap();
