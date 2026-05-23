@@ -55,7 +55,6 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_shell::init())
         .manage(state)
         .setup(|app| {
             let show = MenuItemBuilder::with_id("show", "Show Plaw").build(app)?;
