@@ -570,6 +570,56 @@ fn add_column_if_missing(conn: &Connection, name: &str, sql_type: &str) -> Resul
     }
 }
 
+/// Versioned schema migrations for the cron stores. See [[reference-gh-pr-create-flow]]
+/// / PR #11 for the retrofit pattern.
+///
+/// **v1 baseline** captures the current canonical CREATE TABLE shape — same
+/// columns as the existing `IF NOT EXISTS` block, no behavior change for any
+/// installed user. The 11 legacy `add_column_if_missing` calls below cover
+/// pre-framework databases that were created before some columns existed;
+/// they stay outside the versioned slice for the same reason as
+/// `capsules::ensure_embedding_column` (SQLite has no `ALTER TABLE ADD COLUMN
+/// IF NOT EXISTS`, and these patches must be no-ops on databases that
+/// already have the columns).
+const CRON_MIGRATIONS: &[crate::db::Migration] = &[crate::db::Migration {
+    version: 1,
+    description: "baseline cron_jobs + cron_runs tables with indexes",
+    sql: "CREATE TABLE IF NOT EXISTS cron_jobs (
+              id               TEXT PRIMARY KEY,
+              expression       TEXT NOT NULL,
+              command          TEXT NOT NULL,
+              schedule         TEXT,
+              job_type         TEXT NOT NULL DEFAULT 'shell',
+              prompt           TEXT,
+              name             TEXT,
+              session_target   TEXT NOT NULL DEFAULT 'isolated',
+              model            TEXT,
+              enabled          INTEGER NOT NULL DEFAULT 1,
+              delivery         TEXT,
+              delete_after_run INTEGER NOT NULL DEFAULT 0,
+              created_at       TEXT NOT NULL,
+              next_run         TEXT NOT NULL,
+              last_run         TEXT,
+              last_status      TEXT,
+              last_output      TEXT
+          );
+          CREATE INDEX IF NOT EXISTS idx_cron_jobs_next_run ON cron_jobs(next_run);
+
+          CREATE TABLE IF NOT EXISTS cron_runs (
+              id          INTEGER PRIMARY KEY AUTOINCREMENT,
+              job_id      TEXT NOT NULL,
+              started_at  TEXT NOT NULL,
+              finished_at TEXT NOT NULL,
+              status      TEXT NOT NULL,
+              output      TEXT,
+              duration_ms INTEGER,
+              FOREIGN KEY (job_id) REFERENCES cron_jobs(id) ON DELETE CASCADE
+          );
+          CREATE INDEX IF NOT EXISTS idx_cron_runs_job_id ON cron_runs(job_id);
+          CREATE INDEX IF NOT EXISTS idx_cron_runs_started_at ON cron_runs(started_at);
+          CREATE INDEX IF NOT EXISTS idx_cron_runs_job_started ON cron_runs(job_id, started_at);",
+}];
+
 fn with_connection<T>(config: &Config, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
     let db_path = config.workspace_dir.join("cron").join("jobs.db");
     if let Some(parent) = db_path.parent() {
@@ -580,45 +630,19 @@ fn with_connection<T>(config: &Config, f: impl FnOnce(&Connection) -> Result<T>)
     let conn = Connection::open(&db_path)
         .with_context(|| format!("Failed to open cron DB: {}", db_path.display()))?;
 
-    conn.execute_batch(
-        "PRAGMA foreign_keys = ON;
-         CREATE TABLE IF NOT EXISTS cron_jobs (
-            id               TEXT PRIMARY KEY,
-            expression       TEXT NOT NULL,
-            command          TEXT NOT NULL,
-            schedule         TEXT,
-            job_type         TEXT NOT NULL DEFAULT 'shell',
-            prompt           TEXT,
-            name             TEXT,
-            session_target   TEXT NOT NULL DEFAULT 'isolated',
-            model            TEXT,
-            enabled          INTEGER NOT NULL DEFAULT 1,
-            delivery         TEXT,
-            delete_after_run INTEGER NOT NULL DEFAULT 0,
-            created_at       TEXT NOT NULL,
-            next_run         TEXT NOT NULL,
-            last_run         TEXT,
-            last_status      TEXT,
-            last_output      TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_cron_jobs_next_run ON cron_jobs(next_run);
+    // PRAGMA foreign_keys is connection-level (not schema-level) so it stays
+    // outside the versioned migration slice. Must be set on every fresh
+    // connection — which `with_connection` opens fresh per call.
+    conn.execute_batch("PRAGMA foreign_keys = ON;")
+        .context("Failed to enable foreign keys on cron DB")?;
 
-        CREATE TABLE IF NOT EXISTS cron_runs (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            job_id      TEXT NOT NULL,
-            started_at  TEXT NOT NULL,
-            finished_at TEXT NOT NULL,
-            status      TEXT NOT NULL,
-            output      TEXT,
-            duration_ms INTEGER,
-            FOREIGN KEY (job_id) REFERENCES cron_jobs(id) ON DELETE CASCADE
-        );
-        CREATE INDEX IF NOT EXISTS idx_cron_runs_job_id ON cron_runs(job_id);
-        CREATE INDEX IF NOT EXISTS idx_cron_runs_started_at ON cron_runs(started_at);
-        CREATE INDEX IF NOT EXISTS idx_cron_runs_job_started ON cron_runs(job_id, started_at);",
-    )
-    .context("Failed to initialize cron schema")?;
+    crate::db::migrate(&conn, "cron", CRON_MIGRATIONS)
+        .context("cron schema migration failed")?;
 
+    // Legacy ad-hoc column adds for databases created before some columns
+    // existed in v1 baseline. Each is idempotent (checks pragma_table_info
+    // before ALTER). Stays outside the versioned slice — same rationale as
+    // [`crate::memory::capsules::ensure_embedding_column`].
     add_column_if_missing(&conn, "schedule", "TEXT")?;
     add_column_if_missing(&conn, "job_type", "TEXT NOT NULL DEFAULT 'shell'")?;
     add_column_if_missing(&conn, "prompt", "TEXT")?;
