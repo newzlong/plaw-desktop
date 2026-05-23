@@ -5,6 +5,20 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use thiserror::Error;
 use uuid::Uuid;
 
+/// Derive `(correlation_id, causation_id)` from the ambient trace context.
+/// Returns `(None, None)` when no [`crate::observability::trace_context::CURRENT_TRACE`]
+/// scope is active, preserving pre-trace-context envelope semantics.
+///
+/// Mapping: `correlation_id = trace_id` (shared by all envelopes in the
+/// same trace), `causation_id = span_id` (identifies the operation that
+/// triggered this envelope).
+fn trace_ids_from_current() -> (Option<String>, Option<String>) {
+    match crate::observability::trace_context::TraceContext::current() {
+        Some(ctx) => (Some(ctx.trace_id), Some(ctx.span_id)),
+        None => (None, None),
+    }
+}
+
 /// Delivery mode for a coordination envelope.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -59,6 +73,12 @@ pub struct CoordinationEnvelope {
 
 impl CoordinationEnvelope {
     /// Construct a direct message envelope.
+    ///
+    /// `correlation_id` and `causation_id` auto-populate from the ambient
+    /// [`crate::observability::trace_context::TraceContext`] scope if one is
+    /// active (correlation = `trace_id`, causation = current `span_id`). When
+    /// no scope is active they stay `None`, matching pre-trace-context
+    /// behavior — callers can still set them explicitly via field assignment.
     pub fn new_direct(
         from: impl Into<String>,
         to: impl Into<String>,
@@ -66,11 +86,12 @@ impl CoordinationEnvelope {
         topic: impl Into<String>,
         payload: CoordinationPayload,
     ) -> Self {
+        let (correlation_id, causation_id) = trace_ids_from_current();
         Self {
             id: Uuid::new_v4().to_string(),
             conversation_id: conversation_id.into(),
-            correlation_id: None,
-            causation_id: None,
+            correlation_id,
+            causation_id,
             from: from.into(),
             to: Some(to.into()),
             topic: topic.into(),
@@ -79,18 +100,20 @@ impl CoordinationEnvelope {
         }
     }
 
-    /// Construct a broadcast envelope.
+    /// Construct a broadcast envelope. See [`Self::new_direct`] for the
+    /// trace-context auto-population rule.
     pub fn new_broadcast(
         from: impl Into<String>,
         conversation_id: impl Into<String>,
         topic: impl Into<String>,
         payload: CoordinationPayload,
     ) -> Self {
+        let (correlation_id, causation_id) = trace_ids_from_current();
         Self {
             id: Uuid::new_v4().to_string(),
             conversation_id: conversation_id.into(),
-            correlation_id: None,
-            causation_id: None,
+            correlation_id,
+            causation_id,
             from: from.into(),
             to: None,
             topic: topic.into(),

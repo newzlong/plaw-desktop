@@ -310,7 +310,20 @@ impl Tool for ParallelDelegateTool {
             let model = self.default_model.clone();
             let multimodal_config = self.multimodal_config.clone();
 
+            // Capture parent's trace context BEFORE the spawn — once inside
+            // the spawned task, the task-local is fresh (None by default).
+            // If parent had a context, derive a child span; otherwise the
+            // sub-task starts its own root trace.
+            let parent_ctx_for_child = crate::observability::trace_context::TraceContext::current();
+
             join_set.spawn(async move {
+                let child_ctx = parent_ctx_for_child
+                    .as_ref()
+                    .map(crate::observability::trace_context::TraceContext::child)
+                    .unwrap_or_else(crate::observability::trace_context::TraceContext::root);
+
+                crate::observability::trace_context::CURRENT_TRACE
+                    .scope(Some(child_ctx), async move {
                 let mut history = Vec::new();
                 if let Some(sys) = &system_prompt {
                     history.push(ChatMessage::system(sys.clone()));
@@ -351,6 +364,8 @@ impl Tool for ParallelDelegateTool {
                         format!("Timed out after {SUBTASK_TIMEOUT_SECS}s"),
                     ),
                 }
+                    })
+                    .await
             });
         }
 

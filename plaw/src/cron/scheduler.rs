@@ -205,18 +205,33 @@ async fn run_agent_job(
     };
     let model_override = job.model.clone();
 
+    // Root trace context for this cron fire. Every event emitted under
+    // `crate::agent::run` (LLM requests, tool calls, sub-agent spawns)
+    // picks up `trace_id` so the entire run is greppable in the runtime
+    // trace JSONL by `trace_id=<this uuid>`.
+    let cron_trace = crate::observability::trace_context::TraceContext::root();
+    tracing::debug!(
+        cron_job_id = %job.id,
+        trace_id = %cron_trace.trace_id,
+        "cron run starting under trace"
+    );
+
     let run_result = match job.session_target {
         SessionTarget::Main | SessionTarget::Isolated => {
-            crate::agent::run(
-                config.clone(),
-                Some(prefixed_prompt),
-                None,
-                model_override,
-                config.default_temperature,
-                vec![],
-                false,
-            )
-            .await
+            crate::observability::trace_context::CURRENT_TRACE
+                .scope(
+                    Some(cron_trace),
+                    crate::agent::run(
+                        config.clone(),
+                        Some(prefixed_prompt),
+                        None,
+                        model_override,
+                        config.default_temperature,
+                        vec![],
+                        false,
+                    ),
+                )
+                .await
         }
     };
 
