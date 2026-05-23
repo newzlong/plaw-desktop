@@ -3394,7 +3394,7 @@ impl ChannelConfig for LinqConfig {
 /// WATI WhatsApp Business API channel configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WatiConfig {
-    /// WATI API token (Bearer auth).
+    /// WATI API token (Bearer auth) used for OUTBOUND calls to WATI's REST API.
     pub api_token: String,
     /// WATI API base URL (default: https://live-mt-server.wati.io).
     #[serde(default = "default_wati_api_url")]
@@ -3405,6 +3405,20 @@ pub struct WatiConfig {
     /// Allowed phone numbers (E.164 format) or "*" for all.
     #[serde(default)]
     pub allowed_numbers: Vec<String>,
+    /// INBOUND shared secret for the `/wati` webhook endpoint. WATI does
+    /// not sign webhook callbacks, so plaw cannot verify origin
+    /// cryptographically; instead, configure this secret here AND on the
+    /// WATI dashboard's webhook URL as a query string or header (e.g.
+    /// append `?secret=<value>` to the URL, or configure an
+    /// `X-Webhook-Secret` header if WATI's UI allows). The handler then
+    /// requires the same value on every incoming POST.
+    ///
+    /// When `None` AND the gateway is bound to a non-loopback address,
+    /// the handler rejects all requests with 401 — that's the
+    /// secure-by-default invariant for this endpoint. Loopback-only
+    /// deployments (typical desktop use) work without a secret.
+    #[serde(default)]
+    pub webhook_secret: Option<String>,
 }
 
 fn default_wati_api_url() -> String {
