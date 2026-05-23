@@ -665,6 +665,26 @@ fn restore_required_secret_typed(
     }
 }
 
+fn mask_optional_secret_typed(value: &mut Option<crate::security::Secret>) {
+    if value.is_some() {
+        *value = Some(crate::security::Secret::from_wire(MASKED_SECRET.to_string()));
+    }
+}
+
+#[allow(clippy::ref_option)]
+fn restore_optional_secret_typed(
+    value: &mut Option<crate::security::Secret>,
+    current: &Option<crate::security::Secret>,
+) {
+    if value
+        .as_ref()
+        .map(|s| is_masked_secret(s.as_wire_str()))
+        .unwrap_or(false)
+    {
+        *value = current.clone();
+    }
+}
+
 fn restore_vec_secrets(values: &mut [String], current: &[String]) {
     for (idx, value) in values.iter_mut().enumerate() {
         if is_masked_secret(value) {
@@ -707,8 +727,8 @@ fn mask_sensitive_fields(config: &crate::config::Config) -> crate::config::Confi
         mask_required_secret_typed(&mut discord.bot_token);
     }
     if let Some(slack) = masked.channels_config.slack.as_mut() {
-        mask_required_secret(&mut slack.bot_token);
-        mask_optional_secret(&mut slack.app_token);
+        mask_required_secret_typed(&mut slack.bot_token);
+        mask_optional_secret_typed(&mut slack.app_token);
     }
     if let Some(mattermost) = masked.channels_config.mattermost.as_mut() {
         mask_required_secret(&mut mattermost.bot_token);
@@ -834,8 +854,8 @@ fn restore_masked_sensitive_fields(
         incoming.channels_config.slack.as_mut(),
         current.channels_config.slack.as_ref(),
     ) {
-        restore_required_secret(&mut incoming_ch.bot_token, &current_ch.bot_token);
-        restore_optional_secret(&mut incoming_ch.app_token, &current_ch.app_token);
+        restore_required_secret_typed(&mut incoming_ch.bot_token, &current_ch.bot_token);
+        restore_optional_secret_typed(&mut incoming_ch.app_token, &current_ch.app_token);
     }
     if let (Some(incoming_ch), Some(current_ch)) = (
         incoming.channels_config.mattermost.as_mut(),

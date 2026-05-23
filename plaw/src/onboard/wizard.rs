@@ -4076,11 +4076,11 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 }
 
                 config.slack = Some(SlackConfig {
-                    bot_token: token,
+                    bot_token: crate::security::Secret::from_wire(token),
                     app_token: if app_token.is_empty() {
                         None
                     } else {
-                        Some(app_token)
+                        Some(crate::security::Secret::from_wire(app_token))
                     },
                     channel_id: if channel.is_empty() {
                         None
