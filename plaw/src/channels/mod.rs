@@ -4084,20 +4084,30 @@ fn collect_configured_channels(
     }
 
     if let Some(ref mm) = config.channels_config.mattermost {
-        channels.push(ConfiguredChannel {
-            display_name: "Mattermost",
-            channel: Arc::new(
-                MattermostChannel::new(
-                    mm.url.clone(),
-                    mm.bot_token.clone(),
-                    mm.channel_id.clone(),
-                    mm.allowed_users.clone(),
-                    mm.thread_replies.unwrap_or(true),
-                    mm.effective_group_reply_mode().requires_mention(),
-                )
-                .with_group_reply_allowed_senders(mm.group_reply_allowed_sender_ids()),
-            ),
-        });
+        match mm.bot_token.reveal(&secret_store) {
+            Ok(bot_token) => {
+                channels.push(ConfiguredChannel {
+                    display_name: "Mattermost",
+                    channel: Arc::new(
+                        MattermostChannel::new(
+                            mm.url.clone(),
+                            bot_token,
+                            mm.channel_id.clone(),
+                            mm.allowed_users.clone(),
+                            mm.thread_replies.unwrap_or(true),
+                            mm.effective_group_reply_mode().requires_mention(),
+                        )
+                        .with_group_reply_allowed_senders(mm.group_reply_allowed_sender_ids()),
+                    ),
+                });
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "Failed to decrypt channels.mattermost.bot_token — Mattermost channel skipped"
+                );
+            }
+        }
     }
 
     if let Some(ref im) = config.channels_config.imessage {
@@ -4281,13 +4291,13 @@ fn collect_configured_channels(
                 );
                 channels.push(ConfiguredChannel {
                     display_name: "Feishu",
-                    channel: Arc::new(LarkChannel::from_config(lk)),
+                    channel: Arc::new(LarkChannel::from_config(lk, &secret_store)),
                 });
             }
         } else {
             channels.push(ConfiguredChannel {
                 display_name: "Lark",
-                channel: Arc::new(LarkChannel::from_lark_config(lk)),
+                channel: Arc::new(LarkChannel::from_lark_config(lk, &secret_store)),
             });
         }
     }
@@ -4296,7 +4306,7 @@ fn collect_configured_channels(
     if let Some(ref fs) = config.channels_config.feishu {
         channels.push(ConfiguredChannel {
             display_name: "Feishu",
-            channel: Arc::new(LarkChannel::from_feishu_config(fs)),
+            channel: Arc::new(LarkChannel::from_feishu_config(fs, &secret_store)),
         });
     }
 
@@ -9703,7 +9713,7 @@ BTC is currently around $65,000 based on latest tool output."#;
         let mut config = Config::default();
         config.channels_config.mattermost = Some(crate::config::schema::MattermostConfig {
             url: "https://mattermost.example.com".to_string(),
-            bot_token: "test-token".to_string(),
+            bot_token: crate::security::Secret::from_wire("test-token".to_string()),
             channel_id: Some("channel-1".to_string()),
             allowed_users: vec![],
             thread_replies: Some(true),

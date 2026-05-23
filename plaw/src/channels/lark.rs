@@ -371,9 +371,24 @@ impl LarkChannel {
         }
     }
 
+    /// Reveal a `Secret` field; logs + returns empty string on failure.
+    fn reveal_or_log(
+        secret: &crate::security::Secret,
+        store: &crate::security::SecretStore,
+        field: &str,
+    ) -> String {
+        secret.reveal(store).unwrap_or_else(|e| {
+            tracing::error!(error = %e, field, "Failed to decrypt Lark/Feishu secret field");
+            String::new()
+        })
+    }
+
     /// Build from `LarkConfig` using legacy compatibility:
     /// when `use_feishu=true`, this instance routes to Feishu endpoints.
-    pub fn from_config(config: &crate::config::schema::LarkConfig) -> Self {
+    pub fn from_config(
+        config: &crate::config::schema::LarkConfig,
+        store: &crate::security::SecretStore,
+    ) -> Self {
         let platform = if config.use_feishu {
             LarkPlatform::Feishu
         } else {
@@ -381,8 +396,12 @@ impl LarkChannel {
         };
         let mut ch = Self::new_with_platform(
             config.app_id.clone(),
-            config.app_secret.clone(),
-            config.verification_token.clone().unwrap_or_default(),
+            Self::reveal_or_log(&config.app_secret, store, "lark.app_secret"),
+            config
+                .verification_token
+                .as_ref()
+                .map(|s| Self::reveal_or_log(s, store, "lark.verification_token"))
+                .unwrap_or_default(),
             config.port,
             config.allowed_users.clone(),
             config.effective_group_reply_mode().requires_mention(),
@@ -394,11 +413,18 @@ impl LarkChannel {
         ch
     }
 
-    pub fn from_lark_config(config: &crate::config::schema::LarkConfig) -> Self {
+    pub fn from_lark_config(
+        config: &crate::config::schema::LarkConfig,
+        store: &crate::security::SecretStore,
+    ) -> Self {
         let mut ch = Self::new_with_platform(
             config.app_id.clone(),
-            config.app_secret.clone(),
-            config.verification_token.clone().unwrap_or_default(),
+            Self::reveal_or_log(&config.app_secret, store, "lark.app_secret"),
+            config
+                .verification_token
+                .as_ref()
+                .map(|s| Self::reveal_or_log(s, store, "lark.verification_token"))
+                .unwrap_or_default(),
             config.port,
             config.allowed_users.clone(),
             config.effective_group_reply_mode().requires_mention(),
@@ -410,11 +436,18 @@ impl LarkChannel {
         ch
     }
 
-    pub fn from_feishu_config(config: &crate::config::schema::FeishuConfig) -> Self {
+    pub fn from_feishu_config(
+        config: &crate::config::schema::FeishuConfig,
+        store: &crate::security::SecretStore,
+    ) -> Self {
         let mut ch = Self::new_with_platform(
             config.app_id.clone(),
-            config.app_secret.clone(),
-            config.verification_token.clone().unwrap_or_default(),
+            Self::reveal_or_log(&config.app_secret, store, "feishu.app_secret"),
+            config
+                .verification_token
+                .as_ref()
+                .map(|s| Self::reveal_or_log(s, store, "feishu.verification_token"))
+                .unwrap_or_default(),
             config.port,
             config.allowed_users.clone(),
             config.effective_group_reply_mode().requires_mention(),
@@ -1918,6 +1951,13 @@ fn should_respond_in_group(
 mod tests {
     use super::*;
 
+    /// Dummy SecretStore for tests that exercise `from_*_config(&cfg, &store)`.
+    /// Encryption disabled so `Secret::reveal` returns the wire form
+    /// (which test fixtures set as plaintext via `Secret::from_wire`).
+    fn dummy_store() -> crate::security::SecretStore {
+        crate::security::SecretStore::new(std::path::Path::new(""), false)
+    }
+
     fn with_bot_open_id(ch: LarkChannel, bot_open_id: &str) -> LarkChannel {
         ch.set_resolved_bot_open_id(Some(bot_open_id.to_string()));
         ch
@@ -2369,9 +2409,9 @@ mod tests {
         use crate::config::schema::{LarkConfig, LarkReceiveMode};
         let lc = LarkConfig {
             app_id: "cli_app123".into(),
-            app_secret: "secret456".into(),
+            app_secret: crate::security::Secret::from_wire("secret456".into()),
             encrypt_key: None,
-            verification_token: Some("vtoken789".into()),
+            verification_token: Some(crate::security::Secret::from_wire("vtoken789".into())),
             allowed_users: vec!["ou_user1".into(), "ou_user2".into()],
             mention_only: false,
             group_reply: None,
@@ -2384,8 +2424,8 @@ mod tests {
         let json = serde_json::to_string(&lc).unwrap();
         let parsed: LarkConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.app_id, "cli_app123");
-        assert_eq!(parsed.app_secret, "secret456");
-        assert_eq!(parsed.verification_token.as_deref(), Some("vtoken789"));
+        assert_eq!(parsed.app_secret.as_wire_str(), "secret456");
+        assert_eq!(parsed.verification_token.as_ref().map(|s| s.as_wire_str()), Some("vtoken789"));
         assert_eq!(parsed.allowed_users.len(), 2);
     }
 
@@ -2394,9 +2434,9 @@ mod tests {
         use crate::config::schema::{LarkConfig, LarkReceiveMode};
         let lc = LarkConfig {
             app_id: "app".into(),
-            app_secret: "secret".into(),
+            app_secret: crate::security::Secret::from_wire("secret".into()),
             encrypt_key: None,
-            verification_token: Some("tok".into()),
+            verification_token: Some(crate::security::Secret::from_wire("tok".into())),
             allowed_users: vec!["*".into()],
             mention_only: false,
             group_reply: None,
@@ -2409,7 +2449,7 @@ mod tests {
         let toml_str = toml::to_string(&lc).unwrap();
         let parsed: LarkConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed.app_id, "app");
-        assert_eq!(parsed.verification_token.as_deref(), Some("tok"));
+        assert_eq!(parsed.verification_token.as_ref().map(|s| s.as_wire_str()), Some("tok"));
         assert_eq!(parsed.allowed_users, vec!["*"]);
     }
 
@@ -2431,9 +2471,9 @@ mod tests {
 
         let cfg = LarkConfig {
             app_id: "cli_app123".into(),
-            app_secret: "secret456".into(),
+            app_secret: crate::security::Secret::from_wire("secret456".into()),
             encrypt_key: None,
-            verification_token: Some("vtoken789".into()),
+            verification_token: Some(crate::security::Secret::from_wire("vtoken789".into())),
             allowed_users: vec!["*".into()],
             mention_only: false,
             group_reply: None,
@@ -2444,7 +2484,7 @@ mod tests {
             max_draft_edits: 20,
         };
 
-        let ch = LarkChannel::from_config(&cfg);
+        let ch = LarkChannel::from_config(&cfg, &dummy_store());
 
         assert_eq!(ch.api_base(), LARK_BASE_URL);
         assert_eq!(ch.ws_base(), LARK_WS_BASE_URL);
@@ -2458,9 +2498,9 @@ mod tests {
 
         let cfg = LarkConfig {
             app_id: "cli_app123".into(),
-            app_secret: "secret456".into(),
+            app_secret: crate::security::Secret::from_wire("secret456".into()),
             encrypt_key: None,
-            verification_token: Some("vtoken789".into()),
+            verification_token: Some(crate::security::Secret::from_wire("vtoken789".into())),
             allowed_users: vec!["*".into()],
             mention_only: false,
             group_reply: None,
@@ -2471,7 +2511,7 @@ mod tests {
             max_draft_edits: 20,
         };
 
-        let ch = LarkChannel::from_lark_config(&cfg);
+        let ch = LarkChannel::from_lark_config(&cfg, &dummy_store());
 
         assert_eq!(ch.api_base(), LARK_BASE_URL);
         assert_eq!(ch.ws_base(), LARK_WS_BASE_URL);
@@ -2484,9 +2524,9 @@ mod tests {
 
         let cfg = FeishuConfig {
             app_id: "cli_feishu_app123".into(),
-            app_secret: "secret456".into(),
+            app_secret: crate::security::Secret::from_wire("secret456".into()),
             encrypt_key: None,
-            verification_token: Some("vtoken789".into()),
+            verification_token: Some(crate::security::Secret::from_wire("vtoken789".into())),
             allowed_users: vec!["*".into()],
             group_reply: None,
             receive_mode: LarkReceiveMode::Webhook,
@@ -2495,7 +2535,7 @@ mod tests {
             max_draft_edits: 20,
         };
 
-        let ch = LarkChannel::from_feishu_config(&cfg);
+        let ch = LarkChannel::from_feishu_config(&cfg, &dummy_store());
 
         assert_eq!(ch.api_base(), FEISHU_BASE_URL);
         assert_eq!(ch.ws_base(), FEISHU_WS_BASE_URL);
@@ -2659,9 +2699,9 @@ mod tests {
 
         let feishu_cfg = crate::config::schema::FeishuConfig {
             app_id: "cli_app123".into(),
-            app_secret: "secret456".into(),
+            app_secret: crate::security::Secret::from_wire("secret456".into()),
             encrypt_key: None,
-            verification_token: Some("vtoken789".into()),
+            verification_token: Some(crate::security::Secret::from_wire("vtoken789".into())),
             allowed_users: vec!["*".into()],
             group_reply: None,
             receive_mode: crate::config::schema::LarkReceiveMode::Webhook,
@@ -2669,7 +2709,7 @@ mod tests {
             draft_update_interval_ms: 3_000,
             max_draft_edits: 20,
         };
-        let ch_feishu = LarkChannel::from_feishu_config(&feishu_cfg);
+        let ch_feishu = LarkChannel::from_feishu_config(&feishu_cfg, &dummy_store());
         assert_eq!(
             ch_feishu.message_reaction_url("om_test_message_id"),
             "https://open.feishu.cn/open-apis/im/v1/messages/om_test_message_id/reactions"

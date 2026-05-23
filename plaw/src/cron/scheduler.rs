@@ -457,9 +457,20 @@ pub(crate) async fn deliver_announcement(
                 .mattermost
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("mattermost channel not configured"))?;
+            let plaw_dir = config
+                .config_path
+                .parent()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            let secret_store =
+                crate::security::SecretStore::new(&plaw_dir, config.secrets.encrypt);
+            let bot_token = mm
+                .bot_token
+                .reveal(&secret_store)
+                .context("decrypt channels.mattermost.bot_token for cron mattermost send")?;
             let channel = MattermostChannel::new(
                 mm.url.clone(),
-                mm.bot_token.clone(),
+                bot_token,
                 mm.channel_id.clone(),
                 mm.allowed_users.clone(),
                 mm.thread_replies.unwrap_or(true),

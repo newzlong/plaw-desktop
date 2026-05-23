@@ -2808,6 +2808,7 @@ pub struct SlackConfig {
     pub bot_token: crate::security::Secret,
     /// Slack app-level token for Socket Mode (xapp-...).
     pub app_token: Option<crate::security::Secret>,
+    // ── below this line: unchanged Slack fields preserved by PR #30 ──
     /// Optional channel ID to restrict the bot to a single channel.
     /// Omit (or set `"*"`) to listen across all accessible channels.
     pub channel_id: Option<String>,
@@ -2846,7 +2847,7 @@ pub struct MattermostConfig {
     /// Mattermost server URL (e.g. `"https://mattermost.example.com"`).
     pub url: String,
     /// Mattermost bot access token.
-    pub bot_token: String,
+    pub bot_token: crate::security::Secret,
     /// Optional channel ID to restrict the bot to a single channel.
     pub channel_id: Option<String>,
     /// Allowed Mattermost user IDs. Empty = deny all.
@@ -3236,13 +3237,13 @@ pub struct LarkConfig {
     /// App ID from Lark/Feishu developer console
     pub app_id: String,
     /// App Secret from Lark/Feishu developer console
-    pub app_secret: String,
+    pub app_secret: crate::security::Secret,
     /// Encrypt key for webhook message decryption (optional)
     #[serde(default)]
-    pub encrypt_key: Option<String>,
+    pub encrypt_key: Option<crate::security::Secret>,
     /// Verification token for webhook validation (optional)
     #[serde(default)]
-    pub verification_token: Option<String>,
+    pub verification_token: Option<crate::security::Secret>,
     /// Allowed user IDs or union IDs (empty = deny all, "*" = allow all)
     #[serde(default)]
     pub allowed_users: Vec<String>,
@@ -3302,13 +3303,13 @@ pub struct FeishuConfig {
     /// App ID from Feishu developer console
     pub app_id: String,
     /// App Secret from Feishu developer console
-    pub app_secret: String,
+    pub app_secret: crate::security::Secret,
     /// Encrypt key for webhook message decryption (optional)
     #[serde(default)]
-    pub encrypt_key: Option<String>,
+    pub encrypt_key: Option<crate::security::Secret>,
     /// Verification token for webhook validation (optional)
     #[serde(default)]
-    pub verification_token: Option<String>,
+    pub verification_token: Option<crate::security::Secret>,
     /// Allowed user IDs or union IDs (empty = deny all, "*" = allow all)
     #[serde(default)]
     pub allowed_users: Vec<String>,
@@ -4276,13 +4277,7 @@ fn decrypt_channel_secrets(
     // no eager decrypt needed; readers call `.reveal(&store)` on demand.
     // discord.bot_token migrated to `Secret` newtype — no eager decrypt.
     // slack.bot_token + slack.app_token migrated to `Secret` newtype.
-    if let Some(ref mut mattermost) = channels.mattermost {
-        decrypt_secret(
-            store,
-            &mut mattermost.bot_token,
-            "config.channels_config.mattermost.bot_token",
-        )?;
-    }
+    // mattermost.bot_token migrated to `Secret` newtype.
     if let Some(ref mut webhook) = channels.webhook {
         decrypt_optional_secret(
             store,
@@ -4355,23 +4350,7 @@ fn decrypt_channel_secrets(
             "config.channels_config.irc.sasl_password",
         )?;
     }
-    if let Some(ref mut lark) = channels.lark {
-        decrypt_secret(
-            store,
-            &mut lark.app_secret,
-            "config.channels_config.lark.app_secret",
-        )?;
-        decrypt_optional_secret(
-            store,
-            &mut lark.encrypt_key,
-            "config.channels_config.lark.encrypt_key",
-        )?;
-        decrypt_optional_secret(
-            store,
-            &mut lark.verification_token,
-            "config.channels_config.lark.verification_token",
-        )?;
-    }
+    // lark.{app_secret, encrypt_key, verification_token} migrated to `Secret` newtype.
     if let Some(ref mut dingtalk) = channels.dingtalk {
         decrypt_secret(
             store,
@@ -4417,13 +4396,7 @@ fn encrypt_channel_secrets(
     // this auto-encrypt pass is a no-op for it.
     // discord.bot_token migrated to `Secret` — no auto-encrypt pass.
     // slack.bot_token + slack.app_token migrated to `Secret` newtype.
-    if let Some(ref mut mattermost) = channels.mattermost {
-        encrypt_secret(
-            store,
-            &mut mattermost.bot_token,
-            "config.channels_config.mattermost.bot_token",
-        )?;
-    }
+    // mattermost.bot_token migrated to `Secret` newtype.
     if let Some(ref mut webhook) = channels.webhook {
         encrypt_optional_secret(
             store,
@@ -4496,23 +4469,7 @@ fn encrypt_channel_secrets(
             "config.channels_config.irc.sasl_password",
         )?;
     }
-    if let Some(ref mut lark) = channels.lark {
-        encrypt_secret(
-            store,
-            &mut lark.app_secret,
-            "config.channels_config.lark.app_secret",
-        )?;
-        encrypt_optional_secret(
-            store,
-            &mut lark.encrypt_key,
-            "config.channels_config.lark.encrypt_key",
-        )?;
-        encrypt_optional_secret(
-            store,
-            &mut lark.verification_token,
-            "config.channels_config.lark.verification_token",
-        )?;
-    }
+    // lark.{app_secret, encrypt_key, verification_token} migrated to `Secret` newtype.
     if let Some(ref mut dingtalk) = channels.dingtalk {
         encrypt_secret(
             store,
@@ -8852,9 +8809,9 @@ default_model = "legacy-model"
     async fn lark_config_serde() {
         let lc = LarkConfig {
             app_id: "cli_123456".into(),
-            app_secret: "secret_abc".into(),
-            encrypt_key: Some("encrypt_key".into()),
-            verification_token: Some("verify_token".into()),
+            app_secret: crate::security::Secret::from_wire("secret_abc".into()),
+            encrypt_key: Some(crate::security::Secret::from_wire("encrypt_key".into())),
+            verification_token: Some(crate::security::Secret::from_wire("verify_token".into())),
             allowed_users: vec!["user_123".into(), "user_456".into()],
             mention_only: false,
             group_reply: None,
@@ -8867,9 +8824,9 @@ default_model = "legacy-model"
         let json = serde_json::to_string(&lc).unwrap();
         let parsed: LarkConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.app_id, "cli_123456");
-        assert_eq!(parsed.app_secret, "secret_abc");
-        assert_eq!(parsed.encrypt_key.as_deref(), Some("encrypt_key"));
-        assert_eq!(parsed.verification_token.as_deref(), Some("verify_token"));
+        assert_eq!(parsed.app_secret.as_wire_str(), "secret_abc");
+        assert_eq!(parsed.encrypt_key.as_ref().map(|s| s.as_wire_str()), Some("encrypt_key"));
+        assert_eq!(parsed.verification_token.as_ref().map(|s| s.as_wire_str()), Some("verify_token"));
         assert_eq!(parsed.allowed_users.len(), 2);
         assert!(parsed.use_feishu);
     }
@@ -8878,9 +8835,9 @@ default_model = "legacy-model"
     async fn lark_config_toml_roundtrip() {
         let lc = LarkConfig {
             app_id: "cli_123456".into(),
-            app_secret: "secret_abc".into(),
-            encrypt_key: Some("encrypt_key".into()),
-            verification_token: Some("verify_token".into()),
+            app_secret: crate::security::Secret::from_wire("secret_abc".into()),
+            encrypt_key: Some(crate::security::Secret::from_wire("encrypt_key".into())),
+            verification_token: Some(crate::security::Secret::from_wire("verify_token".into())),
             allowed_users: vec!["*".into()],
             mention_only: false,
             group_reply: None,
@@ -8893,7 +8850,7 @@ default_model = "legacy-model"
         let toml_str = toml::to_string(&lc).unwrap();
         let parsed: LarkConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed.app_id, "cli_123456");
-        assert_eq!(parsed.app_secret, "secret_abc");
+        assert_eq!(parsed.app_secret.as_wire_str(), "secret_abc");
         assert!(!parsed.use_feishu);
     }
 
@@ -8955,9 +8912,9 @@ default_model = "legacy-model"
     async fn feishu_config_serde() {
         let fc = FeishuConfig {
             app_id: "cli_feishu_123".into(),
-            app_secret: "secret_abc".into(),
-            encrypt_key: Some("encrypt_key".into()),
-            verification_token: Some("verify_token".into()),
+            app_secret: crate::security::Secret::from_wire("secret_abc".into()),
+            encrypt_key: Some(crate::security::Secret::from_wire("encrypt_key".into())),
+            verification_token: Some(crate::security::Secret::from_wire("verify_token".into())),
             allowed_users: vec!["user_123".into(), "user_456".into()],
             group_reply: None,
             receive_mode: LarkReceiveMode::Websocket,
@@ -8968,9 +8925,9 @@ default_model = "legacy-model"
         let json = serde_json::to_string(&fc).unwrap();
         let parsed: FeishuConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.app_id, "cli_feishu_123");
-        assert_eq!(parsed.app_secret, "secret_abc");
-        assert_eq!(parsed.encrypt_key.as_deref(), Some("encrypt_key"));
-        assert_eq!(parsed.verification_token.as_deref(), Some("verify_token"));
+        assert_eq!(parsed.app_secret.as_wire_str(), "secret_abc");
+        assert_eq!(parsed.encrypt_key.as_ref().map(|s| s.as_wire_str()), Some("encrypt_key"));
+        assert_eq!(parsed.verification_token.as_ref().map(|s| s.as_wire_str()), Some("verify_token"));
         assert_eq!(parsed.allowed_users.len(), 2);
     }
 
@@ -8978,9 +8935,9 @@ default_model = "legacy-model"
     async fn feishu_config_toml_roundtrip() {
         let fc = FeishuConfig {
             app_id: "cli_feishu_123".into(),
-            app_secret: "secret_abc".into(),
-            encrypt_key: Some("encrypt_key".into()),
-            verification_token: Some("verify_token".into()),
+            app_secret: crate::security::Secret::from_wire("secret_abc".into()),
+            encrypt_key: Some(crate::security::Secret::from_wire("encrypt_key".into())),
+            verification_token: Some(crate::security::Secret::from_wire("verify_token".into())),
             allowed_users: vec!["*".into()],
             group_reply: None,
             receive_mode: LarkReceiveMode::Webhook,
@@ -8991,7 +8948,7 @@ default_model = "legacy-model"
         let toml_str = toml::to_string(&fc).unwrap();
         let parsed: FeishuConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed.app_id, "cli_feishu_123");
-        assert_eq!(parsed.app_secret, "secret_abc");
+        assert_eq!(parsed.app_secret.as_wire_str(), "secret_abc");
         assert_eq!(parsed.receive_mode, LarkReceiveMode::Webhook);
         assert_eq!(parsed.port, Some(9898));
     }

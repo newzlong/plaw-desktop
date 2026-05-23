@@ -731,7 +731,7 @@ fn mask_sensitive_fields(config: &crate::config::Config) -> crate::config::Confi
         mask_optional_secret_typed(&mut slack.app_token);
     }
     if let Some(mattermost) = masked.channels_config.mattermost.as_mut() {
-        mask_required_secret(&mut mattermost.bot_token);
+        mask_required_secret_typed(&mut mattermost.bot_token);
     }
     if let Some(webhook) = masked.channels_config.webhook.as_mut() {
         mask_optional_secret(&mut webhook.secret);
@@ -764,14 +764,14 @@ fn mask_sensitive_fields(config: &crate::config::Config) -> crate::config::Confi
         mask_optional_secret(&mut irc.sasl_password);
     }
     if let Some(lark) = masked.channels_config.lark.as_mut() {
-        mask_required_secret(&mut lark.app_secret);
-        mask_optional_secret(&mut lark.encrypt_key);
-        mask_optional_secret(&mut lark.verification_token);
+        mask_required_secret_typed(&mut lark.app_secret);
+        mask_optional_secret_typed(&mut lark.encrypt_key);
+        mask_optional_secret_typed(&mut lark.verification_token);
     }
     if let Some(feishu) = masked.channels_config.feishu.as_mut() {
-        mask_required_secret(&mut feishu.app_secret);
-        mask_optional_secret(&mut feishu.encrypt_key);
-        mask_optional_secret(&mut feishu.verification_token);
+        mask_required_secret_typed(&mut feishu.app_secret);
+        mask_optional_secret_typed(&mut feishu.encrypt_key);
+        mask_optional_secret_typed(&mut feishu.verification_token);
     }
     if let Some(dingtalk) = masked.channels_config.dingtalk.as_mut() {
         mask_required_secret(&mut dingtalk.client_secret);
@@ -861,7 +861,7 @@ fn restore_masked_sensitive_fields(
         incoming.channels_config.mattermost.as_mut(),
         current.channels_config.mattermost.as_ref(),
     ) {
-        restore_required_secret(&mut incoming_ch.bot_token, &current_ch.bot_token);
+        restore_required_secret_typed(&mut incoming_ch.bot_token, &current_ch.bot_token);
     }
     if let (Some(incoming_ch), Some(current_ch)) = (
         incoming.channels_config.webhook.as_mut(),
@@ -927,9 +927,9 @@ fn restore_masked_sensitive_fields(
         incoming.channels_config.lark.as_mut(),
         current.channels_config.lark.as_ref(),
     ) {
-        restore_required_secret(&mut incoming_ch.app_secret, &current_ch.app_secret);
-        restore_optional_secret(&mut incoming_ch.encrypt_key, &current_ch.encrypt_key);
-        restore_optional_secret(
+        restore_required_secret_typed(&mut incoming_ch.app_secret, &current_ch.app_secret);
+        restore_optional_secret_typed(&mut incoming_ch.encrypt_key, &current_ch.encrypt_key);
+        restore_optional_secret_typed(
             &mut incoming_ch.verification_token,
             &current_ch.verification_token,
         );
@@ -938,9 +938,9 @@ fn restore_masked_sensitive_fields(
         incoming.channels_config.feishu.as_mut(),
         current.channels_config.feishu.as_ref(),
     ) {
-        restore_required_secret(&mut incoming_ch.app_secret, &current_ch.app_secret);
-        restore_optional_secret(&mut incoming_ch.encrypt_key, &current_ch.encrypt_key);
-        restore_optional_secret(
+        restore_required_secret_typed(&mut incoming_ch.app_secret, &current_ch.app_secret);
+        restore_optional_secret_typed(&mut incoming_ch.encrypt_key, &current_ch.encrypt_key);
+        restore_optional_secret_typed(
             &mut incoming_ch.verification_token,
             &current_ch.verification_token,
         );
@@ -1080,9 +1080,9 @@ mod tests {
         cfg.channels_config.email = Some(email);
         cfg.channels_config.feishu = Some(crate::config::FeishuConfig {
             app_id: "cli_app_id".to_string(),
-            app_secret: "feishu-real-secret".to_string(),
-            encrypt_key: Some("feishu-encrypt-key".to_string()),
-            verification_token: Some("feishu-verify-token".to_string()),
+            app_secret: crate::security::Secret::from_wire("feishu-real-secret".to_string()),
+            encrypt_key: Some(crate::security::Secret::from_wire("feishu-encrypt-key".to_string())),
+            verification_token: Some(crate::security::Secret::from_wire("feishu-verify-token".to_string())),
             allowed_users: vec!["*".to_string()],
             group_reply: None,
             receive_mode: LarkReceiveMode::Webhook,
@@ -1133,10 +1133,10 @@ mod tests {
             .feishu
             .as_ref()
             .expect("feishu config should exist");
-        assert_eq!(masked_feishu.app_secret, MASKED_SECRET);
-        assert_eq!(masked_feishu.encrypt_key.as_deref(), Some(MASKED_SECRET));
+        assert_eq!(masked_feishu.app_secret.as_wire_str(), MASKED_SECRET);
+        assert_eq!(masked_feishu.encrypt_key.as_ref().map(|s| s.as_wire_str()), Some(MASKED_SECRET));
         assert_eq!(
-            masked_feishu.verification_token.as_deref(),
+            masked_feishu.verification_token.as_ref().map(|s| s.as_wire_str()),
             Some(MASKED_SECRET)
         );
     }
@@ -1166,9 +1166,9 @@ mod tests {
         current.channels_config.email = Some(email);
         current.channels_config.feishu = Some(crate::config::FeishuConfig {
             app_id: "cli_app_id".to_string(),
-            app_secret: "feishu-real-secret".to_string(),
-            encrypt_key: Some("feishu-encrypt-key".to_string()),
-            verification_token: Some("feishu-verify-token".to_string()),
+            app_secret: crate::security::Secret::from_wire("feishu-real-secret".to_string()),
+            encrypt_key: Some(crate::security::Secret::from_wire("feishu-encrypt-key".to_string())),
+            verification_token: Some(crate::security::Secret::from_wire("feishu-verify-token".to_string())),
             allowed_users: vec!["*".to_string()],
             group_reply: None,
             receive_mode: LarkReceiveMode::Webhook,
@@ -1230,13 +1230,13 @@ mod tests {
             .feishu
             .as_ref()
             .expect("feishu config should exist");
-        assert_eq!(restored_feishu.app_secret, "feishu-real-secret");
+        assert_eq!(restored_feishu.app_secret.as_wire_str(), "feishu-real-secret");
         assert_eq!(
-            restored_feishu.encrypt_key.as_deref(),
+            restored_feishu.encrypt_key.as_ref().map(|s| s.as_wire_str()),
             Some("feishu-encrypt-key")
         );
         assert_eq!(
-            restored_feishu.verification_token.as_deref(),
+            restored_feishu.verification_token.as_ref().map(|s| s.as_wire_str()),
             Some("feishu-verify-token")
         );
     }

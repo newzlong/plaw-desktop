@@ -49,7 +49,7 @@ use std::fmt;
 /// JsonSchema treats this as a plain string so config docs / Tauri
 /// IPC contracts don't expose the wrapper. Wire form is the user-facing
 /// value (encrypted or plaintext, depending on `[secrets] encrypt`).
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
 #[schemars(transparent)]
 pub struct Secret(String);
