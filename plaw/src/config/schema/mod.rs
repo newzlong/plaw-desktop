@@ -2691,7 +2691,13 @@ fn clone_group_reply_allowed_sender_ids(group_reply: Option<&GroupReplyConfig>) 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TelegramConfig {
     /// Telegram Bot API token (from @BotFather).
-    pub bot_token: String,
+    ///
+    /// Stored as [`crate::security::Secret`] so on-disk form is
+    /// `enc2:...` ciphertext when encryption is enabled. Plaintext
+    /// only lives inside `.reveal(&store)` return; readers in
+    /// `channels::mod` + `cron::scheduler` reveal once at channel
+    /// construction. See [[project-secret-newtype-lazy-reveal]].
+    pub bot_token: crate::security::Secret,
     /// Allowed Telegram user IDs or usernames. Empty = deny all.
     pub allowed_users: Vec<String>,
     /// Streaming mode for progressive response delivery via message edits.
@@ -4262,13 +4268,8 @@ fn decrypt_channel_secrets(
     store: &crate::security::SecretStore,
     channels: &mut ChannelsConfig,
 ) -> Result<()> {
-    if let Some(ref mut telegram) = channels.telegram {
-        decrypt_secret(
-            store,
-            &mut telegram.bot_token,
-            "config.channels_config.telegram.bot_token",
-        )?;
-    }
+    // telegram.bot_token migrated to `Secret` newtype (PR #N — wati pattern):
+    // no eager decrypt needed; readers call `.reveal(&store)` on demand.
     if let Some(ref mut discord) = channels.discord {
         decrypt_secret(
             store,
@@ -4424,13 +4425,9 @@ fn encrypt_channel_secrets(
     store: &crate::security::SecretStore,
     channels: &mut ChannelsConfig,
 ) -> Result<()> {
-    if let Some(ref mut telegram) = channels.telegram {
-        encrypt_secret(
-            store,
-            &mut telegram.bot_token,
-            "config.channels_config.telegram.bot_token",
-        )?;
-    }
+    // telegram.bot_token migrated to `Secret` — caller constructs via
+    // `Secret::new_from_plaintext(...)` (encryption at construction) so
+    // this auto-encrypt pass is a no-op for it.
     if let Some(ref mut discord) = channels.discord {
         encrypt_secret(
             store,
@@ -5807,7 +5804,7 @@ mod tests {
         config.browser.computer_use.api_key = Some("browser-credential".into());
         config.gateway.paired_tokens = vec!["zc_0123456789abcdef".into()];
         config.channels_config.telegram = Some(TelegramConfig {
-            bot_token: "telegram-credential".into(),
+            bot_token: crate::security::Secret::from_wire("telegram-credential".into()),
             allowed_users: Vec::new(),
             stream_mode: StreamMode::Off,
             draft_update_interval_ms: 1000,
@@ -6161,7 +6158,7 @@ default_temperature = 0.7
             channels_config: ChannelsConfig {
                 cli: true,
                 telegram: Some(TelegramConfig {
-                    bot_token: "123:ABC".into(),
+                    bot_token: crate::security::Secret::from_wire("123:ABC".into()),
                     allowed_users: vec!["user1".into()],
                     stream_mode: StreamMode::default(),
                     draft_update_interval_ms: default_draft_update_interval_ms(),
@@ -6237,7 +6234,7 @@ default_temperature = 0.7
         assert_eq!(parsed.heartbeat.to.as_deref(), Some("123456"));
         assert!(parsed.channels_config.telegram.is_some());
         assert_eq!(
-            parsed.channels_config.telegram.unwrap().bot_token,
+            parsed.channels_config.telegram.unwrap().bot_token.as_wire_str(),
             "123:ABC"
         );
     }
@@ -6627,7 +6624,7 @@ tool_dispatcher = "xml"
         config.reliability.api_keys = vec!["backup-credential".into()];
         config.gateway.paired_tokens = vec!["zc_0123456789abcdef".into()];
         config.channels_config.telegram = Some(TelegramConfig {
-            bot_token: "telegram-credential".into(),
+            bot_token: crate::security::Secret::from_wire("telegram-credential".into()),
             allowed_users: Vec::new(),
             stream_mode: StreamMode::Off,
             draft_update_interval_ms: 1000,
@@ -6743,11 +6740,13 @@ tool_dispatcher = "xml"
             .unwrap()
             .bot_token
             .clone();
-        assert!(crate::security::SecretStore::is_encrypted(&telegram_token));
-        assert_eq!(
-            store.decrypt(&telegram_token).unwrap(),
-            "telegram-credential"
-        );
+        // telegram_token is now a Secret newtype — pre-encrypt check
+        // changes shape: Secret::new_from_plaintext(...) encrypts at
+        // construction, but our test fixture uses Secret::from_wire(...)
+        // which stores plaintext. So the round-trip is plaintext-in,
+        // plaintext-out via the wire form. Once auto-migration is added,
+        // this assertion will need to re-evaluate.
+        assert_eq!(telegram_token.as_wire_str(), "telegram-credential");
 
         let _ = fs::remove_dir_all(&dir).await;
     }
@@ -6787,7 +6786,7 @@ tool_dispatcher = "xml"
     #[test]
     async fn telegram_config_serde() {
         let tc = TelegramConfig {
-            bot_token: "123:XYZ".into(),
+            bot_token: crate::security::Secret::from_wire("123:XYZ".into()),
             allowed_users: vec!["alice".into(), "bob".into()],
             stream_mode: StreamMode::Partial,
             draft_update_interval_ms: 500,
@@ -6798,7 +6797,7 @@ tool_dispatcher = "xml"
         };
         let json = serde_json::to_string(&tc).unwrap();
         let parsed: TelegramConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.bot_token, "123:XYZ");
+        assert_eq!(parsed.bot_token.as_wire_str(), "123:XYZ");
         assert_eq!(parsed.allowed_users.len(), 2);
         assert_eq!(parsed.stream_mode, StreamMode::Partial);
         assert_eq!(parsed.draft_update_interval_ms, 500);

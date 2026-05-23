@@ -43,7 +43,7 @@ mod tests {
     #[test]
     fn reexported_channel_configs_are_constructible() {
         let telegram = TelegramConfig {
-            bot_token: "token".into(),
+            bot_token: crate::security::Secret::from_wire("token".into()),
             allowed_users: vec!["alice".into()],
             stream_mode: StreamMode::default(),
             draft_update_interval_ms: 1000,

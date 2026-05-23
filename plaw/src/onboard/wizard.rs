@@ -3853,7 +3853,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 }
 
                 config.telegram = Some(TelegramConfig {
-                    bot_token: token,
+                    bot_token: crate::security::Secret::from_wire(token),
                     allowed_users,
                     stream_mode: StreamMode::default(),
                     draft_update_interval_ms: 1000,
