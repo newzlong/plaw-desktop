@@ -93,6 +93,17 @@ export default {
     channelId: 'Channel ID',
     appToken: 'App Token',
     channelName: '频道',
+    // WATI (WhatsApp 商业 API via WATI)
+    watiApiToken: 'API Token',
+    watiApiTokenHint: '在 WATI 后台 → API Docs → Live Server 获取',
+    watiApiUrl: 'API Base URL',
+    watiTenantId: 'Tenant ID（可选）',
+    watiTenantIdHint: '多渠道 WATI 才需要；不确定就留空',
+    watiAllowedNumbers: '允许的电话号码（E.164 格式，逗号分隔，"*" 代表全部）',
+    watiAllowedNumbersHint: '例如 +14155550100, +14155550101',
+    watiWebhookSecret: 'Webhook Secret（可选）',
+    watiWebhookSecretHint:
+      '非 loopback 部署必填。在 WATI webhook URL 上加 ?secret=<值> 传回。',
   },
 
   // Security
