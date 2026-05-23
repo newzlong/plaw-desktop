@@ -1,3 +1,4 @@
+use anyhow::Context as _;
 use crate::channels::{
     Channel, DiscordChannel, EmailChannel, MattermostChannel, QQChannel, SendMessage, SlackChannel,
     TelegramChannel,
@@ -377,8 +378,22 @@ pub(crate) async fn deliver_announcement(
                 .telegram
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("telegram channel not configured"))?;
+            // Build a SecretStore from the same config path the gateway uses;
+            // bot_token is a Secret newtype after PR #N — reveal once for this
+            // outbound send.
+            let plaw_dir = config
+                .config_path
+                .parent()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            let secret_store =
+                crate::security::SecretStore::new(&plaw_dir, config.secrets.encrypt);
+            let bot_token = tg
+                .bot_token
+                .reveal(&secret_store)
+                .context("decrypt channels.telegram.bot_token for cron telegram send")?;
             let channel = TelegramChannel::new(
-                tg.bot_token.clone(),
+                bot_token,
                 tg.allowed_users.clone(),
                 tg.mention_only,
             )

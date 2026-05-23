@@ -3994,8 +3994,21 @@ fn collect_configured_channels(
         crate::security::SecretStore::new(&secret_store_plaw_dir, config.secrets.encrypt);
 
     if let Some(ref tg) = config.channels_config.telegram {
+        let bot_token = match tg.bot_token.reveal(&secret_store) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "Failed to decrypt channels.telegram.bot_token — Telegram channel skipped"
+                );
+                String::new()
+            }
+        };
+        if bot_token.is_empty() {
+            // Skip this branch entirely on decrypt failure (logged above).
+        } else {
         let mut telegram = TelegramChannel::new(
-            tg.bot_token.clone(),
+            bot_token,
             tg.allowed_users.clone(),
             tg.effective_group_reply_mode().requires_mention(),
         )
@@ -4012,6 +4025,7 @@ fn collect_configured_channels(
             display_name: "Telegram",
             channel: Arc::new(telegram),
         });
+        }
     }
 
     if let Some(ref dc) = config.channels_config.discord {
