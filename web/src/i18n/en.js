@@ -93,6 +93,17 @@ export default {
     channelId: 'Channel ID',
     appToken: 'App Token',
     channelName: 'Channel',
+    // WATI (WhatsApp Business via WATI service)
+    watiApiToken: 'API Token',
+    watiApiTokenHint: 'From your WATI dashboard → API Docs → Live Server',
+    watiApiUrl: 'API Base URL',
+    watiTenantId: 'Tenant ID (optional)',
+    watiTenantIdHint: 'For multi-channel WATI setups; leave blank if unsure',
+    watiAllowedNumbers: 'Allowed Phone Numbers (E.164, comma separated, "*" for all)',
+    watiAllowedNumbersHint: 'e.g. +14155550100, +14155550101',
+    watiWebhookSecret: 'Webhook Secret (optional)',
+    watiWebhookSecretHint:
+      'Required for non-loopback deployments. Append as ?secret=<value> on the WATI webhook URL.',
   },
 
   // Security
