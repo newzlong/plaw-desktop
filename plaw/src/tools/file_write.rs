@@ -71,6 +71,18 @@ impl Tool for FileWriteTool {
         })
     }
 
+    fn idempotency(&self) -> super::traits::Idempotency {
+        // Same path + same content twice produces the same file content
+        // (timestamps differ but that's not part of the result contract).
+        super::traits::Idempotency::IdempotentByKey {
+            key: "path".to_string(),
+        }
+    }
+
+    fn side_effects(&self) -> super::traits::SideEffectClass {
+        super::traits::SideEffectClass::LocalWrite
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let path = args
             .get("path")
