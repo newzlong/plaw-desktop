@@ -566,7 +566,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 state.max_tool_iterations,
                 Some(cancel_token.clone()),
                 Some(delta_tx),    // delta streaming — enables real-time progress
-                None,              // hooks
+                state.hooks.as_deref(), // hooks — fires PreCompact / before_tool_call / on_after_tool_call etc.
                 &[],               // excluded tools
             );
             tokio::pin!(loop_fut);
