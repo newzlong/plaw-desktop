@@ -2805,9 +2805,9 @@ impl DiscordConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SlackConfig {
     /// Slack bot OAuth token (xoxb-...).
-    pub bot_token: String,
+    pub bot_token: crate::security::Secret,
     /// Slack app-level token for Socket Mode (xapp-...).
-    pub app_token: Option<String>,
+    pub app_token: Option<crate::security::Secret>,
     /// Optional channel ID to restrict the bot to a single channel.
     /// Omit (or set `"*"`) to listen across all accessible channels.
     pub channel_id: Option<String>,
@@ -4275,18 +4275,7 @@ fn decrypt_channel_secrets(
     // telegram.bot_token migrated to `Secret` newtype (PR #N — wati pattern):
     // no eager decrypt needed; readers call `.reveal(&store)` on demand.
     // discord.bot_token migrated to `Secret` newtype — no eager decrypt.
-    if let Some(ref mut slack) = channels.slack {
-        decrypt_secret(
-            store,
-            &mut slack.bot_token,
-            "config.channels_config.slack.bot_token",
-        )?;
-        decrypt_optional_secret(
-            store,
-            &mut slack.app_token,
-            "config.channels_config.slack.app_token",
-        )?;
-    }
+    // slack.bot_token + slack.app_token migrated to `Secret` newtype.
     if let Some(ref mut mattermost) = channels.mattermost {
         decrypt_secret(
             store,
@@ -4427,18 +4416,7 @@ fn encrypt_channel_secrets(
     // `Secret::new_from_plaintext(...)` (encryption at construction) so
     // this auto-encrypt pass is a no-op for it.
     // discord.bot_token migrated to `Secret` — no auto-encrypt pass.
-    if let Some(ref mut slack) = channels.slack {
-        encrypt_secret(
-            store,
-            &mut slack.bot_token,
-            "config.channels_config.slack.bot_token",
-        )?;
-        encrypt_optional_secret(
-            store,
-            &mut slack.app_token,
-            "config.channels_config.slack.app_token",
-        )?;
-    }
+    // slack.bot_token + slack.app_token migrated to `Secret` newtype.
     if let Some(ref mut mattermost) = channels.mattermost {
         encrypt_secret(
             store,

@@ -433,8 +433,19 @@ pub(crate) async fn deliver_announcement(
                 .slack
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("slack channel not configured"))?;
+            let plaw_dir = config
+                .config_path
+                .parent()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            let secret_store =
+                crate::security::SecretStore::new(&plaw_dir, config.secrets.encrypt);
+            let bot_token = sl
+                .bot_token
+                .reveal(&secret_store)
+                .context("decrypt channels.slack.bot_token for cron slack send")?;
             let channel = SlackChannel::new(
-                sl.bot_token.clone(),
+                bot_token,
                 sl.channel_id.clone(),
                 sl.allowed_users.clone(),
             );

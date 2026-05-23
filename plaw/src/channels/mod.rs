@@ -4057,20 +4057,30 @@ fn collect_configured_channels(
     }
 
     if let Some(ref sl) = config.channels_config.slack {
-        channels.push(ConfiguredChannel {
-            display_name: "Slack",
-            channel: Arc::new(
-                SlackChannel::new(
-                    sl.bot_token.clone(),
-                    sl.channel_id.clone(),
-                    sl.allowed_users.clone(),
-                )
-                .with_group_reply_policy(
-                    sl.effective_group_reply_mode().requires_mention(),
-                    sl.group_reply_allowed_sender_ids(),
-                ),
-            ),
-        });
+        match sl.bot_token.reveal(&secret_store) {
+            Ok(bot_token) => {
+                channels.push(ConfiguredChannel {
+                    display_name: "Slack",
+                    channel: Arc::new(
+                        SlackChannel::new(
+                            bot_token,
+                            sl.channel_id.clone(),
+                            sl.allowed_users.clone(),
+                        )
+                        .with_group_reply_policy(
+                            sl.effective_group_reply_mode().requires_mention(),
+                            sl.group_reply_allowed_sender_ids(),
+                        ),
+                    ),
+                });
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "Failed to decrypt channels.slack.bot_token — Slack channel skipped"
+                );
+            }
+        }
     }
 
     if let Some(ref mm) = config.channels_config.mattermost {
