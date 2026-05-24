@@ -371,37 +371,53 @@ impl LarkChannel {
         }
     }
 
-    /// Reveal a `Secret` field; logs + returns empty string on failure.
-    fn reveal_or_log(
-        secret: &crate::security::Secret,
+    /// Reveal an optional `Secret` field, treating None as empty string
+    /// (the prior verification_token behavior — empty token = "skip
+    /// signature check" in Lark/Feishu protocol). Surfaces decrypt
+    /// errors via `?` so callers get explicit failure, not silent
+    /// "channel constructed with garbage" (the old `reveal_or_log`
+    /// path violated plaw/CLAUDE.md §3.5 Fail Fast).
+    fn reveal_optional(
+        secret: Option<&crate::security::Secret>,
         store: &crate::security::SecretStore,
-        field: &str,
-    ) -> String {
-        secret.reveal(store).unwrap_or_else(|e| {
-            tracing::error!(error = %e, field, "Failed to decrypt Lark/Feishu secret field");
-            String::new()
-        })
+    ) -> anyhow::Result<String> {
+        match secret {
+            Some(s) => s.reveal(store),
+            None => Ok(String::new()),
+        }
     }
 
     /// Build from `LarkConfig` using legacy compatibility:
     /// when `use_feishu=true`, this instance routes to Feishu endpoints.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`SecretStore::decrypt`] error when
+    /// `app_secret` or `verification_token` can't be decrypted (key
+    /// file missing/corrupt, AEAD authentication failure, malformed
+    /// hex). Caller decides whether to skip the channel or abort
+    /// startup — see `channels::collect_configured_channels` for the
+    /// production policy (log + skip per-channel).
     pub fn from_config(
         config: &crate::config::schema::LarkConfig,
         store: &crate::security::SecretStore,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let platform = if config.use_feishu {
             LarkPlatform::Feishu
         } else {
             LarkPlatform::Lark
         };
+        let app_secret = config
+            .app_secret
+            .reveal(store)
+            .map_err(|e| e.context("decrypt lark.app_secret"))?;
+        let verification_token =
+            Self::reveal_optional(config.verification_token.as_ref(), store)
+                .map_err(|e| e.context("decrypt lark.verification_token"))?;
         let mut ch = Self::new_with_platform(
             config.app_id.clone(),
-            Self::reveal_or_log(&config.app_secret, store, "lark.app_secret"),
-            config
-                .verification_token
-                .as_ref()
-                .map(|s| Self::reveal_or_log(s, store, "lark.verification_token"))
-                .unwrap_or_default(),
+            app_secret,
+            verification_token,
             config.port,
             config.allowed_users.clone(),
             config.effective_group_reply_mode().requires_mention(),
@@ -410,21 +426,24 @@ impl LarkChannel {
         ch.group_reply_allowed_sender_ids =
             normalize_group_reply_allowed_sender_ids(config.group_reply_allowed_sender_ids());
         ch.receive_mode = config.receive_mode.clone();
-        ch
+        Ok(ch)
     }
 
     pub fn from_lark_config(
         config: &crate::config::schema::LarkConfig,
         store: &crate::security::SecretStore,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
+        let app_secret = config
+            .app_secret
+            .reveal(store)
+            .map_err(|e| e.context("decrypt lark.app_secret"))?;
+        let verification_token =
+            Self::reveal_optional(config.verification_token.as_ref(), store)
+                .map_err(|e| e.context("decrypt lark.verification_token"))?;
         let mut ch = Self::new_with_platform(
             config.app_id.clone(),
-            Self::reveal_or_log(&config.app_secret, store, "lark.app_secret"),
-            config
-                .verification_token
-                .as_ref()
-                .map(|s| Self::reveal_or_log(s, store, "lark.verification_token"))
-                .unwrap_or_default(),
+            app_secret,
+            verification_token,
             config.port,
             config.allowed_users.clone(),
             config.effective_group_reply_mode().requires_mention(),
@@ -433,21 +452,24 @@ impl LarkChannel {
         ch.group_reply_allowed_sender_ids =
             normalize_group_reply_allowed_sender_ids(config.group_reply_allowed_sender_ids());
         ch.receive_mode = config.receive_mode.clone();
-        ch
+        Ok(ch)
     }
 
     pub fn from_feishu_config(
         config: &crate::config::schema::FeishuConfig,
         store: &crate::security::SecretStore,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
+        let app_secret = config
+            .app_secret
+            .reveal(store)
+            .map_err(|e| e.context("decrypt feishu.app_secret"))?;
+        let verification_token =
+            Self::reveal_optional(config.verification_token.as_ref(), store)
+                .map_err(|e| e.context("decrypt feishu.verification_token"))?;
         let mut ch = Self::new_with_platform(
             config.app_id.clone(),
-            Self::reveal_or_log(&config.app_secret, store, "feishu.app_secret"),
-            config
-                .verification_token
-                .as_ref()
-                .map(|s| Self::reveal_or_log(s, store, "feishu.verification_token"))
-                .unwrap_or_default(),
+            app_secret,
+            verification_token,
             config.port,
             config.allowed_users.clone(),
             config.effective_group_reply_mode().requires_mention(),
@@ -456,7 +478,7 @@ impl LarkChannel {
         ch.group_reply_allowed_sender_ids =
             normalize_group_reply_allowed_sender_ids(config.group_reply_allowed_sender_ids());
         ch.receive_mode = config.receive_mode.clone();
-        ch
+        Ok(ch)
     }
 
     fn http_client(&self) -> reqwest::Client {
@@ -2484,7 +2506,7 @@ mod tests {
             max_draft_edits: 20,
         };
 
-        let ch = LarkChannel::from_config(&cfg, &dummy_store());
+        let ch = LarkChannel::from_config(&cfg, &dummy_store()).unwrap();
 
         assert_eq!(ch.api_base(), LARK_BASE_URL);
         assert_eq!(ch.ws_base(), LARK_WS_BASE_URL);
@@ -2511,7 +2533,7 @@ mod tests {
             max_draft_edits: 20,
         };
 
-        let ch = LarkChannel::from_lark_config(&cfg, &dummy_store());
+        let ch = LarkChannel::from_lark_config(&cfg, &dummy_store()).unwrap();
 
         assert_eq!(ch.api_base(), LARK_BASE_URL);
         assert_eq!(ch.ws_base(), LARK_WS_BASE_URL);
@@ -2535,7 +2557,7 @@ mod tests {
             max_draft_edits: 20,
         };
 
-        let ch = LarkChannel::from_feishu_config(&cfg, &dummy_store());
+        let ch = LarkChannel::from_feishu_config(&cfg, &dummy_store()).unwrap();
 
         assert_eq!(ch.api_base(), FEISHU_BASE_URL);
         assert_eq!(ch.ws_base(), FEISHU_WS_BASE_URL);
@@ -2709,7 +2731,7 @@ mod tests {
             draft_update_interval_ms: 3_000,
             max_draft_edits: 20,
         };
-        let ch_feishu = LarkChannel::from_feishu_config(&feishu_cfg, &dummy_store());
+        let ch_feishu = LarkChannel::from_feishu_config(&feishu_cfg, &dummy_store()).unwrap();
         assert_eq!(
             ch_feishu.message_reaction_url("om_test_message_id"),
             "https://open.feishu.cn/open-apis/im/v1/messages/om_test_message_id/reactions"

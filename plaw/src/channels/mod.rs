@@ -4283,25 +4283,43 @@ fn collect_configured_channels(
                 tracing::warn!(
                     "Using legacy [channels_config.lark].use_feishu=true compatibility path; prefer [channels_config.feishu]."
                 );
-                channels.push(ConfiguredChannel {
-                    display_name: "Feishu",
-                    channel: Arc::new(LarkChannel::from_config(lk, &secret_store)),
-                });
+                match LarkChannel::from_config(lk, &secret_store) {
+                    Ok(ch) => channels.push(ConfiguredChannel {
+                        display_name: "Feishu",
+                        channel: Arc::new(ch),
+                    }),
+                    Err(e) => tracing::error!(
+                        error = %e,
+                        "Failed to construct Feishu channel (legacy lark.use_feishu path) — skipped"
+                    ),
+                }
             }
         } else {
-            channels.push(ConfiguredChannel {
-                display_name: "Lark",
-                channel: Arc::new(LarkChannel::from_lark_config(lk, &secret_store)),
-            });
+            match LarkChannel::from_lark_config(lk, &secret_store) {
+                Ok(ch) => channels.push(ConfiguredChannel {
+                    display_name: "Lark",
+                    channel: Arc::new(ch),
+                }),
+                Err(e) => tracing::error!(
+                    error = %e,
+                    "Failed to construct Lark channel — skipped"
+                ),
+            }
         }
     }
 
     #[cfg(feature = "channel-lark")]
     if let Some(ref fs) = config.channels_config.feishu {
-        channels.push(ConfiguredChannel {
-            display_name: "Feishu",
-            channel: Arc::new(LarkChannel::from_feishu_config(fs, &secret_store)),
-        });
+        match LarkChannel::from_feishu_config(fs, &secret_store) {
+            Ok(ch) => channels.push(ConfiguredChannel {
+                display_name: "Feishu",
+                channel: Arc::new(ch),
+            }),
+            Err(e) => tracing::error!(
+                error = %e,
+                "Failed to construct Feishu channel — skipped"
+            ),
+        }
     }
 
     #[cfg(not(feature = "channel-lark"))]
