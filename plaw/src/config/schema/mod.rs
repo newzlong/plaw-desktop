@@ -43,6 +43,22 @@ use tokio::fs::File;
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
 
+/// Default provider written to `Config::default()` when no `config.toml`
+/// exists. Aligned with plaw/CLAUDE.md §"AI 模型配置" — DeepSeek V4 Pro
+/// is the current China-direct recommended default. Per
+/// [[project-model-agnostic-invariant]] this is a value not a code
+/// branch: users override via config file with zero code changes.
+///
+/// Also used by `apply_env_overrides` as the "untouched fallback"
+/// marker — the legacy `PROVIDER` env var only overrides when
+/// `default_provider` still matches this fallback (i.e. user hasn't
+/// explicitly chosen a different provider in their config).
+pub const DEFAULT_PROVIDER_FALLBACK: &str = "deepseek";
+
+/// Default model paired with `DEFAULT_PROVIDER_FALLBACK`. Override
+/// independently via `default_model` in config.toml.
+pub const DEFAULT_MODEL_FALLBACK: &str = "deepseek-v4-pro";
+
 
 // ── Top-level config ──────────────────────────────────────────────
 
@@ -3879,9 +3895,18 @@ impl Default for Config {
             config_path: plaw_dir.join("config.toml"),
             api_key: None,
             api_url: None,
-            default_provider: Some("openrouter".to_string()),
+            // Default provider/model align with plaw/CLAUDE.md §"AI 模型配置":
+            // DeepSeek V4 Pro is the current recommended default (China-direct,
+            // no proxy needed, strongest domestic model). This is the fallback
+            // when config.toml has no [default_provider]; per
+            // [[project-model-agnostic-invariant]] users can override to any
+            // registered provider via config file with no code change.
+            // Constants live at module scope so `apply_env_overrides` knows
+            // which value is the "untouched fallback" marker (legacy
+            // PROVIDER env var only overrides the fallback, not user choice).
+            default_provider: Some(DEFAULT_PROVIDER_FALLBACK.to_string()),
             provider_api: None,
-            default_model: Some("anthropic/claude-sonnet-4.6".to_string()),
+            default_model: Some(DEFAULT_MODEL_FALLBACK.to_string()),
             model_providers: HashMap::new(),
             provider: ProviderConfig::default(),
             default_temperature: 0.7,
@@ -5210,9 +5235,16 @@ impl Config {
                 self.default_provider = Some(provider);
             }
         } else if let Ok(provider) = std::env::var("PROVIDER") {
+            // Legacy `PROVIDER` only overrides when the config still
+            // holds the untouched fallback (a fresh `Config::default()`
+            // with no user-set `default_provider`). Compare against the
+            // single source of truth so changing `DEFAULT_PROVIDER_FALLBACK`
+            // automatically updates this fallback-marker check.
             let should_apply_legacy_provider =
                 self.default_provider.as_deref().map_or(true, |configured| {
-                    configured.trim().eq_ignore_ascii_case("openrouter")
+                    configured
+                        .trim()
+                        .eq_ignore_ascii_case(DEFAULT_PROVIDER_FALLBACK)
                 });
             if should_apply_legacy_provider && !provider.is_empty() {
                 self.default_provider = Some(provider);
@@ -5708,8 +5740,8 @@ mod tests {
     #[test]
     async fn config_default_has_sane_values() {
         let c = Config::default();
-        assert_eq!(c.default_provider.as_deref(), Some("openrouter"));
-        assert!(c.default_model.as_deref().unwrap().contains("claude"));
+        assert_eq!(c.default_provider.as_deref(), Some(DEFAULT_PROVIDER_FALLBACK));
+        assert_eq!(c.default_model.as_deref(), Some(DEFAULT_MODEL_FALLBACK));
         assert!((c.default_temperature - 0.7).abs() < f64::EPSILON);
         assert!(c.api_key.is_none());
         assert!(!c.skills.open_skills_enabled);
