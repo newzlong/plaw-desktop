@@ -15,7 +15,7 @@
           :label="t('provider.apiKey')"
           type="password"
           :placeholder="apiKeyEncrypted && !form.apiKey ? t('provider.apiKeyEncrypted') : 'sk-...'"
-          :hint="form.provider.startsWith('kimi') ? 'Kimi API Key (sk-...)' : ''"
+          :hint="apiKeyHint"
           class="mt-4"
           @input="apiKeyEncrypted = false"
         />
@@ -97,7 +97,10 @@ import { useI18n } from '../composables/useI18n'
 
 const { t } = useI18n()
 
-const form = ref({ provider: 'kimi-coder', apiKey: '', baseUrl: '', model: '', proxy: '' })
+// Default provider switched from kimi-coder → deepseek (2026-05-24, user
+// request). DeepSeek V4 Pro is currently the strongest China-direct model
+// per plaw/CLAUDE.md §"AI 模型配置". Keep `default_temperature = 0.7`.
+const form = ref({ provider: 'deepseek', apiKey: '', baseUrl: '', model: '', proxy: '' })
 const apiKeyEncrypted = ref(false) // API Key exists in config but encrypted by Plaw
 const showProxy = ref(false)
 const saving = ref(false)
@@ -109,17 +112,43 @@ const testing = ref(false)
 const testMsg = ref('')
 const testOk = ref(false)
 
+// DeepSeek is the recommended default; Kimi variants still supported because
+// many users have existing Kimi configs. Order = display order.
 const providerOptions = [
-  { label: 'Kimi Coder K2.5 (Default)', value: 'kimi-coder' },
-  { label: 'Kimi K2.5 (Moonshot)', value: 'kimi-moonshot' },
+  { label: 'DeepSeek V4 Pro (Default)', value: 'deepseek' },
   { label: 'Anthropic (Claude)', value: 'anthropic' },
   { label: 'OpenAI', value: 'openai' },
+  { label: 'Kimi Coder K2.5', value: 'kimi-coder' },
+  { label: 'Kimi K2.5 (Moonshot)', value: 'kimi-moonshot' },
   { label: 'OpenRouter', value: 'openrouter' },
   { label: 'Ollama (Local)', value: 'ollama' },
   { label: 'Custom URL', value: 'custom' },
 ]
 
+// PROVIDER_PRESETS maps a UI-side selection key to the on-disk
+// `default_provider` + `default_model` pair plaw writes to config.toml.
+// Generalized from the old `KIMI_PROVIDERS` map so DeepSeek (and any
+// future preset) plugs in the same way — no Kimi-special branching.
+//
+// Keys without a preset entry pass through verbatim (provider name = key).
+const PROVIDER_PRESETS = {
+  deepseek: { url: 'deepseek', model: 'deepseek-v4-pro' },
+  'kimi-coder': { url: 'anthropic-custom:https://api.kimi.com/coding', model: 'k2p5' },
+  'kimi-moonshot': { url: 'anthropic-custom:https://api.moonshot.cn', model: 'kimi-k2.5' },
+}
+
+// Reverse map used to detect "which preset key does this on-disk URL
+// correspond to?" Built once from PROVIDER_PRESETS so adding a preset
+// auto-extends detection.
+const URL_TO_PRESET_KEY = Object.fromEntries(
+  Object.entries(PROVIDER_PRESETS).map(([key, { url }]) => [url, key]),
+)
+
 const MODELS = {
+  deepseek: [
+    { label: 'DeepSeek V4 Pro', value: 'deepseek-v4-pro' },
+    { label: 'DeepSeek V4 Chat', value: 'deepseek-chat' },
+  ],
   'kimi-coder': [
     { label: 'Kimi K2.5', value: 'k2p5' },
   ],
@@ -138,18 +167,24 @@ const MODELS = {
 
 const modelOptions = computed(() => MODELS[form.value.provider] || [])
 
+// Show provider-specific API key hints without per-provider if-chains in
+// the template. Adding a new hint = one entry here.
+const API_KEY_HINTS = {
+  deepseek: 'DeepSeek API Key (sk-...)',
+  'kimi-coder': 'Kimi API Key (sk-...)',
+  'kimi-moonshot': 'Kimi API Key (sk-...)',
+  anthropic: 'Anthropic API Key (sk-ant-...)',
+  openai: 'OpenAI API Key (sk-...)',
+}
+const apiKeyHint = computed(() => API_KEY_HINTS[form.value.provider] || '')
+
 onMounted(async () => {
   try {
     const cfg = await readConfig()
     if (cfg.default_provider) {
-      // Detect Kimi provider formats
-      if (cfg.default_provider.includes('api.kimi.com/coding')) {
-        form.value.provider = 'kimi-coder'
-      } else if (cfg.default_provider.includes('moonshot.cn')) {
-        form.value.provider = 'kimi-moonshot'
-      } else {
-        form.value.provider = cfg.default_provider
-      }
+      // Auto-detect: does the on-disk URL match a preset? Otherwise use
+      // the raw provider name. Generalized over PROVIDER_PRESETS.
+      form.value.provider = URL_TO_PRESET_KEY[cfg.default_provider] || cfg.default_provider
     }
     if (cfg.api_key) {
       if (String(cfg.api_key).startsWith('enc2:')) {
@@ -173,22 +208,23 @@ async function save() {
   try {
     const cfg = {}
     try { Object.assign(cfg, await readConfig()) } catch {}
-    const KIMI_PROVIDERS = {
-      'kimi-coder': { url: 'anthropic-custom:https://api.kimi.com/coding', model: 'k2p5' },
-      'kimi-moonshot': { url: 'anthropic-custom:https://api.moonshot.cn', model: 'kimi-k2.5' },
-    }
-    const kimiCfg = KIMI_PROVIDERS[form.value.provider]
-    cfg.default_provider = kimiCfg ? kimiCfg.url : form.value.provider
+    const preset = PROVIDER_PRESETS[form.value.provider]
+    cfg.default_provider = preset ? preset.url : form.value.provider
     // Only overwrite api_key if user entered a new one (not encrypted placeholder)
     if (form.value.apiKey) {
       cfg.api_key = form.value.apiKey
     }
-    cfg.default_model = kimiCfg ? kimiCfg.model : form.value.model
+    // Preset's default model wins when user didn't override; otherwise
+    // honor the model picker selection (or free-form input for custom).
+    cfg.default_model = form.value.model || (preset ? preset.model : '')
     cfg.default_temperature = 0.7
-    if (kimiCfg) {
+    // Anthropic-format providers (Kimi variants) need reasoning_level wiring;
+    // DeepSeek + native providers don't. Detect via URL prefix to avoid
+    // per-key if-chains.
+    if (preset && preset.url.startsWith('anthropic-custom:')) {
       cfg.provider = { reasoning_level: 'medium' }
     }
-    if (!kimiCfg && form.value.baseUrl) cfg.provider_api = form.value.baseUrl
+    if (!preset && form.value.baseUrl) cfg.provider_api = form.value.baseUrl
     if (form.value.proxy) {
       cfg.proxy = { https_proxy: form.value.proxy, http_proxy: form.value.proxy }
     } else if (!cfg.proxy || !String(cfg.proxy?.https_proxy || '').startsWith('enc2:')) {

@@ -135,13 +135,17 @@ const form = ref({
   system_prompt: '', max_iterations: '25', tools: [],
 })
 
+// Order = display order. DeepSeek comes after "Default (inherit)" because
+// `''` means "use the global default_provider" — most users want that.
+// DeepSeek is the recommended explicit override (matches ProviderConfig
+// + SetupWizard default selection 2026-05-24).
 const providerOptions = [
   { label: 'Default (inherit)', value: '' },
-  { label: 'Kimi Coder', value: 'anthropic-custom:https://api.kimi.com/coding' },
-  { label: 'Kimi Moonshot', value: 'anthropic-custom:https://api.moonshot.cn' },
+  { label: 'DeepSeek', value: 'deepseek' },
   { label: 'Anthropic', value: 'anthropic' },
   { label: 'OpenAI', value: 'openai' },
-  { label: 'DeepSeek', value: 'deepseek' },
+  { label: 'Kimi Coder', value: 'anthropic-custom:https://api.kimi.com/coding' },
+  { label: 'Kimi Moonshot', value: 'anthropic-custom:https://api.moonshot.cn' },
   { label: 'OpenRouter', value: 'openrouter' },
 ]
 
