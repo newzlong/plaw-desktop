@@ -27,6 +27,34 @@ pub fn name_and_presence<T: traits::ChannelConfig>(channel: Option<&T>) -> (&'st
     (T::name(), channel.is_some())
 }
 
+/// Build a [`crate::security::SecretStore`] from the same plaw_dir +
+/// encryption flag that the gateway uses.
+///
+/// Replaces a 5-line `let plaw_dir = config.config_path.parent()...;
+/// let store = SecretStore::new(&plaw_dir, config.secrets.encrypt);`
+/// idiom that had accumulated in 5 production call sites
+/// (channels::collect_configured_channels, the 4 cron::scheduler
+/// delivery arms). Each call site reduces to one line:
+///
+/// ```ignore
+/// let secret_store = crate::config::secret_store_for(config);
+/// let token = some_secret_field.reveal(&secret_store)?;
+/// ```
+///
+/// SecretStore::new is cheap (just a PathBuf + bool), so we don't
+/// memoize / share an instance — each Secret-reading scope builds
+/// its own. The gateway's AppState still caches an `Arc<SecretStore>`
+/// because it serves many concurrent handlers; everyone else uses
+/// this helper.
+pub fn secret_store_for(config: &Config) -> crate::security::SecretStore {
+    let plaw_dir = config
+        .config_path
+        .parent()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    crate::security::SecretStore::new(&plaw_dir, config.secrets.encrypt)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

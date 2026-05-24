@@ -3982,16 +3982,10 @@ fn collect_configured_channels(
     let _ = matrix_skip_context;
     let mut channels = Vec::new();
 
-    // SecretStore for Secret-newtype reveals. Built from config_path so
-    // we don't have to thread the store through every caller. Matches
-    // the pattern in `make_app_state` (gateway/mod.rs).
-    let secret_store_plaw_dir = config
-        .config_path
-        .parent()
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-    let secret_store =
-        crate::security::SecretStore::new(&secret_store_plaw_dir, config.secrets.encrypt);
+    // SecretStore for Secret-newtype reveals. The helper handles
+    // plaw_dir extraction + encrypt-flag wiring (extracted 2026-05-24
+    // when 5 call sites had drifted into the same boilerplate).
+    let secret_store = crate::config::secret_store_for(config);
 
     if let Some(ref tg) = config.channels_config.telegram {
         let bot_token = match tg.bot_token.reveal(&secret_store) {
