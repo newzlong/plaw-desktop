@@ -381,13 +381,7 @@ pub(crate) async fn deliver_announcement(
             // Build a SecretStore from the same config path the gateway uses;
             // bot_token is a Secret newtype after PR #N — reveal once for this
             // outbound send.
-            let plaw_dir = config
-                .config_path
-                .parent()
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-            let secret_store =
-                crate::security::SecretStore::new(&plaw_dir, config.secrets.encrypt);
+            let secret_store = crate::config::secret_store_for(config);
             let bot_token = tg
                 .bot_token
                 .reveal(&secret_store)
@@ -406,13 +400,7 @@ pub(crate) async fn deliver_announcement(
                 .discord
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("discord channel not configured"))?;
-            let plaw_dir = config
-                .config_path
-                .parent()
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-            let secret_store =
-                crate::security::SecretStore::new(&plaw_dir, config.secrets.encrypt);
+            let secret_store = crate::config::secret_store_for(config);
             let bot_token = dc
                 .bot_token
                 .reveal(&secret_store)
@@ -433,13 +421,7 @@ pub(crate) async fn deliver_announcement(
                 .slack
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("slack channel not configured"))?;
-            let plaw_dir = config
-                .config_path
-                .parent()
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-            let secret_store =
-                crate::security::SecretStore::new(&plaw_dir, config.secrets.encrypt);
+            let secret_store = crate::config::secret_store_for(config);
             let bot_token = sl
                 .bot_token
                 .reveal(&secret_store)
@@ -457,13 +439,7 @@ pub(crate) async fn deliver_announcement(
                 .mattermost
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("mattermost channel not configured"))?;
-            let plaw_dir = config
-                .config_path
-                .parent()
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-            let secret_store =
-                crate::security::SecretStore::new(&plaw_dir, config.secrets.encrypt);
+            let secret_store = crate::config::secret_store_for(config);
             let bot_token = mm
                 .bot_token
                 .reveal(&secret_store)
