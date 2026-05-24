@@ -478,19 +478,42 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
             })
         });
 
-    // WhatsApp channel (if configured)
+    // WhatsApp channel (if configured). access_token/verify_token are
+    // `Secret` newtypes — reveal once at channel construction; the channel
+    // stores the plaintext for outbound API calls. On decrypt failure the
+    // channel is left None (Fail Fast §3.5 — WhatsApp gateway disabled
+    // rather than silently sending with an empty token).
     let whatsapp_channel: Option<Arc<WhatsAppChannel>> = config
         .channels_config
         .whatsapp
         .as_ref()
         .filter(|wa| wa.is_cloud_config())
-        .map(|wa| {
-            Arc::new(WhatsAppChannel::new(
-                wa.access_token.clone().unwrap_or_default(),
-                wa.phone_number_id.clone().unwrap_or_default(),
-                wa.verify_token.clone().unwrap_or_default(),
-                wa.allowed_numbers.clone(),
-            ))
+        .and_then(|wa| {
+            let access_res = wa
+                .access_token
+                .as_ref()
+                .expect("is_cloud_config guarantees access_token Some")
+                .reveal(secret_store.as_ref());
+            let verify_res = wa
+                .verify_token
+                .as_ref()
+                .expect("is_cloud_config guarantees verify_token Some")
+                .reveal(secret_store.as_ref());
+            match (access_res, verify_res) {
+                (Ok(access_token), Ok(verify_token)) => Some(Arc::new(WhatsAppChannel::new(
+                    access_token,
+                    wa.phone_number_id.clone().unwrap_or_default(),
+                    verify_token,
+                    wa.allowed_numbers.clone(),
+                ))),
+                (Err(e), _) | (_, Err(e)) => {
+                    tracing::error!(
+                        error = %e,
+                        "Failed to decrypt WhatsApp secret — WhatsApp gateway disabled"
+                    );
+                    None
+                }
+            }
         });
 
     // WhatsApp app secret for webhook signature verification
@@ -502,13 +525,24 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
             (!secret.is_empty()).then(|| secret.to_owned())
         })
         .or_else(|| {
-            config.channels_config.whatsapp.as_ref().and_then(|wa| {
-                wa.app_secret
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|secret| !secret.is_empty())
-                    .map(ToOwned::to_owned)
-            })
+            config
+                .channels_config
+                .whatsapp
+                .as_ref()
+                .and_then(|wa| wa.app_secret.as_ref())
+                .and_then(|secret| match secret.reveal(secret_store.as_ref()) {
+                    Ok(plain) => {
+                        let trimmed = plain.trim();
+                        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "Failed to decrypt channels.whatsapp.app_secret — webhook signature verification disabled"
+                        );
+                        None
+                    }
+                })
         })
         .map(Arc::from);
 

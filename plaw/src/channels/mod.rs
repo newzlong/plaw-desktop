@@ -4163,15 +4163,35 @@ fn collect_configured_channels(
             "cloud" => {
                 // Cloud API mode: requires phone_number_id, access_token, verify_token
                 if wa.is_cloud_config() {
-                    channels.push(ConfiguredChannel {
-                        display_name: "WhatsApp",
-                        channel: Arc::new(WhatsAppChannel::new(
-                            wa.access_token.clone().unwrap_or_default(),
-                            wa.phone_number_id.clone().unwrap_or_default(),
-                            wa.verify_token.clone().unwrap_or_default(),
-                            wa.allowed_numbers.clone(),
-                        )),
-                    });
+                    let access_token_res = wa
+                        .access_token
+                        .as_ref()
+                        .expect("is_cloud_config guarantees access_token Some")
+                        .reveal(&secret_store);
+                    let verify_token_res = wa
+                        .verify_token
+                        .as_ref()
+                        .expect("is_cloud_config guarantees verify_token Some")
+                        .reveal(&secret_store);
+                    match (access_token_res, verify_token_res) {
+                        (Ok(access_token), Ok(verify_token)) => {
+                            channels.push(ConfiguredChannel {
+                                display_name: "WhatsApp",
+                                channel: Arc::new(WhatsAppChannel::new(
+                                    access_token,
+                                    wa.phone_number_id.clone().unwrap_or_default(),
+                                    verify_token,
+                                    wa.allowed_numbers.clone(),
+                                )),
+                            });
+                        }
+                        (Err(e), _) | (_, Err(e)) => {
+                            tracing::error!(
+                                error = %e,
+                                "Failed to decrypt WhatsApp secret — channel skipped"
+                            );
+                        }
+                    }
                 } else {
                     tracing::warn!("WhatsApp Cloud API configured but missing required fields (phone_number_id, access_token, verify_token)");
                 }
