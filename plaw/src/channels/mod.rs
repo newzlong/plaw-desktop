@@ -4113,21 +4113,31 @@ fn collect_configured_channels(
 
     #[cfg(feature = "channel-matrix")]
     if let Some(ref mx) = config.channels_config.matrix {
-        channels.push(ConfiguredChannel {
-            display_name: "Matrix",
-            channel: Arc::new(
-                MatrixChannel::new_with_session_hint_and_plaw_dir(
-                    mx.homeserver.clone(),
-                    mx.access_token.clone(),
-                    mx.room_id.clone(),
-                    mx.allowed_users.clone(),
-                    mx.user_id.clone(),
-                    mx.device_id.clone(),
-                    config.config_path.parent().map(|path| path.to_path_buf()),
-                )
-                .with_mention_only(mx.mention_only),
-            ),
-        });
+        match mx.access_token.reveal(&secret_store) {
+            Ok(access_token) => {
+                channels.push(ConfiguredChannel {
+                    display_name: "Matrix",
+                    channel: Arc::new(
+                        MatrixChannel::new_with_session_hint_and_plaw_dir(
+                            mx.homeserver.clone(),
+                            access_token,
+                            mx.room_id.clone(),
+                            mx.allowed_users.clone(),
+                            mx.user_id.clone(),
+                            mx.device_id.clone(),
+                            config.config_path.parent().map(|path| path.to_path_buf()),
+                        )
+                        .with_mention_only(mx.mention_only),
+                    ),
+                });
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "Failed to decrypt channels.matrix.access_token — Matrix channel skipped"
+                );
+            }
+        }
     }
 
     #[cfg(not(feature = "channel-matrix"))]
