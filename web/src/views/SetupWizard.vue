@@ -21,7 +21,7 @@
           :label="t('provider.apiKey')"
           type="password"
           placeholder="sk-..."
-          :hint="form.provider.startsWith('kimi') ? 'Kimi API Key (sk-...)' : ''"
+          :hint="apiKeyHint"
           class="mt-4"
         />
         <GlassInput
@@ -130,8 +130,11 @@ const testing = ref(false)
 const testMsg = ref('')
 const testOk = ref(false)
 
+// Default provider: deepseek (2026-05-24, user request). See
+// ProviderConfig.vue for the rationale + the PROVIDER_PRESETS pattern
+// this file mirrors.
 const form = ref({
-  provider: 'kimi-coder',
+  provider: 'deepseek',
   apiKey: '',
   baseUrl: '',
   model: '',
@@ -141,10 +144,11 @@ const form = ref({
 })
 
 const providerOptions = [
-  { label: 'Kimi Coder K2.5 (Default)', value: 'kimi-coder' },
-  { label: 'Kimi K2.5 (Moonshot)', value: 'kimi-moonshot' },
+  { label: 'DeepSeek V4 Pro (Default)', value: 'deepseek' },
   { label: 'Anthropic (Claude)', value: 'anthropic' },
   { label: 'OpenAI', value: 'openai' },
+  { label: 'Kimi Coder K2.5', value: 'kimi-coder' },
+  { label: 'Kimi K2.5 (Moonshot)', value: 'kimi-moonshot' },
   { label: 'OpenRouter', value: 'openrouter' },
   { label: 'Ollama (Local)', value: 'ollama' },
   { label: 'Custom URL', value: 'custom' },
@@ -164,6 +168,10 @@ const presets = computed(() => [
 ])
 
 const MODELS = {
+  deepseek: [
+    { label: 'DeepSeek V4 Pro', value: 'deepseek-v4-pro' },
+    { label: 'DeepSeek V4 Chat', value: 'deepseek-chat' },
+  ],
   'kimi-coder': [
     { label: 'Kimi K2.5', value: 'k2p5' },
   ],
@@ -180,6 +188,24 @@ const MODELS = {
   ],
 }
 const modelOpts = computed(() => MODELS[form.value.provider] || [])
+
+// PROVIDER_PRESETS map (mirrors ProviderConfig.vue) — keep in sync.
+// Adding a new preset here = new on-disk URL + default model for that
+// provider key. Lookup misses pass through verbatim.
+const PROVIDER_PRESETS = {
+  deepseek: { url: 'deepseek', model: 'deepseek-v4-pro' },
+  'kimi-coder': { url: 'anthropic-custom:https://api.kimi.com/coding', model: 'k2p5' },
+  'kimi-moonshot': { url: 'anthropic-custom:https://api.moonshot.cn', model: 'kimi-k2.5' },
+}
+
+const API_KEY_HINTS = {
+  deepseek: 'DeepSeek API Key (sk-...)',
+  'kimi-coder': 'Kimi API Key (sk-...)',
+  'kimi-moonshot': 'Kimi API Key (sk-...)',
+  anthropic: 'Anthropic API Key (sk-ant-...)',
+  openai: 'OpenAI API Key (sk-...)',
+}
+const apiKeyHint = computed(() => API_KEY_HINTS[form.value.provider] || '')
 
 async function testConnection() {
   testing.value = true
@@ -208,21 +234,19 @@ async function testConnection() {
 async function finish() {
   saving.value = true
   try {
-    const KIMI_PROVIDERS = {
-      'kimi-coder': { url: 'anthropic-custom:https://api.kimi.com/coding', model: 'k2p5' },
-      'kimi-moonshot': { url: 'anthropic-custom:https://api.moonshot.cn', model: 'kimi-k2.5' },
-    }
-    const kimiCfg = KIMI_PROVIDERS[form.value.provider]
+    const preset = PROVIDER_PRESETS[form.value.provider]
     const cfg = {
-      default_provider: kimiCfg ? kimiCfg.url : form.value.provider,
+      default_provider: preset ? preset.url : form.value.provider,
       api_key: form.value.apiKey,
-      default_model: kimiCfg ? kimiCfg.model : form.value.model,
+      default_model: form.value.model || (preset ? preset.model : ''),
       default_temperature: 0.7,
     }
-    if (kimiCfg) {
+    // Anthropic-format presets (Kimi) need reasoning_level wiring;
+    // native presets (DeepSeek) don't.
+    if (preset && preset.url.startsWith('anthropic-custom:')) {
       cfg.provider = { reasoning_level: 'medium' }
     }
-    if (!kimiCfg && form.value.baseUrl) cfg.provider_api = form.value.baseUrl
+    if (!preset && form.value.baseUrl) cfg.provider_api = form.value.baseUrl
     if (form.value.channel !== 'none' && form.value.telegramToken) {
       cfg.telegram = { bot_token: form.value.telegramToken }
     }

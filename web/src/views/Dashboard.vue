@@ -210,14 +210,26 @@ const uptime = computed(() => {
   return `${h}h ${m}m`
 })
 
+// Reverse-lookup table generalized from the old Kimi-special if-chain.
+// Adding a new provider label = one entry. Lookup misses fall through to
+// the generic `anthropic-custom:` strip OR the raw provider name.
+const PROVIDER_LABELS = {
+  // Exact match against `default_provider` on-disk values
+  deepseek: 'DeepSeek',
+  anthropic: 'Anthropic',
+  openai: 'OpenAI',
+  openrouter: 'OpenRouter',
+  ollama: 'Ollama',
+  gemini: 'Gemini',
+  // anthropic-custom URLs (Kimi etc.) — match the on-disk form exactly
+  'anthropic-custom:https://api.kimi.com/coding': 'Kimi Coder',
+  'anthropic-custom:https://api.moonshot.cn': 'Kimi (Moonshot)',
+}
+
 function friendlyProvider(raw) {
   if (!raw) return '--'
-  if (raw.includes('api.kimi.com/coding')) return 'Kimi Coder'
-  if (raw.includes('moonshot.cn')) return 'Kimi (Moonshot)'
-  if (raw === 'anthropic') return 'Anthropic'
-  if (raw === 'openai') return 'OpenAI'
-  if (raw === 'openrouter') return 'OpenRouter'
-  if (raw === 'ollama') return 'Ollama'
+  const direct = PROVIDER_LABELS[raw]
+  if (direct) return direct
   if (raw.startsWith('anthropic-custom:')) return raw.replace('anthropic-custom:', '')
   return raw
 }
