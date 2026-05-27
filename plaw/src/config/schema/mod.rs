@@ -2947,7 +2947,7 @@ pub struct MatrixConfig {
     /// Matrix homeserver URL (e.g. `"https://matrix.org"`).
     pub homeserver: String,
     /// Matrix access token for the bot account.
-    pub access_token: String,
+    pub access_token: crate::security::Secret,
     /// Optional Matrix user ID (e.g. `"@bot:matrix.org"`).
     #[serde(default)]
     pub user_id: Option<String>,
@@ -4310,13 +4310,7 @@ fn decrypt_channel_secrets(
             "config.channels_config.webhook.secret",
         )?;
     }
-    if let Some(ref mut matrix) = channels.matrix {
-        decrypt_secret(
-            store,
-            &mut matrix.access_token,
-            "config.channels_config.matrix.access_token",
-        )?;
-    }
+    // matrix.access_token migrated to Secret newtype (lazy reveal at channel construction).
     // WhatsApp {access_token, verify_token, app_secret} migrated to Secret newtype
     // (lazy reveal at channel construction; no eager decrypt needed here).
     if let Some(ref mut linq) = channels.linq {
@@ -4414,13 +4408,7 @@ fn encrypt_channel_secrets(
             "config.channels_config.webhook.secret",
         )?;
     }
-    if let Some(ref mut matrix) = channels.matrix {
-        encrypt_secret(
-            store,
-            &mut matrix.access_token,
-            "config.channels_config.matrix.access_token",
-        )?;
-    }
+    // matrix.access_token migrated to Secret newtype (Secret handles its own at-rest representation).
     // WhatsApp {access_token, verify_token, app_secret} migrated to Secret newtype
     // (Secret handles its own at-rest representation; no eager encrypt needed here).
     if let Some(ref mut linq) = channels.linq {
@@ -6881,7 +6869,7 @@ tool_dispatcher = "xml"
     async fn matrix_config_serde() {
         let mc = MatrixConfig {
             homeserver: "https://matrix.org".into(),
-            access_token: "syt_token_abc".into(),
+            access_token: crate::security::Secret::from_wire("syt_token_abc".into()),
             user_id: Some("@bot:matrix.org".into()),
             device_id: Some("DEVICE123".into()),
             room_id: "!room123:matrix.org".into(),
@@ -6891,7 +6879,7 @@ tool_dispatcher = "xml"
         let json = serde_json::to_string(&mc).unwrap();
         let parsed: MatrixConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.homeserver, "https://matrix.org");
-        assert_eq!(parsed.access_token, "syt_token_abc");
+        assert_eq!(parsed.access_token.as_wire_str(), "syt_token_abc");
         assert_eq!(parsed.user_id.as_deref(), Some("@bot:matrix.org"));
         assert_eq!(parsed.device_id.as_deref(), Some("DEVICE123"));
         assert_eq!(parsed.room_id, "!room123:matrix.org");
@@ -6902,7 +6890,7 @@ tool_dispatcher = "xml"
     async fn matrix_config_toml_roundtrip() {
         let mc = MatrixConfig {
             homeserver: "https://synapse.local:8448".into(),
-            access_token: "tok".into(),
+            access_token: crate::security::Secret::from_wire("tok".into()),
             user_id: None,
             device_id: None,
             room_id: "!abc:synapse.local".into(),
@@ -6993,7 +6981,7 @@ allowed_users = ["@ops:matrix.org"]
             }),
             matrix: Some(MatrixConfig {
                 homeserver: "https://m.org".into(),
-                access_token: "tok".into(),
+                access_token: crate::security::Secret::from_wire("tok".into()),
                 user_id: None,
                 device_id: None,
                 room_id: "!r:m".into(),

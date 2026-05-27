@@ -4240,7 +4240,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
 
                 config.matrix = Some(MatrixConfig {
                     homeserver: homeserver.trim_end_matches('/').to_string(),
-                    access_token,
+                    access_token: crate::security::Secret::from_wire(access_token),
                     user_id: detected_user_id,
                     device_id: detected_device_id,
                     room_id,
