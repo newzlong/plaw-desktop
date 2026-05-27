@@ -2,11 +2,11 @@
 
 # Plaw Desktop
 
-**Plaw** — A ready-to-use desktop AI Agent with the built-in [Plaw](plaw/) autonomous agent engine.
+**Plaw Desktop** — An open-source, self-hosted desktop AI Agent with the built-in [Plaw](plaw/) autonomous agent engine.
 
-One-click install, enter your API Key, and you have an AI assistant that can control your computer, browse the web, read/write files, and execute code.
+Bring your own API Key and get an AI assistant that can control your computer, browse the web, read/write files, and execute code — running entirely on your machine, with requests going straight to your model provider, no relay in between.
 
-> For everyday users — no Docker, Python, or command-line knowledge required. Install and go.
+> BYO-key, all runtime dependencies bundled. Engine and frontend are fully open-source, auditable, and hackable — while keeping the one-click, ready-to-use install.
 
 ## Acknowledgments
 
@@ -18,14 +18,15 @@ The vast majority of code in this project was co-authored with [Claude](https://
 
 ## Why?
 
-Existing AI Agent tools (Claude Code, Cursor, Cline, etc.) are all developer-oriented. Regular users simply can't use them.
+Most AI Agents are either cloud SaaS (your data and keys flow through their servers) or terminal-oriented developer tools (Claude Code, Cursor, Cline).
 
-Plaw's mission: **bring AI Agents to everyone, not just developers.**
+Plaw Desktop aims for a different shape — **a desktop agent on your own machine, with your own keys, that you can audit and modify**:
 
-- No Python / Docker / WSL installation needed
-- No environment variables or config files to set up
-- No command-line knowledge required
-- Install → enter API Key → start using
+- **Open-source & auditable**: engine through frontend are all open — read and change the security policies and tool implementations yourself
+- **Self-hosted & BYO-key**: use your own API Key, requests go straight to the provider, no relay
+- **Full tool access**: Shell, files, browser, HTTP, Office, Cron — not a stripped-down sandbox
+- **Zero external deps**: Chromium, Python, Office, embedding model all bundled — nothing to install
+- **One-click install**: keeps the ready-to-use experience; no env setup, config editing, or command line required
 
 ## Key Features
 
@@ -67,7 +68,9 @@ Plaw's mission: **bring AI Agents to everyone, not just developers.**
 | **Input Guard** | PromptGuard prompt injection detection |
 | **External Scan** | Auto-flags injection attacks in web/search results |
 | **Anti-Loop** | Repeated tool call detection + iteration limits |
-| **Config Protection** | API Key encrypted locally, sensitive operations blocked |
+| **Credential Encryption** | All tokens/secrets stored as a `Secret` type, encrypted at rest (ChaCha20-Poly1305), decrypted only on use, auto-redacted from logs |
+| **Command Sandbox** | Shell commands run inside a sandbox; on Windows a Job Object isolates them and terminates child processes when the app exits |
+| **Webhook Signatures** | All webhook endpoints are secure-by-default: requests from non-loopback addresses are rejected when no secret is configured |
 | **Skills Audit** | Auto-scans skill files, blocks suspicious scripts and injection patterns |
 | **Privacy First** | All data stored locally, API Key connects directly to provider, no third-party relay |
 
@@ -86,10 +89,10 @@ Plaw's mission: **bring AI Agents to everyone, not just developers.**
 
 | Provider | Format | Recommended Model | Notes |
 |----------|--------|-------------------|-------|
-| **Kimi Coder** | Anthropic-compatible | k2p5 | Direct access in China, recommended |
+| **DeepSeek** | OpenAI-compatible | deepseek-v4-pro | Direct access in China, **default** |
 | Anthropic | Native | Claude Sonnet/Opus | Proxy required |
 | OpenAI | Native | GPT-4o | Proxy required |
-| DeepSeek | OpenAI-compatible | DeepSeek-V3 | Direct access in China |
+| Kimi Coder | Anthropic-compatible | k2p5 | Direct access in China |
 | Gemini | Native | Gemini Pro | Proxy required |
 | Ollama | Local | Any local model | Works offline |
 | GLM (Zhipu) | OpenAI-compatible | GLM-4 | Direct access in China |
@@ -98,7 +101,7 @@ Plaw's mission: **bring AI Agents to everyone, not just developers.**
 | OpenRouter | OpenAI-compatible | Multi-model router | Proxy required |
 | Custom | OpenAI/Anthropic-compatible | - | Any endpoint |
 
-> **Note**: Only **Kimi Coder (k2p5)** has been fully tested by the developer. Other providers should work in theory but are unverified — if you encounter network or format issues, feel free to check the source code and submit a PR.
+> **Provider-agnostic by design**: Plaw is not specialized for any single model. Switching the default is just editing `default_provider` + `default_model` in `config.toml` — no code changes, no recompile. The current default is DeepSeek V4 Pro (directly reachable in China, strongest among domestic models); this recommendation will evolve as models do.
 
 ## Architecture
 
@@ -117,9 +120,9 @@ Plaw's mission: **bring AI Agents to everyone, not just developers.**
 |  |  +---------+ +--------+ +------------------+ |  |
 |  |  | Provider| | Tools  | | Memory & Skills  | |  |
 |  |  | 10+ LLM | | Shell  | | Capsule (SQLite) | |  |
-|  |  | Anthropic| | File  | | Embedding Vector | |  |
+|  |  | DeepSeek| | File   | | Embedding Vector | |  |
 |  |  | OpenAI  | | Web    | | Semantic Routing | |  |
-|  |  | Kimi    | | Browser| | Skills Hot-load  | |  |
+|  |  | Anthropic| | Browser| | Skills Hot-load | |  |
 |  |  | Custom  | | Office | | Agentic Recall   | |  |
 |  |  +---------+ +--------+ +------------------+ |  |
 |  +-----------------------------------------------+  |
@@ -142,9 +145,9 @@ Plaw's mission: **bring AI Agents to everyone, not just developers.**
 
 ## Quick Start
 
-### End Users
+### Direct Use (download installer)
 
-Download the installer from [Releases](https://github.com/gfisrubbish/plaw-desktop/releases):
+Download the installer from [Releases](https://github.com/newzlong/plaw-desktop/releases):
 
 - **Windows**: `plaw-desktop_x.x.x_x64-setup.exe`
 
@@ -167,7 +170,7 @@ Install → launch → Setup Wizard guides you to choose a model and enter your 
 ### Developers
 
 ```powershell
-git clone https://github.com/gfisrubbish/plaw-desktop.git
+git clone https://github.com/newzlong/plaw-desktop.git
 cd plaw-desktop
 .\setup.ps1     # Install all dependencies + compile Plaw engine
 .\dev.ps1       # Start dev (Vite + Tauri hot-reload)
@@ -243,9 +246,9 @@ Output: `src-tauri/target/release/bundle/nsis/plaw-desktop_x.x.x_x64-setup.exe`
 All options are configurable via the in-app Settings panel. The underlying config file is at `plaw-data/.plaw/config.toml`:
 
 ```toml
-api_key = "sk-xxx"
-default_provider = "anthropic-custom:https://api.kimi.com/coding"
-default_model = "k2p5"
+api_key = "sk-xxx"                  # your own provider API Key
+default_provider = "deepseek"       # default; change this one line to switch provider
+default_model = "deepseek-v4-pro"
 
 [web_search]
 enabled = true
@@ -262,7 +265,7 @@ enabled = true
 ## FAQ
 
 **Q: Is my API Key safe? Does it get uploaded to third parties?**
-No. Keys are encrypted locally. Requests go directly to your chosen provider (Kimi / OpenAI / Anthropic) — no third-party relay.
+No. Keys are stored as a `Secret` type encrypted at rest (ChaCha20-Poly1305) and decrypted only when a request is made. Requests go directly to your chosen provider (DeepSeek / OpenAI / Anthropic, etc.) — no third-party relay.
 
 **Q: Does it work offline?**
 AI chat requires internet (cloud API calls). File operations and shell commands work offline. Ollama local models are supported.
@@ -274,7 +277,7 @@ Copy the entire install directory (including `plaw-data/`). All configs, session
 Plaw has multi-layer security: PromptGuard injection detection, external content scanning, anti-loop, sensitive operation blocking. But the agent can execute system commands — review with care.
 
 **Q: Recommended model for China users?**
-Kimi Coder (k2p5) — direct access in China, no proxy needed, Anthropic-compatible API. DeepSeek, GLM, Qwen also work without proxy.
+DeepSeek (deepseek-v4-pro) by default — direct access in China, no proxy needed. Kimi, GLM, and Qwen also work without proxy. Switching is a one-line change in `config.toml`, no code edits.
 
 ## Tech Stack
 
