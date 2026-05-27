@@ -4234,14 +4234,24 @@ fn collect_configured_channels(
     }
 
     if let Some(ref lq) = config.channels_config.linq {
-        channels.push(ConfiguredChannel {
-            display_name: "Linq",
-            channel: Arc::new(LinqChannel::new(
-                lq.api_token.clone(),
-                lq.from_phone.clone(),
-                lq.allowed_senders.clone(),
-            )),
-        });
+        match lq.api_token.reveal(&secret_store) {
+            Ok(api_token) => {
+                channels.push(ConfiguredChannel {
+                    display_name: "Linq",
+                    channel: Arc::new(LinqChannel::new(
+                        api_token,
+                        lq.from_phone.clone(),
+                        lq.allowed_senders.clone(),
+                    )),
+                });
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "Failed to decrypt channels.linq.api_token — Linq channel skipped"
+                );
+            }
+        }
     }
 
     if let Some(ref wati_cfg) = config.channels_config.wati {
@@ -4267,14 +4277,24 @@ fn collect_configured_channels(
     }
 
     if let Some(ref nc) = config.channels_config.nextcloud_talk {
-        channels.push(ConfiguredChannel {
-            display_name: "Nextcloud Talk",
-            channel: Arc::new(NextcloudTalkChannel::new(
-                nc.base_url.clone(),
-                nc.app_token.clone(),
-                nc.allowed_users.clone(),
-            )),
-        });
+        match nc.app_token.reveal(&secret_store) {
+            Ok(app_token) => {
+                channels.push(ConfiguredChannel {
+                    display_name: "Nextcloud Talk",
+                    channel: Arc::new(NextcloudTalkChannel::new(
+                        nc.base_url.clone(),
+                        app_token,
+                        nc.allowed_users.clone(),
+                    )),
+                });
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "Failed to decrypt channels.nextcloud_talk.app_token — Nextcloud Talk channel skipped"
+                );
+            }
+        }
     }
 
     if let Some(ref email_cfg) = config.channels_config.email {

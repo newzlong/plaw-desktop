@@ -546,14 +546,26 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         })
         .map(Arc::from);
 
-    // Linq channel (if configured)
-    let linq_channel: Option<Arc<LinqChannel>> = config.channels_config.linq.as_ref().map(|lq| {
-        Arc::new(LinqChannel::new(
-            lq.api_token.clone(),
-            lq.from_phone.clone(),
-            lq.allowed_senders.clone(),
-        ))
-    });
+    // Linq channel (if configured). api_token is a `Secret` newtype —
+    // reveal once at channel construction; on decrypt failure the channel
+    // is left None (Fail Fast §3.5).
+    let linq_channel: Option<Arc<LinqChannel>> =
+        config.channels_config.linq.as_ref().and_then(|lq| {
+            match lq.api_token.reveal(secret_store.as_ref()) {
+                Ok(api_token) => Some(Arc::new(LinqChannel::new(
+                    api_token,
+                    lq.from_phone.clone(),
+                    lq.allowed_senders.clone(),
+                ))),
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "Failed to decrypt channels.linq.api_token — Linq gateway disabled"
+                    );
+                    None
+                }
+            }
+        });
 
     // Linq signing secret for webhook signature verification
     // Priority: environment variable > config file
@@ -564,13 +576,24 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
             (!secret.is_empty()).then(|| secret.to_owned())
         })
         .or_else(|| {
-            config.channels_config.linq.as_ref().and_then(|lq| {
-                lq.signing_secret
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|secret| !secret.is_empty())
-                    .map(ToOwned::to_owned)
-            })
+            config
+                .channels_config
+                .linq
+                .as_ref()
+                .and_then(|lq| lq.signing_secret.as_ref())
+                .and_then(|secret| match secret.reveal(secret_store.as_ref()) {
+                    Ok(plain) => {
+                        let trimmed = plain.trim();
+                        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "Failed to decrypt channels.linq.signing_secret — webhook signature verification disabled"
+                        );
+                        None
+                    }
+                })
         })
         .map(Arc::from);
 
@@ -652,14 +675,26 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .as_ref()
         .is_some_and(|qq| qq.receive_mode == crate::config::schema::QQReceiveMode::Webhook);
 
-    // Nextcloud Talk channel (if configured)
-    let nextcloud_talk_channel: Option<Arc<NextcloudTalkChannel>> =
-        config.channels_config.nextcloud_talk.as_ref().map(|nc| {
-            Arc::new(NextcloudTalkChannel::new(
+    // Nextcloud Talk channel (if configured). app_token is a `Secret`
+    // newtype — reveal once at construction; None on decrypt failure
+    // (Fail Fast §3.5).
+    let nextcloud_talk_channel: Option<Arc<NextcloudTalkChannel>> = config
+        .channels_config
+        .nextcloud_talk
+        .as_ref()
+        .and_then(|nc| match nc.app_token.reveal(secret_store.as_ref()) {
+            Ok(app_token) => Some(Arc::new(NextcloudTalkChannel::new(
                 nc.base_url.clone(),
-                nc.app_token.clone(),
+                app_token,
                 nc.allowed_users.clone(),
-            ))
+            ))),
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "Failed to decrypt channels.nextcloud_talk.app_token — Nextcloud Talk gateway disabled"
+                );
+                None
+            }
         });
 
     // Nextcloud Talk webhook secret for signature verification
@@ -676,12 +711,19 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
                     .channels_config
                     .nextcloud_talk
                     .as_ref()
-                    .and_then(|nc| {
-                        nc.webhook_secret
-                            .as_deref()
-                            .map(str::trim)
-                            .filter(|secret| !secret.is_empty())
-                            .map(ToOwned::to_owned)
+                    .and_then(|nc| nc.webhook_secret.as_ref())
+                    .and_then(|secret| match secret.reveal(secret_store.as_ref()) {
+                        Ok(plain) => {
+                            let trimmed = plain.trim();
+                            (!trimmed.is_empty()).then(|| trimmed.to_owned())
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                "Failed to decrypt channels.nextcloud_talk.webhook_secret — webhook signature verification disabled"
+                            );
+                            None
+                        }
                     })
             })
             .map(Arc::from);

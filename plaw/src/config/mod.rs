@@ -121,7 +121,7 @@ mod tests {
 
         let nextcloud_talk = NextcloudTalkConfig {
             base_url: "https://cloud.example.com".into(),
-            app_token: "app-token".into(),
+            app_token: crate::security::Secret::from_wire("app-token".into()),
             webhook_secret: None,
             allowed_users: vec!["*".into()],
         };

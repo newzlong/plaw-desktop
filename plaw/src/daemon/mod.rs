@@ -463,7 +463,7 @@ mod tests {
         let mut config = Config::default();
         config.channels_config.nextcloud_talk = Some(crate::config::schema::NextcloudTalkConfig {
             base_url: "https://cloud.example.com".into(),
-            app_token: "app-token".into(),
+            app_token: crate::security::Secret::from_wire("app-token".into()),
             webhook_secret: None,
             allowed_users: vec!["*".into()],
         });

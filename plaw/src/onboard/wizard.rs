@@ -4609,12 +4609,14 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     .interact_text()?;
 
                 config.linq = Some(LinqConfig {
-                    api_token: api_token.trim().to_string(),
+                    api_token: crate::security::Secret::from_wire(api_token.trim().to_string()),
                     from_phone: from_phone.trim().to_string(),
                     signing_secret: if signing_secret.trim().is_empty() {
                         None
                     } else {
-                        Some(signing_secret.trim().to_string())
+                        Some(crate::security::Secret::from_wire(
+                            signing_secret.trim().to_string(),
+                        ))
                     },
                     allowed_senders,
                 });
@@ -4847,11 +4849,13 @@ fn setup_channels() -> Result<ChannelsConfig> {
 
                 config.nextcloud_talk = Some(NextcloudTalkConfig {
                     base_url,
-                    app_token: app_token.trim().to_string(),
+                    app_token: crate::security::Secret::from_wire(app_token.trim().to_string()),
                     webhook_secret: if webhook_secret.trim().is_empty() {
                         None
                     } else {
-                        Some(webhook_secret.trim().to_string())
+                        Some(crate::security::Secret::from_wire(
+                            webhook_secret.trim().to_string(),
+                        ))
                     },
                     allowed_users,
                 });
@@ -7463,8 +7467,8 @@ mod tests {
         channels.qq = None;
         channels.nextcloud_talk = Some(crate::config::schema::NextcloudTalkConfig {
             base_url: "https://cloud.example.com".into(),
-            app_token: "token".into(),
-            webhook_secret: Some("secret".into()),
+            app_token: crate::security::Secret::from_wire("token".into()),
+            webhook_secret: Some(crate::security::Secret::from_wire("secret".into())),
             allowed_users: vec!["*".into()],
         });
         assert!(has_launchable_channels(&channels));

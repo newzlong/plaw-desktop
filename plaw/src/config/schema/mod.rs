@@ -3053,13 +3053,20 @@ impl ChannelConfig for WhatsAppConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct LinqConfig {
-    /// Linq Partner API token (Bearer auth)
-    pub api_token: String,
+    /// Linq Partner API token (Bearer auth) used for OUTBOUND calls.
+    ///
+    /// Stored as [`crate::security::Secret`] so the on-disk form is
+    /// `enc2:` ciphertext; plaintext lives only inside the
+    /// `reveal(&store)` return at channel construction.
+    pub api_token: crate::security::Secret,
     /// Phone number to send from (E.164 format)
     pub from_phone: String,
-    /// Webhook signing secret for signature verification
+    /// Webhook signing secret for signature verification.
+    ///
+    /// Can also be set via `PLAW_LINQ_SIGNING_SECRET`. Stored as a
+    /// [`crate::security::Secret`] (encrypted at rest).
     #[serde(default)]
-    pub signing_secret: Option<String>,
+    pub signing_secret: Option<crate::security::Secret>,
     /// Allowed sender handles (phone numbers) or "*" for all
     #[serde(default)]
     pub allowed_senders: Vec<String>,
@@ -3133,12 +3140,17 @@ pub struct NextcloudTalkConfig {
     /// Nextcloud base URL (e.g. "https://cloud.example.com").
     pub base_url: String,
     /// Bot app token used for OCS API bearer auth.
-    pub app_token: String,
+    ///
+    /// Stored as [`crate::security::Secret`] so the on-disk form is
+    /// `enc2:` ciphertext; plaintext lives only inside the
+    /// `reveal(&store)` return at channel construction.
+    pub app_token: crate::security::Secret,
     /// Shared secret for webhook signature verification.
     ///
-    /// Can also be set via `PLAW_NEXTCLOUD_TALK_WEBHOOK_SECRET`.
+    /// Can also be set via `PLAW_NEXTCLOUD_TALK_WEBHOOK_SECRET`. Stored
+    /// as a [`crate::security::Secret`] (encrypted at rest).
     #[serde(default)]
-    pub webhook_secret: Option<String>,
+    pub webhook_secret: Option<crate::security::Secret>,
     /// Allowed Nextcloud actor IDs (`[]` = deny all, `"*"` = allow all).
     #[serde(default)]
     pub allowed_users: Vec<String>,
@@ -4313,30 +4325,8 @@ fn decrypt_channel_secrets(
     // matrix.access_token migrated to Secret newtype (lazy reveal at channel construction).
     // WhatsApp {access_token, verify_token, app_secret} migrated to Secret newtype
     // (lazy reveal at channel construction; no eager decrypt needed here).
-    if let Some(ref mut linq) = channels.linq {
-        decrypt_secret(
-            store,
-            &mut linq.api_token,
-            "config.channels_config.linq.api_token",
-        )?;
-        decrypt_optional_secret(
-            store,
-            &mut linq.signing_secret,
-            "config.channels_config.linq.signing_secret",
-        )?;
-    }
-    if let Some(ref mut nextcloud) = channels.nextcloud_talk {
-        decrypt_secret(
-            store,
-            &mut nextcloud.app_token,
-            "config.channels_config.nextcloud_talk.app_token",
-        )?;
-        decrypt_optional_secret(
-            store,
-            &mut nextcloud.webhook_secret,
-            "config.channels_config.nextcloud_talk.webhook_secret",
-        )?;
-    }
+    // linq.{api_token, signing_secret} migrated to Secret newtype (lazy reveal).
+    // nextcloud_talk.{app_token, webhook_secret} migrated to Secret newtype (lazy reveal).
     if let Some(ref mut irc) = channels.irc {
         decrypt_optional_secret(
             store,
@@ -4411,30 +4401,8 @@ fn encrypt_channel_secrets(
     // matrix.access_token migrated to Secret newtype (Secret handles its own at-rest representation).
     // WhatsApp {access_token, verify_token, app_secret} migrated to Secret newtype
     // (Secret handles its own at-rest representation; no eager encrypt needed here).
-    if let Some(ref mut linq) = channels.linq {
-        encrypt_secret(
-            store,
-            &mut linq.api_token,
-            "config.channels_config.linq.api_token",
-        )?;
-        encrypt_optional_secret(
-            store,
-            &mut linq.signing_secret,
-            "config.channels_config.linq.signing_secret",
-        )?;
-    }
-    if let Some(ref mut nextcloud) = channels.nextcloud_talk {
-        encrypt_secret(
-            store,
-            &mut nextcloud.app_token,
-            "config.channels_config.nextcloud_talk.app_token",
-        )?;
-        encrypt_optional_secret(
-            store,
-            &mut nextcloud.webhook_secret,
-            "config.channels_config.nextcloud_talk.webhook_secret",
-        )?;
-    }
+    // linq.{api_token, signing_secret} migrated to Secret newtype (self-managed at-rest).
+    // nextcloud_talk.{app_token, webhook_secret} migrated to Secret newtype (self-managed at-rest).
     if let Some(ref mut irc) = channels.irc {
         encrypt_optional_secret(
             store,
@@ -9016,16 +8984,19 @@ default_model = "legacy-model"
     async fn nextcloud_talk_config_serde() {
         let nc = NextcloudTalkConfig {
             base_url: "https://cloud.example.com".into(),
-            app_token: "app-token".into(),
-            webhook_secret: Some("webhook-secret".into()),
+            app_token: crate::security::Secret::from_wire("app-token".into()),
+            webhook_secret: Some(crate::security::Secret::from_wire("webhook-secret".into())),
             allowed_users: vec!["user_a".into(), "*".into()],
         };
 
         let json = serde_json::to_string(&nc).unwrap();
         let parsed: NextcloudTalkConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.base_url, "https://cloud.example.com");
-        assert_eq!(parsed.app_token, "app-token");
-        assert_eq!(parsed.webhook_secret.as_deref(), Some("webhook-secret"));
+        assert_eq!(parsed.app_token.as_wire_str(), "app-token");
+        assert_eq!(
+            parsed.webhook_secret.as_ref().map(|s| s.as_wire_str()),
+            Some("webhook-secret")
+        );
         assert_eq!(parsed.allowed_users, vec!["user_a", "*"]);
     }
 

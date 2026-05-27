@@ -745,15 +745,15 @@ fn mask_sensitive_fields(config: &crate::config::Config) -> crate::config::Confi
         mask_optional_secret_typed(&mut whatsapp.verify_token);
     }
     if let Some(linq) = masked.channels_config.linq.as_mut() {
-        mask_required_secret(&mut linq.api_token);
-        mask_optional_secret(&mut linq.signing_secret);
+        mask_required_secret_typed(&mut linq.api_token);
+        mask_optional_secret_typed(&mut linq.signing_secret);
     }
     if let Some(wati) = masked.channels_config.wati.as_mut() {
         mask_required_secret_typed(&mut wati.api_token);
     }
     if let Some(nextcloud) = masked.channels_config.nextcloud_talk.as_mut() {
-        mask_required_secret(&mut nextcloud.app_token);
-        mask_optional_secret(&mut nextcloud.webhook_secret);
+        mask_required_secret_typed(&mut nextcloud.app_token);
+        mask_optional_secret_typed(&mut nextcloud.webhook_secret);
     }
     if let Some(email) = masked.channels_config.email.as_mut() {
         mask_required_secret(&mut email.password);
@@ -887,8 +887,8 @@ fn restore_masked_sensitive_fields(
         incoming.channels_config.linq.as_mut(),
         current.channels_config.linq.as_ref(),
     ) {
-        restore_required_secret(&mut incoming_ch.api_token, &current_ch.api_token);
-        restore_optional_secret(&mut incoming_ch.signing_secret, &current_ch.signing_secret);
+        restore_required_secret_typed(&mut incoming_ch.api_token, &current_ch.api_token);
+        restore_optional_secret_typed(&mut incoming_ch.signing_secret, &current_ch.signing_secret);
     }
     if let (Some(incoming_ch), Some(current_ch)) = (
         incoming.channels_config.wati.as_mut(),
@@ -900,8 +900,8 @@ fn restore_masked_sensitive_fields(
         incoming.channels_config.nextcloud_talk.as_mut(),
         current.channels_config.nextcloud_talk.as_ref(),
     ) {
-        restore_required_secret(&mut incoming_ch.app_token, &current_ch.app_token);
-        restore_optional_secret(&mut incoming_ch.webhook_secret, &current_ch.webhook_secret);
+        restore_required_secret_typed(&mut incoming_ch.app_token, &current_ch.app_token);
+        restore_optional_secret_typed(&mut incoming_ch.webhook_secret, &current_ch.webhook_secret);
     }
     if let (Some(incoming_ch), Some(current_ch)) = (
         incoming.channels_config.email.as_mut(),
