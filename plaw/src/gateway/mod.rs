@@ -468,13 +468,27 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
 
     // SSE broadcast channel for real-time events
     let (event_tx, _event_rx) = tokio::sync::broadcast::channel::<serde_json::Value>(256);
-    // Extract webhook secret for authentication
+    // Extract webhook secret for authentication. `secret` is a `Secret`
+    // newtype — reveal once, then hash. On decrypt failure the hash is left
+    // None (webhook auth disabled; non-loopback requests then 401 by the
+    // secure-by-default gate).
     let webhook_secret_hash: Option<Arc<str>> =
         config.channels_config.webhook.as_ref().and_then(|webhook| {
-            webhook.secret.as_ref().and_then(|raw_secret| {
-                let trimmed_secret = raw_secret.trim();
-                (!trimmed_secret.is_empty())
-                    .then(|| Arc::<str>::from(hash_webhook_secret(trimmed_secret)))
+            webhook.secret.as_ref().and_then(|secret| {
+                match secret.reveal(secret_store.as_ref()) {
+                    Ok(plain) => {
+                        let trimmed = plain.trim();
+                        (!trimmed.is_empty())
+                            .then(|| Arc::<str>::from(hash_webhook_secret(trimmed)))
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "Failed to decrypt channels.webhook.secret — webhook auth disabled"
+                        );
+                        None
+                    }
+                }
             })
         });
 

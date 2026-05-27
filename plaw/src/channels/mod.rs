@@ -4305,21 +4305,36 @@ fn collect_configured_channels(
     }
 
     if let Some(ref irc) = config.channels_config.irc {
-        channels.push(ConfiguredChannel {
-            display_name: "IRC",
-            channel: Arc::new(IrcChannel::new(irc::IrcChannelConfig {
+        // server/nickserv/sasl passwords are `Secret` newtypes — reveal each
+        // (None stays None) inside a Result-returning builder; on decrypt
+        // failure log + skip the channel (Fail Fast §3.5).
+        let reveal_opt = |s: &Option<crate::security::Secret>| -> anyhow::Result<Option<String>> {
+            s.as_ref().map(|sec| sec.reveal(&secret_store)).transpose()
+        };
+        let build = || -> anyhow::Result<irc::IrcChannelConfig> {
+            Ok(irc::IrcChannelConfig {
                 server: irc.server.clone(),
                 port: irc.port,
                 nickname: irc.nickname.clone(),
                 username: irc.username.clone(),
                 channels: irc.channels.clone(),
                 allowed_users: irc.allowed_users.clone(),
-                server_password: irc.server_password.clone(),
-                nickserv_password: irc.nickserv_password.clone(),
-                sasl_password: irc.sasl_password.clone(),
+                server_password: reveal_opt(&irc.server_password)?,
+                nickserv_password: reveal_opt(&irc.nickserv_password)?,
+                sasl_password: reveal_opt(&irc.sasl_password)?,
                 verify_tls: irc.verify_tls.unwrap_or(true),
-            })),
-        });
+            })
+        };
+        match build() {
+            Ok(irc_cfg) => channels.push(ConfiguredChannel {
+                display_name: "IRC",
+                channel: Arc::new(IrcChannel::new(irc_cfg)),
+            }),
+            Err(e) => tracing::error!(
+                error = %e,
+                "Failed to decrypt IRC password — IRC channel skipped"
+            ),
+        }
     }
 
     #[cfg(feature = "channel-lark")]
