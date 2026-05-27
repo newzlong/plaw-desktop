@@ -734,7 +734,7 @@ fn mask_sensitive_fields(config: &crate::config::Config) -> crate::config::Confi
         mask_required_secret_typed(&mut mattermost.bot_token);
     }
     if let Some(webhook) = masked.channels_config.webhook.as_mut() {
-        mask_optional_secret(&mut webhook.secret);
+        mask_optional_secret_typed(&mut webhook.secret);
     }
     if let Some(matrix) = masked.channels_config.matrix.as_mut() {
         mask_required_secret_typed(&mut matrix.access_token);
@@ -759,9 +759,9 @@ fn mask_sensitive_fields(config: &crate::config::Config) -> crate::config::Confi
         mask_required_secret(&mut email.password);
     }
     if let Some(irc) = masked.channels_config.irc.as_mut() {
-        mask_optional_secret(&mut irc.server_password);
-        mask_optional_secret(&mut irc.nickserv_password);
-        mask_optional_secret(&mut irc.sasl_password);
+        mask_optional_secret_typed(&mut irc.server_password);
+        mask_optional_secret_typed(&mut irc.nickserv_password);
+        mask_optional_secret_typed(&mut irc.sasl_password);
     }
     if let Some(lark) = masked.channels_config.lark.as_mut() {
         mask_required_secret_typed(&mut lark.app_secret);
@@ -867,7 +867,7 @@ fn restore_masked_sensitive_fields(
         incoming.channels_config.webhook.as_mut(),
         current.channels_config.webhook.as_ref(),
     ) {
-        restore_optional_secret(&mut incoming_ch.secret, &current_ch.secret);
+        restore_optional_secret_typed(&mut incoming_ch.secret, &current_ch.secret);
     }
     if let (Some(incoming_ch), Some(current_ch)) = (
         incoming.channels_config.matrix.as_mut(),
@@ -913,15 +913,15 @@ fn restore_masked_sensitive_fields(
         incoming.channels_config.irc.as_mut(),
         current.channels_config.irc.as_ref(),
     ) {
-        restore_optional_secret(
+        restore_optional_secret_typed(
             &mut incoming_ch.server_password,
             &current_ch.server_password,
         );
-        restore_optional_secret(
+        restore_optional_secret_typed(
             &mut incoming_ch.nickserv_password,
             &current_ch.nickserv_password,
         );
-        restore_optional_secret(&mut incoming_ch.sasl_password, &current_ch.sasl_password);
+        restore_optional_secret_typed(&mut incoming_ch.sasl_password, &current_ch.sasl_password);
     }
     if let (Some(incoming_ch), Some(current_ch)) = (
         incoming.channels_config.lark.as_mut(),

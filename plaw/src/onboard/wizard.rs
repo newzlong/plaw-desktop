@@ -4745,17 +4745,23 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     server_password: if server_password.trim().is_empty() {
                         None
                     } else {
-                        Some(server_password.trim().to_string())
+                        Some(crate::security::Secret::from_wire(
+                            server_password.trim().to_string(),
+                        ))
                     },
                     nickserv_password: if nickserv_password.trim().is_empty() {
                         None
                     } else {
-                        Some(nickserv_password.trim().to_string())
+                        Some(crate::security::Secret::from_wire(
+                            nickserv_password.trim().to_string(),
+                        ))
                     },
                     sasl_password: if sasl_password.trim().is_empty() {
                         None
                     } else {
-                        Some(sasl_password.trim().to_string())
+                        Some(crate::security::Secret::from_wire(
+                            sasl_password.trim().to_string(),
+                        ))
                     },
                     verify_tls: Some(verify_tls),
                 });
@@ -4784,7 +4790,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     secret: if secret.is_empty() {
                         None
                     } else {
-                        Some(secret)
+                        Some(crate::security::Secret::from_wire(secret))
                     },
                 });
                 println!(

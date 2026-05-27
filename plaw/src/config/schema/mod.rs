@@ -2913,7 +2913,12 @@ pub struct WebhookConfig {
     /// Port to listen on for incoming webhooks.
     pub port: u16,
     /// Optional shared secret for webhook signature verification.
-    pub secret: Option<String>,
+    ///
+    /// Stored as a [`crate::security::Secret`] (encrypted at rest);
+    /// revealed + hashed once at gateway startup. When `None` AND the
+    /// gateway is bound to a non-loopback address, the `/webhook`
+    /// handler rejects all requests (secure-by-default).
+    pub secret: Option<crate::security::Secret>,
 }
 
 impl ChannelConfig for WebhookConfig {
@@ -3215,12 +3220,12 @@ pub struct IrcConfig {
     /// Allowed nicknames (case-insensitive) or "*" for all
     #[serde(default)]
     pub allowed_users: Vec<String>,
-    /// Server password (for bouncers like ZNC)
-    pub server_password: Option<String>,
-    /// NickServ IDENTIFY password
-    pub nickserv_password: Option<String>,
-    /// SASL PLAIN password (IRCv3)
-    pub sasl_password: Option<String>,
+    /// Server password (for bouncers like ZNC). Encrypted at rest via [`crate::security::Secret`].
+    pub server_password: Option<crate::security::Secret>,
+    /// NickServ IDENTIFY password. Encrypted at rest via [`crate::security::Secret`].
+    pub nickserv_password: Option<crate::security::Secret>,
+    /// SASL PLAIN password (IRCv3). Encrypted at rest via [`crate::security::Secret`].
+    pub sasl_password: Option<crate::security::Secret>,
     /// Verify TLS certificate (default: true)
     pub verify_tls: Option<bool>,
 }
@@ -4315,35 +4320,13 @@ fn decrypt_channel_secrets(
     // discord.bot_token migrated to `Secret` newtype — no eager decrypt.
     // slack.bot_token + slack.app_token migrated to `Secret` newtype.
     // mattermost.bot_token migrated to `Secret` newtype.
-    if let Some(ref mut webhook) = channels.webhook {
-        decrypt_optional_secret(
-            store,
-            &mut webhook.secret,
-            "config.channels_config.webhook.secret",
-        )?;
-    }
+    // webhook.secret migrated to Secret newtype (revealed + hashed at gateway startup).
     // matrix.access_token migrated to Secret newtype (lazy reveal at channel construction).
     // WhatsApp {access_token, verify_token, app_secret} migrated to Secret newtype
     // (lazy reveal at channel construction; no eager decrypt needed here).
     // linq.{api_token, signing_secret} migrated to Secret newtype (lazy reveal).
     // nextcloud_talk.{app_token, webhook_secret} migrated to Secret newtype (lazy reveal).
-    if let Some(ref mut irc) = channels.irc {
-        decrypt_optional_secret(
-            store,
-            &mut irc.server_password,
-            "config.channels_config.irc.server_password",
-        )?;
-        decrypt_optional_secret(
-            store,
-            &mut irc.nickserv_password,
-            "config.channels_config.irc.nickserv_password",
-        )?;
-        decrypt_optional_secret(
-            store,
-            &mut irc.sasl_password,
-            "config.channels_config.irc.sasl_password",
-        )?;
-    }
+    // irc.{server,nickserv,sasl}_password migrated to Secret newtype (lazy reveal at channel construction).
     // lark.{app_secret, encrypt_key, verification_token} migrated to `Secret` newtype.
     if let Some(ref mut dingtalk) = channels.dingtalk {
         decrypt_secret(
@@ -4391,35 +4374,13 @@ fn encrypt_channel_secrets(
     // discord.bot_token migrated to `Secret` — no auto-encrypt pass.
     // slack.bot_token + slack.app_token migrated to `Secret` newtype.
     // mattermost.bot_token migrated to `Secret` newtype.
-    if let Some(ref mut webhook) = channels.webhook {
-        encrypt_optional_secret(
-            store,
-            &mut webhook.secret,
-            "config.channels_config.webhook.secret",
-        )?;
-    }
+    // webhook.secret migrated to Secret newtype (self-managed at-rest).
     // matrix.access_token migrated to Secret newtype (Secret handles its own at-rest representation).
     // WhatsApp {access_token, verify_token, app_secret} migrated to Secret newtype
     // (Secret handles its own at-rest representation; no eager encrypt needed here).
     // linq.{api_token, signing_secret} migrated to Secret newtype (self-managed at-rest).
     // nextcloud_talk.{app_token, webhook_secret} migrated to Secret newtype (self-managed at-rest).
-    if let Some(ref mut irc) = channels.irc {
-        encrypt_optional_secret(
-            store,
-            &mut irc.server_password,
-            "config.channels_config.irc.server_password",
-        )?;
-        encrypt_optional_secret(
-            store,
-            &mut irc.nickserv_password,
-            "config.channels_config.irc.nickserv_password",
-        )?;
-        encrypt_optional_secret(
-            store,
-            &mut irc.sasl_password,
-            "config.channels_config.irc.sasl_password",
-        )?;
-    }
+    // irc.{server,nickserv,sasl}_password migrated to Secret newtype (self-managed at-rest).
     // lark.{app_secret, encrypt_key, verification_token} migrated to `Secret` newtype.
     if let Some(ref mut dingtalk) = channels.dingtalk {
         encrypt_secret(
@@ -7107,7 +7068,10 @@ channel_id = "C123"
     async fn webhook_config_with_secret() {
         let json = r#"{"port":8080,"secret":"my-secret-key"}"#;
         let parsed: WebhookConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed.secret.as_deref(), Some("my-secret-key"));
+        assert_eq!(
+            parsed.secret.as_ref().map(|s| s.as_wire_str()),
+            Some("my-secret-key")
+        );
     }
 
     #[test]

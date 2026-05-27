@@ -953,7 +953,7 @@ mod tests {
             channels: vec!["#test".into(), "#dev".into()],
             allowed_users: vec!["alice".into()],
             server_password: None,
-            nickserv_password: Some("secret".into()),
+            nickserv_password: Some(crate::security::Secret::from_wire("secret".into())),
             sasl_password: None,
             verify_tls: Some(true),
         };
@@ -967,7 +967,10 @@ mod tests {
         assert_eq!(parsed.channels, vec!["#test", "#dev"]);
         assert_eq!(parsed.allowed_users, vec!["alice"]);
         assert!(parsed.server_password.is_none());
-        assert_eq!(parsed.nickserv_password.as_deref(), Some("secret"));
+        assert_eq!(
+            parsed.nickserv_password.as_ref().map(|s| s.as_wire_str()),
+            Some("secret")
+        );
         assert!(parsed.sasl_password.is_none());
         assert_eq!(parsed.verify_tls, Some(true));
     }
