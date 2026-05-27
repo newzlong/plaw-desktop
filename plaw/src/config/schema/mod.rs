@@ -3011,19 +3011,19 @@ impl ChannelConfig for SignalConfig {
 pub struct WhatsAppConfig {
     /// Access token from Meta Business Suite (Cloud API mode)
     #[serde(default)]
-    pub access_token: Option<String>,
+    pub access_token: Option<crate::security::Secret>,
     /// Phone number ID from Meta Business API (Cloud API mode)
     #[serde(default)]
     pub phone_number_id: Option<String>,
     /// Webhook verify token (you define this, Meta sends it back for verification)
     /// Only used in Cloud API mode
     #[serde(default)]
-    pub verify_token: Option<String>,
+    pub verify_token: Option<crate::security::Secret>,
     /// App secret from Meta Business Suite (for webhook signature verification)
     /// Can also be set via `PLAW_WHATSAPP_APP_SECRET` environment variable
     /// Only used in Cloud API mode
     #[serde(default)]
-    pub app_secret: Option<String>,
+    pub app_secret: Option<crate::security::Secret>,
     /// Session database path for WhatsApp Web client (Web mode)
     /// When set, enables native WhatsApp Web mode with wa-rs
     #[serde(default)]
@@ -4317,23 +4317,8 @@ fn decrypt_channel_secrets(
             "config.channels_config.matrix.access_token",
         )?;
     }
-    if let Some(ref mut whatsapp) = channels.whatsapp {
-        decrypt_optional_secret(
-            store,
-            &mut whatsapp.access_token,
-            "config.channels_config.whatsapp.access_token",
-        )?;
-        decrypt_optional_secret(
-            store,
-            &mut whatsapp.app_secret,
-            "config.channels_config.whatsapp.app_secret",
-        )?;
-        decrypt_optional_secret(
-            store,
-            &mut whatsapp.verify_token,
-            "config.channels_config.whatsapp.verify_token",
-        )?;
-    }
+    // WhatsApp {access_token, verify_token, app_secret} migrated to Secret newtype
+    // (lazy reveal at channel construction; no eager decrypt needed here).
     if let Some(ref mut linq) = channels.linq {
         decrypt_secret(
             store,
@@ -4436,23 +4421,8 @@ fn encrypt_channel_secrets(
             "config.channels_config.matrix.access_token",
         )?;
     }
-    if let Some(ref mut whatsapp) = channels.whatsapp {
-        encrypt_optional_secret(
-            store,
-            &mut whatsapp.access_token,
-            "config.channels_config.whatsapp.access_token",
-        )?;
-        encrypt_optional_secret(
-            store,
-            &mut whatsapp.app_secret,
-            "config.channels_config.whatsapp.app_secret",
-        )?;
-        encrypt_optional_secret(
-            store,
-            &mut whatsapp.verify_token,
-            "config.channels_config.whatsapp.verify_token",
-        )?;
-    }
+    // WhatsApp {access_token, verify_token, app_secret} migrated to Secret newtype
+    // (Secret handles its own at-rest representation; no eager encrypt needed here).
     if let Some(ref mut linq) = channels.linq {
         encrypt_secret(
             store,
@@ -7197,9 +7167,9 @@ channel_id = "C123"
     #[test]
     async fn whatsapp_config_serde() {
         let wc = WhatsAppConfig {
-            access_token: Some("EAABx...".into()),
+            access_token: Some(crate::security::Secret::from_wire("EAABx...".into())),
             phone_number_id: Some("123456789".into()),
-            verify_token: Some("my-verify-token".into()),
+            verify_token: Some(crate::security::Secret::from_wire("my-verify-token".into())),
             app_secret: None,
             session_path: None,
             pair_phone: None,
@@ -7208,19 +7178,25 @@ channel_id = "C123"
         };
         let json = serde_json::to_string(&wc).unwrap();
         let parsed: WhatsAppConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.access_token, Some("EAABx...".into()));
+        assert_eq!(
+            parsed.access_token.as_ref().map(|s| s.as_wire_str()),
+            Some("EAABx...")
+        );
         assert_eq!(parsed.phone_number_id, Some("123456789".into()));
-        assert_eq!(parsed.verify_token, Some("my-verify-token".into()));
+        assert_eq!(
+            parsed.verify_token.as_ref().map(|s| s.as_wire_str()),
+            Some("my-verify-token")
+        );
         assert_eq!(parsed.allowed_numbers.len(), 2);
     }
 
     #[test]
     async fn whatsapp_config_toml_roundtrip() {
         let wc = WhatsAppConfig {
-            access_token: Some("tok".into()),
+            access_token: Some(crate::security::Secret::from_wire("tok".into())),
             phone_number_id: Some("12345".into()),
-            verify_token: Some("verify".into()),
-            app_secret: Some("secret123".into()),
+            verify_token: Some(crate::security::Secret::from_wire("verify".into())),
+            app_secret: Some(crate::security::Secret::from_wire("secret123".into())),
             session_path: None,
             pair_phone: None,
             pair_code: None,
@@ -7229,6 +7205,10 @@ channel_id = "C123"
         let toml_str = toml::to_string(&wc).unwrap();
         let parsed: WhatsAppConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed.phone_number_id, Some("12345".into()));
+        assert_eq!(
+            parsed.app_secret.as_ref().map(|s| s.as_wire_str()),
+            Some("secret123")
+        );
         assert_eq!(parsed.allowed_numbers, vec!["+1"]);
     }
 
@@ -7242,9 +7222,9 @@ channel_id = "C123"
     #[test]
     async fn whatsapp_config_wildcard_allowed() {
         let wc = WhatsAppConfig {
-            access_token: Some("tok".into()),
+            access_token: Some(crate::security::Secret::from_wire("tok".into())),
             phone_number_id: Some("123".into()),
-            verify_token: Some("ver".into()),
+            verify_token: Some(crate::security::Secret::from_wire("ver".into())),
             app_secret: None,
             session_path: None,
             pair_phone: None,
@@ -7259,9 +7239,9 @@ channel_id = "C123"
     #[test]
     async fn whatsapp_config_backend_type_cloud_precedence_when_ambiguous() {
         let wc = WhatsAppConfig {
-            access_token: Some("tok".into()),
+            access_token: Some(crate::security::Secret::from_wire("tok".into())),
             phone_number_id: Some("123".into()),
-            verify_token: Some("ver".into()),
+            verify_token: Some(crate::security::Secret::from_wire("ver".into())),
             app_secret: None,
             session_path: Some("~/.plaw/state/whatsapp-web/session.db".into()),
             pair_phone: None,
@@ -7301,9 +7281,9 @@ channel_id = "C123"
             matrix: None,
             signal: None,
             whatsapp: Some(WhatsAppConfig {
-                access_token: Some("tok".into()),
+                access_token: Some(crate::security::Secret::from_wire("tok".into())),
                 phone_number_id: Some("123".into()),
-                verify_token: Some("ver".into()),
+                verify_token: Some(crate::security::Secret::from_wire("ver".into())),
                 app_secret: None,
                 session_path: None,
                 pair_phone: None,
