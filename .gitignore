@@ -43,3 +43,10 @@ plaw/target/
 # Stray dotnet-suggest sentinel file — Windows env var %USERPROFILE% doesn't
 # expand in bash so it gets created as a literal directory name at repo root.
 %USERPROFILE%/
+
+# Claude Code local skills manifest (machine-specific absolute paths)
+.claude-skills.json
+
+# check_versions.py output — regenerable dep-version snapshot, may contain
+# transient network-error entries
+versions.json
