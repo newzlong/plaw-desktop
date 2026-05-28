@@ -335,7 +335,7 @@ allowed_users = ["user1", "*"]
 "#;
         let config: crate::config::schema::DingTalkConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.client_id, "app_id_123");
-        assert_eq!(config.client_secret, "secret_456");
+        assert_eq!(config.client_secret.as_wire_str(), "secret_456");
         assert_eq!(config.allowed_users, vec!["user1", "*"]);
     }
 

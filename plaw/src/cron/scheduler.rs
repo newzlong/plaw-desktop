@@ -460,9 +460,14 @@ pub(crate) async fn deliver_announcement(
                 .qq
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("qq channel not configured"))?;
+            let secret_store = crate::config::secret_store_for(config);
+            let app_secret = qq
+                .app_secret
+                .reveal(&secret_store)
+                .context("decrypt channels.qq.app_secret for cron qq send")?;
             let channel = QQChannel::new(
                 qq.app_id.clone(),
-                qq.app_secret.clone(),
+                app_secret,
                 qq.allowed_users.clone(),
             );
             channel.send(&SendMessage::new(output, target)).await?;

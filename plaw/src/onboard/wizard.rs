@@ -4934,7 +4934,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
 
                 config.dingtalk = Some(DingTalkConfig {
                     client_id,
-                    client_secret,
+                    client_secret: crate::security::Secret::from_wire(client_secret),
                     allowed_users,
                 });
             }
@@ -5021,7 +5021,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
 
                 config.qq = Some(QQConfig {
                     app_id,
-                    app_secret,
+                    app_secret: crate::security::Secret::from_wire(app_secret),
                     allowed_users,
                     receive_mode,
                     webhook_secret: None,
@@ -7463,7 +7463,7 @@ mod tests {
         channels.mattermost = None;
         channels.qq = Some(crate::config::schema::QQConfig {
             app_id: "app-id".into(),
-            app_secret: "app-secret".into(),
+            app_secret: crate::security::Secret::from_wire("app-secret".into()),
             allowed_users: vec!["*".into()],
             receive_mode: crate::config::schema::QQReceiveMode::Websocket,
             webhook_secret: None,

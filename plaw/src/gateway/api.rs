@@ -774,10 +774,10 @@ fn mask_sensitive_fields(config: &crate::config::Config) -> crate::config::Confi
         mask_optional_secret_typed(&mut feishu.verification_token);
     }
     if let Some(dingtalk) = masked.channels_config.dingtalk.as_mut() {
-        mask_required_secret(&mut dingtalk.client_secret);
+        mask_required_secret_typed(&mut dingtalk.client_secret);
     }
     if let Some(qq) = masked.channels_config.qq.as_mut() {
-        mask_required_secret(&mut qq.app_secret);
+        mask_required_secret_typed(&mut qq.app_secret);
     }
     if let Some(nostr) = masked.channels_config.nostr.as_mut() {
         mask_required_secret(&mut nostr.private_key);
@@ -949,13 +949,13 @@ fn restore_masked_sensitive_fields(
         incoming.channels_config.dingtalk.as_mut(),
         current.channels_config.dingtalk.as_ref(),
     ) {
-        restore_required_secret(&mut incoming_ch.client_secret, &current_ch.client_secret);
+        restore_required_secret_typed(&mut incoming_ch.client_secret, &current_ch.client_secret);
     }
     if let (Some(incoming_ch), Some(current_ch)) = (
         incoming.channels_config.qq.as_mut(),
         current.channels_config.qq.as_ref(),
     ) {
-        restore_required_secret(&mut incoming_ch.app_secret, &current_ch.app_secret);
+        restore_required_secret_typed(&mut incoming_ch.app_secret, &current_ch.app_secret);
     }
     if let (Some(incoming_ch), Some(current_ch)) = (
         incoming.channels_config.nostr.as_mut(),

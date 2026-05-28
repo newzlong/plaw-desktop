@@ -3807,8 +3807,9 @@ impl Default for AuditConfig {
 pub struct DingTalkConfig {
     /// Client ID (AppKey) from DingTalk developer console
     pub client_id: String,
-    /// Client Secret (AppSecret) from DingTalk developer console
-    pub client_secret: String,
+    /// Client Secret (AppSecret) from DingTalk developer console.
+    /// Encrypted at rest via [`crate::security::Secret`]; revealed at channel construction.
+    pub client_secret: crate::security::Secret,
     /// Allowed user IDs (staff IDs). Empty = deny all, "*" = allow all
     #[serde(default)]
     pub allowed_users: Vec<String>,
@@ -3837,8 +3838,9 @@ pub enum QQReceiveMode {
 pub struct QQConfig {
     /// App ID from QQ Bot developer console
     pub app_id: String,
-    /// App Secret from QQ Bot developer console
-    pub app_secret: String,
+    /// App Secret from QQ Bot developer console.
+    /// Encrypted at rest via [`crate::security::Secret`]; revealed at channel construction.
+    pub app_secret: crate::security::Secret,
     /// Allowed user IDs. Empty = deny all, "*" = allow all
     #[serde(default)]
     pub allowed_users: Vec<String>,
@@ -4328,20 +4330,8 @@ fn decrypt_channel_secrets(
     // nextcloud_talk.{app_token, webhook_secret} migrated to Secret newtype (lazy reveal).
     // irc.{server,nickserv,sasl}_password migrated to Secret newtype (lazy reveal at channel construction).
     // lark.{app_secret, encrypt_key, verification_token} migrated to `Secret` newtype.
-    if let Some(ref mut dingtalk) = channels.dingtalk {
-        decrypt_secret(
-            store,
-            &mut dingtalk.client_secret,
-            "config.channels_config.dingtalk.client_secret",
-        )?;
-    }
-    if let Some(ref mut qq) = channels.qq {
-        decrypt_secret(
-            store,
-            &mut qq.app_secret,
-            "config.channels_config.qq.app_secret",
-        )?;
-    }
+    // dingtalk.client_secret migrated to Secret newtype (lazy reveal at channel construction).
+    // qq.app_secret migrated to Secret newtype (lazy reveal at channel construction).
     if let Some(ref mut nostr) = channels.nostr {
         decrypt_secret(
             store,
@@ -4382,20 +4372,8 @@ fn encrypt_channel_secrets(
     // nextcloud_talk.{app_token, webhook_secret} migrated to Secret newtype (self-managed at-rest).
     // irc.{server,nickserv,sasl}_password migrated to Secret newtype (self-managed at-rest).
     // lark.{app_secret, encrypt_key, verification_token} migrated to `Secret` newtype.
-    if let Some(ref mut dingtalk) = channels.dingtalk {
-        encrypt_secret(
-            store,
-            &mut dingtalk.client_secret,
-            "config.channels_config.dingtalk.client_secret",
-        )?;
-    }
-    if let Some(ref mut qq) = channels.qq {
-        encrypt_secret(
-            store,
-            &mut qq.app_secret,
-            "config.channels_config.qq.app_secret",
-        )?;
-    }
+    // dingtalk.client_secret migrated to Secret newtype (self-managed at-rest).
+    // qq.app_secret migrated to Secret newtype (self-managed at-rest).
     if let Some(ref mut nostr) = channels.nostr {
         encrypt_secret(
             store,
@@ -8933,7 +8911,7 @@ default_model = "legacy-model"
     async fn qq_config_toml_roundtrip_receive_mode() {
         let qc = QQConfig {
             app_id: "123".into(),
-            app_secret: "secret".into(),
+            app_secret: crate::security::Secret::from_wire("secret".into()),
             allowed_users: vec!["*".into()],
             receive_mode: QQReceiveMode::Websocket,
             webhook_secret: None,
