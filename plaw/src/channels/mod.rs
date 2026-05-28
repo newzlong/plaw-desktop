@@ -4395,14 +4395,20 @@ fn collect_configured_channels(
     }
 
     if let Some(ref dt) = config.channels_config.dingtalk {
-        channels.push(ConfiguredChannel {
-            display_name: "DingTalk",
-            channel: Arc::new(DingTalkChannel::new(
-                dt.client_id.clone(),
-                dt.client_secret.clone(),
-                dt.allowed_users.clone(),
-            )),
-        });
+        match dt.client_secret.reveal(&secret_store) {
+            Ok(client_secret) => channels.push(ConfiguredChannel {
+                display_name: "DingTalk",
+                channel: Arc::new(DingTalkChannel::new(
+                    dt.client_id.clone(),
+                    client_secret,
+                    dt.allowed_users.clone(),
+                )),
+            }),
+            Err(e) => tracing::error!(
+                error = %e,
+                "Failed to decrypt channels.dingtalk.client_secret — DingTalk channel skipped"
+            ),
+        }
     }
 
     if let Some(ref qq) = config.channels_config.qq {
@@ -4411,14 +4417,20 @@ fn collect_configured_channels(
                 "QQ channel configured with receive_mode=webhook; websocket listener startup skipped."
             );
         } else {
-            channels.push(ConfiguredChannel {
-                display_name: "QQ",
-                channel: Arc::new(QQChannel::new(
-                    qq.app_id.clone(),
-                    qq.app_secret.clone(),
-                    qq.allowed_users.clone(),
-                )),
-            });
+            match qq.app_secret.reveal(&secret_store) {
+                Ok(app_secret) => channels.push(ConfiguredChannel {
+                    display_name: "QQ",
+                    channel: Arc::new(QQChannel::new(
+                        qq.app_id.clone(),
+                        app_secret,
+                        qq.allowed_users.clone(),
+                    )),
+                }),
+                Err(e) => tracing::error!(
+                    error = %e,
+                    "Failed to decrypt channels.qq.app_secret — QQ channel skipped"
+                ),
+            }
         }
     }
 

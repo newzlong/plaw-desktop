@@ -424,7 +424,7 @@ mod tests {
         let mut config = Config::default();
         config.channels_config.dingtalk = Some(crate::config::schema::DingTalkConfig {
             client_id: "client_id".into(),
-            client_secret: "client_secret".into(),
+            client_secret: crate::security::Secret::from_wire("client_secret".into()),
             allowed_users: vec!["*".into()],
         });
         assert!(has_supervised_channels(&config));
@@ -450,7 +450,7 @@ mod tests {
         let mut config = Config::default();
         config.channels_config.qq = Some(crate::config::schema::QQConfig {
             app_id: "app-id".into(),
-            app_secret: "app-secret".into(),
+            app_secret: crate::security::Secret::from_wire("app-secret".into()),
             allowed_users: vec!["*".into()],
             receive_mode: crate::config::schema::QQReceiveMode::Websocket,
             webhook_secret: None,

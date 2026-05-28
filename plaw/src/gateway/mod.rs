@@ -676,13 +676,23 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         });
 
     // QQ channel (if configured)
-    let qq_channel: Option<Arc<QQChannel>> = config.channels_config.qq.as_ref().map(|qq_cfg| {
-        Arc::new(QQChannel::new(
-            qq_cfg.app_id.clone(),
-            qq_cfg.app_secret.clone(),
-            qq_cfg.allowed_users.clone(),
-        ))
-    });
+    let qq_channel: Option<Arc<QQChannel>> =
+        config.channels_config.qq.as_ref().and_then(|qq_cfg| {
+            match qq_cfg.app_secret.reveal(secret_store.as_ref()) {
+                Ok(app_secret) => Some(Arc::new(QQChannel::new(
+                    qq_cfg.app_id.clone(),
+                    app_secret,
+                    qq_cfg.allowed_users.clone(),
+                ))),
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "Failed to decrypt channels.qq.app_secret — QQ gateway disabled"
+                    );
+                    None
+                }
+            }
+        });
     let qq_webhook_enabled = config
         .channels_config
         .qq
