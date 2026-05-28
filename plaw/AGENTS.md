@@ -262,13 +262,6 @@ All contributors (human or agent) must follow the same collaboration flow:
 - Use supersede flow only when maintainers explicitly want to preserve valid work and attribution.
 - In public PR close/block comments, state only direct actionable reasons; do not include internal decision-process narration or "non-reason" qualifiers.
 
-### 6.1B Assignee-First Gate (Required)
-
-- For any GitHub issue or PR selected for active handling, the first action is to ensure `@chumyin` is an assignee.
-- This is additive ownership: keep existing assignees and add `@chumyin` if missing.
-- Do not start triage/review/implementation/merge work before assignee assignment is confirmed.
-- Queue safety rule: assign only the currently active target; do not pre-assign future queued targets.
-
 ### 6.2 Worktree Workflow (Required for All Task Streams)
 
 Use Git worktrees to isolate every active task stream safely and predictably:
