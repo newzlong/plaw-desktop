@@ -73,6 +73,23 @@
                 <div v-else-if="step.type === 'text'" class="step-text">
                   <span v-html="renderMarkdown(step.content)" />
                 </div>
+                <!-- Approval request step (interactive action card) -->
+                <div v-else-if="step.type === 'approval'" class="step-approval">
+                  <div class="step-approval__header">
+                    <span class="step-approval__icon" />
+                    <span class="step-approval__title">{{ isZh ? '需要授权' : 'Approval required' }}</span>
+                    <span class="step-approval__tool">{{ step.name }}</span>
+                  </div>
+                  <pre v-if="step.args" class="step-approval__args">{{ formatArgs(step.args) }}</pre>
+                  <div v-if="step.status === 'pending'" class="step-approval__actions">
+                    <GlassButton size="sm" variant="primary" @click="sendApproval(step, 'allow_once')">{{ isZh ? '允许一次' : 'Allow once' }}</GlassButton>
+                    <GlassButton size="sm" @click="sendApproval(step, 'allow_and_remember')">{{ isZh ? '允许并记住' : 'Allow & remember' }}</GlassButton>
+                    <GlassButton size="sm" variant="danger" @click="sendApproval(step, 'deny')">{{ isZh ? '拒绝' : 'Deny' }}</GlassButton>
+                  </div>
+                  <div v-else class="step-approval__resolved">
+                    {{ step.decision === 'deny' ? (isZh ? '已拒绝' : 'Denied') : (isZh ? '已允许' : 'Allowed') }}
+                  </div>
+                </div>
               </div>
             </div>
             <!-- User attached images -->
@@ -759,6 +776,18 @@ function handleWsMessage(data) {
     }
     updateLastAssistant()
     scrollToBottom()
+  } else if (type === 'approval_request') {
+    // Supervised tool call needs confirmation — render an inline action card.
+    flushTextToStep()
+    currentAssistant.value.steps.push({
+      type: 'approval',
+      request_id: data.request_id || '',
+      name: data.tool_name || 'unknown',
+      args: data.args || null,
+      status: 'pending',
+    })
+    updateLastAssistant()
+    scrollToBottom()
   } else if (type === 'done') {
     ctxUpdateFromDone(data)
     // If full_response arrived but no chunks were streamed, feed it to typewriter
@@ -1022,6 +1051,27 @@ function cancelMessage() {
   if (ws && ws.readyState === WebSocket.OPEN) {
     try { ws.send(JSON.stringify({ type: 'cancel' })) } catch {}
   }
+}
+
+/** Respond to an approval_request action card. decision: allow_once|allow_and_remember|deny */
+function sendApproval(step, decision) {
+  if (!step || step.status !== 'pending') return
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    try {
+      ws.send(JSON.stringify({
+        type: 'approval_response',
+        request_id: step.request_id,
+        decision,
+      }))
+    } catch (e) {
+      console.error('[approval] send failed:', e)
+      return
+    }
+  }
+  // Mark resolved so the buttons disable / collapse to a status line.
+  step.status = 'resolved'
+  step.decision = decision
+  updateLastAssistant()
 }
 
 // React to global process state changes
@@ -1514,6 +1564,64 @@ onUnmounted(() => {
   font-size: 0.88rem;
   line-height: 1.6;
   color: var(--text-primary);
+}
+
+/* Approval request — inline action card */
+.step-approval {
+  margin: 4px 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  border: 1px solid var(--status-warn, var(--border-strong));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.step-approval__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.82rem;
+}
+.step-approval__icon {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--status-warn, var(--plaw-accent));
+}
+.step-approval__title {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.step-approval__tool {
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 0.74rem;
+  color: var(--text-muted);
+}
+.step-approval__args {
+  margin: 0;
+  padding: 6px 8px;
+  background: var(--bg-base);
+  border-radius: var(--radius-sm);
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 0.74rem;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 160px;
+  overflow-y: auto;
+}
+.step-approval__actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.step-approval__resolved {
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  font-style: italic;
 }
 
 .step-tool__body {

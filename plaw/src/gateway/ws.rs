@@ -3,16 +3,29 @@
 //! Protocol:
 //! ```text
 //! Client -> Server: {"type":"message","content":"Hello"}
+//! Client -> Server: {"type":"cancel"}
+//! Client -> Server: {"type":"approval_response","request_id":"...","decision":"allow_once"|"allow_and_remember"|"deny"}
 //! Server -> Client: {"type":"chunk","content":"Hi! "}
 //! Server -> Client: {"type":"tool_call","name":"shell","args":{...}}
 //! Server -> Client: {"type":"tool_result","name":"shell","output":"..."}
+//! Server -> Client: {"type":"approval_request","request_id":"...","tool_name":"shell","args":{...},"reason":"interactive approval required"}
 //! Server -> Client: {"type":"done","full_response":"..."}
 //! ```
+//!
+//! Approval round-trip: when a supervised tool call needs confirmation the
+//! agent loop emits a [`NonCliApprovalPrompt`] which this handler relays to
+//! the client as an `approval_request` frame. The client replies with an
+//! `approval_response` frame; the decision string is mapped to an
+//! [`ApprovalResponse`] and fed back into the loop via
+//! [`ApprovalManager::record_non_cli_pending_resolution`].
 
 use super::AppState;
-use crate::agent::loop_::{is_tool_loop_cancelled, run_tool_call_loop, DRAFT_CLEAR_SENTINEL, DRAFT_PROGRESS_SENTINEL};
+use crate::agent::loop_::{
+    is_tool_loop_cancelled, run_tool_call_loop_with_non_cli_approval_context,
+    NonCliApprovalContext, NonCliApprovalPrompt, DRAFT_CLEAR_SENTINEL, DRAFT_PROGRESS_SENTINEL,
+};
 use crate::agent::loop_::history::{auto_compact_history, summary_has_pending_tasks, trim_history};
-use crate::approval::ApprovalManager;
+use crate::approval::{ApprovalManager, ApprovalResponse};
 use crate::observability::traits::{Observer, ObserverEvent, ObserverMetric};
 use crate::providers::ChatMessage;
 use crate::security::prompt_guard::{PromptGuard, GuardAction, GuardResult};
@@ -551,7 +564,20 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         let result = {
             let (delta_tx, mut delta_rx) = mpsc::channel::<String>(64);
 
-            let loop_fut = run_tool_call_loop(
+            // Non-CLI approval channel: the agent loop fires a prompt on
+            // approval_tx when a supervised tool needs confirmation; we drain
+            // approval_rx in the select! loop and relay each as an
+            // `approval_request` frame to the client. Single-user desktop, so
+            // constant sender/reply_target ids are fine.
+            let (approval_tx, mut approval_rx) =
+                tokio::sync::mpsc::unbounded_channel::<NonCliApprovalPrompt>();
+            let non_cli_approval_context = NonCliApprovalContext {
+                sender: "webchat".into(),
+                reply_target: "webchat".into(),
+                prompt_tx: approval_tx,
+            };
+
+            let loop_fut = run_tool_call_loop_with_non_cli_approval_context(
                 state.provider.as_ref(),
                 &mut history,
                 state.tools_registry_exec.as_ref(),
@@ -562,6 +588,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 true, // silent - no console output
                 Some(&approval_manager),
                 "webchat",
+                Some(non_cli_approval_context),
                 &state.multimodal,
                 state.max_tool_iterations,
                 Some(cancel_token.clone()),
@@ -578,6 +605,19 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             for event in delta_to_ws_events(&msg) {
                                 let _ = ws_tx.send(Message::Text(event.into())).await;
                             }
+                        }
+                    }
+                    // Relay supervised-tool approval prompts to the client.
+                    prompt = approval_rx.recv() => {
+                        if let Some(p) = prompt {
+                            let frame = serde_json::json!({
+                                "type": "approval_request",
+                                "request_id": p.request_id,
+                                "tool_name": p.tool_name,
+                                "args": p.arguments,
+                                "reason": "interactive approval required",
+                            });
+                            let _ = ws_tx.send(Message::Text(frame.to_string().into())).await;
                         }
                     }
                     // Monitor WebSocket for close/cancel/follow-up during agent execution
@@ -597,6 +637,19 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                             tracing::info!("ws_chat: user follow-up message received, interrupting agent loop");
                                             pending_user_msg = Some(text.to_string());
                                             cancel_token.cancel();
+                                        }
+                                        Some("approval_response") => {
+                                            // Client resolved an approval_request. Map the
+                                            // decision string and feed it back into the loop.
+                                            let request_id = v["request_id"].as_str().unwrap_or("");
+                                            let decision = v["decision"].as_str().unwrap_or("");
+                                            if request_id.is_empty() {
+                                                tracing::warn!("ws_chat: approval_response missing request_id, ignoring");
+                                            } else if let Some(resp) = map_approval_decision(decision) {
+                                                approval_manager.record_non_cli_pending_resolution(request_id, resp);
+                                            } else {
+                                                tracing::warn!("ws_chat: approval_response unknown decision {decision:?}, ignoring");
+                                            }
                                         }
                                         _ => {}
                                     }
@@ -932,12 +985,48 @@ fn extract_ws_bearer_token(headers: &HeaderMap) -> Option<String> {
     None
 }
 
+/// Map a client `approval_response.decision` string to an [`ApprovalResponse`].
+///
+/// Returns `None` for unknown/missing decisions so the caller can ignore them
+/// rather than fail open. `"allow_and_remember"` is treated identically to
+/// `"allow_once"` (both → `Yes`) for Stage 1.
+// TODO(stage3): map "allow_and_remember" to a persisted per-command-prefix
+// allowlist entry instead of a one-shot Yes.
+fn map_approval_decision(decision: &str) -> Option<ApprovalResponse> {
+    match decision {
+        "allow_once" | "allow_and_remember" => Some(ApprovalResponse::Yes),
+        "deny" => Some(ApprovalResponse::No),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tools::{Tool, ToolResult};
     use async_trait::async_trait;
     use axum::http::HeaderValue;
+
+    #[test]
+    fn map_approval_decision_maps_known_decisions() {
+        assert_eq!(
+            map_approval_decision("allow_once"),
+            Some(ApprovalResponse::Yes)
+        );
+        // Stage 1: allow_and_remember is treated as a one-shot Yes.
+        assert_eq!(
+            map_approval_decision("allow_and_remember"),
+            Some(ApprovalResponse::Yes)
+        );
+        assert_eq!(map_approval_decision("deny"), Some(ApprovalResponse::No));
+    }
+
+    #[test]
+    fn map_approval_decision_rejects_unknown_and_empty() {
+        assert_eq!(map_approval_decision("always"), None);
+        assert_eq!(map_approval_decision(""), None);
+        assert_eq!(map_approval_decision("yes"), None);
+    }
 
     #[test]
     fn extract_ws_bearer_token_prefers_authorization_header() {
