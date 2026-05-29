@@ -632,7 +632,7 @@ pub(crate) async fn run_tool_call_loop(
                         ApprovalResponse::Yes,
                         channel_name,
                     );
-                } else if mgr.needs_approval(&tool_name) {
+                } else if mgr.needs_approval(&tool_name, &tool_args) {
                     let request = ApprovalRequest {
                         tool_name: tool_name.clone(),
                         arguments: tool_args.clone(),

@@ -81,9 +81,15 @@
                     <span class="step-approval__tool">{{ step.name }}</span>
                   </div>
                   <pre v-if="step.args" class="step-approval__args">{{ formatArgs(step.args) }}</pre>
+                  <!-- Shell-only: editable command prefix to remember (verbatim, user-editable). -->
+                  <label v-if="step.status === 'pending' && isShellApproval(step)" class="step-approval__prefix">
+                    <span class="step-approval__prefix-label">{{ isZh ? '记住前缀' : 'Remember prefix' }}</span>
+                    <input v-model="step.prefixInput" type="text" class="step-approval__prefix-input"
+                      :placeholder="isZh ? '例如：git status' : 'e.g. git status'" spellcheck="false" autocomplete="off" />
+                  </label>
                   <div v-if="step.status === 'pending'" class="step-approval__actions">
                     <GlassButton size="sm" variant="primary" @click="sendApproval(step, 'allow_once')">{{ isZh ? '允许一次' : 'Allow once' }}</GlassButton>
-                    <GlassButton size="sm" @click="sendApproval(step, 'allow_and_remember')">{{ isZh ? '允许并记住' : 'Allow & remember' }}</GlassButton>
+                    <GlassButton size="sm" @click="sendApproval(step, 'allow_and_remember', step.prefixInput)">{{ isZh ? '允许并记住' : 'Allow & remember' }}</GlassButton>
                     <GlassButton size="sm" variant="danger" @click="sendApproval(step, 'deny')">{{ isZh ? '拒绝' : 'Deny' }}</GlassButton>
                   </div>
                   <div v-else class="step-approval__resolved">
@@ -779,12 +785,17 @@ function handleWsMessage(data) {
   } else if (type === 'approval_request') {
     // Supervised tool call needs confirmation — render an inline action card.
     flushTextToStep()
+    const toolName = data.tool_name || 'unknown'
+    const args = data.args || null
     currentAssistant.value.steps.push({
       type: 'approval',
       request_id: data.request_id || '',
-      name: data.tool_name || 'unknown',
-      args: data.args || null,
+      name: toolName,
+      args,
       status: 'pending',
+      // Editable default for "allow & remember" (shell only). The user can
+      // edit it; the backend stores whatever string we send, verbatim.
+      prefixInput: defaultApprovalPrefix(toolName, args),
     })
     updateLastAssistant()
     scrollToBottom()
@@ -1053,16 +1064,40 @@ function cancelMessage() {
   }
 }
 
-/** Respond to an approval_request action card. decision: allow_once|allow_and_remember|deny */
-function sendApproval(step, decision) {
+/** True when this approval card is for the shell tool with a string command. */
+function isShellApproval(step) {
+  return step && step.name === 'shell' && typeof step.args?.command === 'string'
+}
+
+/**
+ * Sensible default prefix for "allow & remember" (shell only): the first
+ * up-to-2 whitespace-separated tokens of the command (e.g. "git status").
+ * Returns '' for non-shell tools so "allow & remember" becomes a whole-tool grant.
+ */
+function defaultApprovalPrefix(toolName, args) {
+  if (toolName !== 'shell' || typeof args?.command !== 'string') return ''
+  return args.command.trim().split(/\s+/).filter(Boolean).slice(0, 2).join(' ')
+}
+
+/**
+ * Respond to an approval_request action card.
+ * decision: allow_once | allow_and_remember | deny
+ * prefix: optional user-edited command prefix (only meaningful for shell +
+ * allow_and_remember). Sent trimmed; empty → whole-tool grant on the backend.
+ */
+function sendApproval(step, decision, prefix) {
   if (!step || step.status !== 'pending') return
   if (ws && ws.readyState === WebSocket.OPEN) {
     try {
-      ws.send(JSON.stringify({
+      const frame = {
         type: 'approval_response',
         request_id: step.request_id,
         decision,
-      }))
+      }
+      if (decision === 'allow_and_remember') {
+        frame.pattern = typeof prefix === 'string' ? prefix.trim() : ''
+      }
+      ws.send(JSON.stringify(frame))
     } catch (e) {
       console.error('[approval] send failed:', e)
       return
@@ -1612,6 +1647,30 @@ onUnmounted(() => {
   word-break: break-all;
   max-height: 160px;
   overflow-y: auto;
+}
+.step-approval__prefix {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.step-approval__prefix-label {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+.step-approval__prefix-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 0.74rem;
+  outline: none;
+}
+.step-approval__prefix-input:focus {
+  border-color: var(--status-warn, var(--plaw-accent));
 }
 .step-approval__actions {
   display: flex;

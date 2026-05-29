@@ -639,12 +639,33 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                             cancel_token.cancel();
                                         }
                                         Some("approval_response") => {
-                                            // Client resolved an approval_request. Map the
-                                            // decision string and feed it back into the loop.
+                                            // Client resolved an approval_request. Feed the
+                                            // decision back into the waiting tool loop.
                                             let request_id = v["request_id"].as_str().unwrap_or("");
                                             let decision = v["decision"].as_str().unwrap_or("");
                                             if request_id.is_empty() {
                                                 tracing::warn!("ws_chat: approval_response missing request_id, ignoring");
+                                            } else if decision == "allow_and_remember" {
+                                                // Persistent grant: build an allowlist entry,
+                                                // apply it live, persist it to config.toml, then
+                                                // resolve the pending request as a one-shot Yes.
+                                                if let Some(tool) = approval_manager
+                                                    .non_cli_pending_request_tool_name(request_id)
+                                                {
+                                                    let pattern =
+                                                        v["pattern"].as_str().unwrap_or("").trim();
+                                                    let grant = build_persistent_grant(&tool, pattern);
+                                                    approval_manager
+                                                        .apply_persistent_runtime_grant(&grant);
+                                                    persist_auto_approve_grant(&state.config, &grant)
+                                                        .await;
+                                                    approval_manager.record_non_cli_pending_resolution(
+                                                        request_id,
+                                                        ApprovalResponse::Yes,
+                                                    );
+                                                } else {
+                                                    tracing::warn!("ws_chat: allow_and_remember for unknown/expired request {request_id:?}, ignoring");
+                                                }
                                             } else if let Some(resp) = map_approval_decision(decision) {
                                                 approval_manager.record_non_cli_pending_resolution(request_id, resp);
                                             } else {
@@ -988,15 +1009,61 @@ fn extract_ws_bearer_token(headers: &HeaderMap) -> Option<String> {
 /// Map a client `approval_response.decision` string to an [`ApprovalResponse`].
 ///
 /// Returns `None` for unknown/missing decisions so the caller can ignore them
-/// rather than fail open. `"allow_and_remember"` is treated identically to
-/// `"allow_once"` (both → `Yes`) for Stage 1.
-// TODO(stage3): map "allow_and_remember" to a persisted per-command-prefix
-// allowlist entry instead of a one-shot Yes.
+/// rather than fail open. `"allow_and_remember"` is intentionally NOT mapped
+/// here: it needs the pending-request tool lookup + persistent grant, so the
+/// `approval_response` ws arm handles it explicitly before consulting this
+/// pure mapper. `map_approval_decision` only covers the one-shot decisions.
 fn map_approval_decision(decision: &str) -> Option<ApprovalResponse> {
     match decision {
-        "allow_once" | "allow_and_remember" => Some(ApprovalResponse::Yes),
+        "allow_once" => Some(ApprovalResponse::Yes),
         "deny" => Some(ApprovalResponse::No),
         _ => None,
+    }
+}
+
+/// Build a persistent allowlist entry from a tool name and an optional,
+/// user-supplied, already-trimmed `pattern`.
+///
+/// - Empty `pattern` (or any non-`shell` tool) → whole-tool grant `"<tool>"`.
+/// - `shell` tool with non-empty `pattern` → command-prefix grant
+///   `"shell:<pattern>"`. The pattern is stored VERBATIM — there is no
+///   server-side prefix-derivation heuristic; the safe-prefix match rule
+///   (see `approval::prefix_match_is_safe`) is applied at check time.
+fn build_persistent_grant(tool: &str, pattern: &str) -> String {
+    if pattern.is_empty() || tool != "shell" {
+        tool.to_string()
+    } else {
+        format!("{tool}:{pattern}")
+    }
+}
+
+/// Persist a grant into `[autonomy].auto_approve` in config.toml (deduped).
+///
+/// Mirrors the live runtime grant so it survives restart. Best-effort: a save
+/// failure is logged but does not abort the approval (the live grant already
+/// took effect via `apply_persistent_runtime_grant`). Follows the parking_lot
+/// clone-out / save / write-back pattern (see `gateway::persist_pairing_tokens`).
+async fn persist_auto_approve_grant(
+    config: &std::sync::Arc<parking_lot::Mutex<crate::config::Config>>,
+    grant: &str,
+) {
+    // Clone the config out so the (non-Send) guard is dropped before .await.
+    let mut updated = { config.lock().clone() };
+    if updated.autonomy.auto_approve.iter().any(|e| e == grant) {
+        // Already persisted — keep the runtime/disk views consistent and bail.
+        return;
+    }
+    updated.autonomy.auto_approve.push(grant.to_string());
+    match updated.save().await {
+        Ok(()) => {
+            *config.lock() = updated;
+            tracing::info!("ws_chat: persisted auto_approve grant {grant:?} to config.toml");
+        }
+        Err(e) => {
+            tracing::warn!(
+                "ws_chat: failed to persist auto_approve grant {grant:?} (live grant still active): {e}"
+            );
+        }
     }
 }
 
@@ -1013,19 +1080,41 @@ mod tests {
             map_approval_decision("allow_once"),
             Some(ApprovalResponse::Yes)
         );
-        // Stage 1: allow_and_remember is treated as a one-shot Yes.
-        assert_eq!(
-            map_approval_decision("allow_and_remember"),
-            Some(ApprovalResponse::Yes)
-        );
         assert_eq!(map_approval_decision("deny"), Some(ApprovalResponse::No));
     }
 
     #[test]
     fn map_approval_decision_rejects_unknown_and_empty() {
+        // Stage 3: allow_and_remember is handled explicitly in the ws arm
+        // (persistent grant), so the pure mapper no longer maps it.
+        assert_eq!(map_approval_decision("allow_and_remember"), None);
         assert_eq!(map_approval_decision("always"), None);
         assert_eq!(map_approval_decision(""), None);
         assert_eq!(map_approval_decision("yes"), None);
+    }
+
+    #[test]
+    fn build_persistent_grant_shell_prefix() {
+        assert_eq!(
+            build_persistent_grant("shell", "git status"),
+            "shell:git status"
+        );
+    }
+
+    #[test]
+    fn build_persistent_grant_empty_pattern_is_whole_tool() {
+        assert_eq!(build_persistent_grant("shell", ""), "shell");
+        assert_eq!(build_persistent_grant("file_read", ""), "file_read");
+    }
+
+    #[test]
+    fn build_persistent_grant_non_shell_ignores_pattern() {
+        // A pattern only means something for the shell tool; everything else
+        // is a whole-tool grant.
+        assert_eq!(
+            build_persistent_grant("file_read", "anything"),
+            "file_read"
+        );
     }
 
     #[test]
