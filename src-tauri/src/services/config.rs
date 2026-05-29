@@ -105,15 +105,16 @@ pub fn ensure_config_defaults(data_dir: &Path) {
                     "git", "ls", "cat", "grep", "find", "head", "tail", "wc",
                     "echo", "pwd", "date", "cargo", "npm", "pnpm", "node",
                     "python", "python3", "pip", "mkdir", "cp", "mv", "touch",
-                    "rm", "curl", "wget", "tar", "unzip", "which", "env",
+                    "tar", "unzip", "which", "env",
                     "sort", "uniq", "awk", "sed", "tr", "cut", "xargs",
                     "du", "df", "file", "basename", "dirname", "realpath",
                 ].iter().map(|s| toml::Value::String(s.to_string())).collect();
                 sec.insert("allowed_commands".into(), toml::Value::Array(defaults));
                 changed = true;
             }
-            if sec.get("workspace_only").and_then(|v| v.as_bool()) == Some(true) {
-                sec.insert("workspace_only".into(), toml::Value::Boolean(false));
+            // Default to filesystem confinement; respect an explicit user choice either way.
+            if sec.get("workspace_only").is_none() {
+                sec.insert("workspace_only".into(), toml::Value::Boolean(true));
                 changed = true;
             }
         }
