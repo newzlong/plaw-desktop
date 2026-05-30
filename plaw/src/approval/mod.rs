@@ -51,6 +51,17 @@ pub struct PendingNonCliApprovalRequest {
     pub requested_by: String,
     pub requested_channel: String,
     pub requested_reply_target: String,
+    /// Canonical fingerprint of the call's arguments. Used by the dedup
+    /// check in [`ApprovalManager::create_non_cli_pending_request`] so that
+    /// two distinct parallel calls of the same tool (e.g. `git_operations`
+    /// with `operation: status` and with `operation: diff`) get distinct
+    /// pending requests + distinct action cards on the desktop path,
+    /// instead of collapsing into one shared approval.
+    ///
+    /// `None` means the caller did not provide one — behavior matches the
+    /// pre-fingerprint dedup (any same-tool call collapses).
+    #[serde(default)]
+    pub arguments_fingerprint: Option<String>,
     pub reason: Option<String>,
     pub created_at: String,
     pub expires_at: String,
@@ -475,14 +486,23 @@ impl ApprovalManager {
         self.always_ask.read().clone()
     }
 
-    /// Create a pending non-CLI approval request. If a matching active request
-    /// already exists for (tool, requester, channel), returns that existing request.
+    /// Create a pending non-CLI approval request. If a matching active
+    /// request already exists for (tool, requester, channel, reply_target,
+    /// arguments_fingerprint), returns that existing request.
+    ///
+    /// `arguments_fingerprint` lets callers disambiguate two parallel calls
+    /// of the same tool with different arguments (e.g. `git_operations
+    /// status` vs `git_operations diff`) so each gets its own pending +
+    /// its own action card. Callers that don't care about arg-level dedup
+    /// (e.g. Telegram/Discord chat approval) pass `None` and keep the
+    /// historical tool-name-only collapse behavior.
     pub fn create_non_cli_pending_request(
         &self,
         tool_name: &str,
         requested_by: &str,
         requested_channel: &str,
         requested_reply_target: &str,
+        arguments_fingerprint: Option<&str>,
         reason: Option<String>,
     ) -> PendingNonCliApprovalRequest {
         let mut pending = self.pending_non_cli_requests.lock();
@@ -495,6 +515,7 @@ impl ApprovalManager {
                     && req.requested_by == requested_by
                     && req.requested_channel == requested_channel
                     && req.requested_reply_target == requested_reply_target
+                    && req.arguments_fingerprint.as_deref() == arguments_fingerprint
             })
             .cloned()
         {
@@ -514,6 +535,7 @@ impl ApprovalManager {
             requested_by: requested_by.to_string(),
             requested_channel: requested_channel.to_string(),
             requested_reply_target: requested_reply_target.to_string(),
+            arguments_fingerprint: arguments_fingerprint.map(str::to_string),
             reason,
             created_at: now.to_rfc3339(),
             expires_at: expires.to_rfc3339(),
@@ -988,7 +1010,7 @@ mod tests {
     #[test]
     fn create_and_confirm_pending_non_cli_approval_request() {
         let mgr = ApprovalManager::from_config(&supervised_config());
-        let req = mgr.create_non_cli_pending_request("shell", "alice", "telegram", "chat-1", None);
+        let req = mgr.create_non_cli_pending_request("shell", "alice", "telegram", "chat-1", None, None);
         assert_eq!(req.tool_name, "shell");
         assert!(req.request_id.starts_with("apr-"));
 
@@ -1004,7 +1026,7 @@ mod tests {
     #[test]
     fn create_and_reject_pending_non_cli_approval_request() {
         let mgr = ApprovalManager::from_config(&supervised_config());
-        let req = mgr.create_non_cli_pending_request("shell", "alice", "telegram", "chat-1", None);
+        let req = mgr.create_non_cli_pending_request("shell", "alice", "telegram", "chat-1", None, None);
 
         let rejected = mgr
             .reject_non_cli_pending_request(&req.request_id, "alice", "telegram", "chat-1")
@@ -1016,7 +1038,7 @@ mod tests {
     #[test]
     fn pending_non_cli_resolution_is_recorded_and_consumed() {
         let mgr = ApprovalManager::from_config(&supervised_config());
-        let req = mgr.create_non_cli_pending_request("shell", "alice", "telegram", "chat-1", None);
+        let req = mgr.create_non_cli_pending_request("shell", "alice", "telegram", "chat-1", None, None);
 
         mgr.record_non_cli_pending_resolution(&req.request_id, ApprovalResponse::Yes);
         assert_eq!(
@@ -1029,7 +1051,7 @@ mod tests {
     #[test]
     fn pending_non_cli_approval_requires_same_sender_and_channel() {
         let mgr = ApprovalManager::from_config(&supervised_config());
-        let req = mgr.create_non_cli_pending_request("shell", "alice", "telegram", "chat-1", None);
+        let req = mgr.create_non_cli_pending_request("shell", "alice", "telegram", "chat-1", None, None);
 
         let err = mgr
             .confirm_non_cli_pending_request(&req.request_id, "bob", "telegram", "chat-1")
@@ -1053,12 +1075,69 @@ mod tests {
     }
 
     #[test]
+    fn pending_non_cli_dedup_distinguishes_by_arguments_fingerprint() {
+        // Two parallel calls of the same tool with DIFFERENT argument
+        // fingerprints must produce DIFFERENT pending requests (so the
+        // action-card UI shows one card per call, and resolving one does
+        // not auto-resolve the other).
+        let mgr = ApprovalManager::from_config(&supervised_config());
+        let a = mgr.create_non_cli_pending_request(
+            "git_operations",
+            "webchat",
+            "webchat",
+            "webchat",
+            Some(r#"{"operation":"status"}"#),
+            None,
+        );
+        let b = mgr.create_non_cli_pending_request(
+            "git_operations",
+            "webchat",
+            "webchat",
+            "webchat",
+            Some(r#"{"operation":"diff"}"#),
+            None,
+        );
+        assert_ne!(a.request_id, b.request_id, "different args must dedup separately");
+
+        // Same args fingerprint -> dedup back to the same pending.
+        let c = mgr.create_non_cli_pending_request(
+            "git_operations",
+            "webchat",
+            "webchat",
+            "webchat",
+            Some(r#"{"operation":"status"}"#),
+            None,
+        );
+        assert_eq!(a.request_id, c.request_id, "identical args must dedup");
+
+        // Old fingerprint=None behaviour preserved for callers that
+        // don't supply one (chat-channel approval flow).
+        let d = mgr.create_non_cli_pending_request(
+            "file_write",
+            "alice",
+            "telegram",
+            "chat-9",
+            None,
+            None,
+        );
+        let e = mgr.create_non_cli_pending_request(
+            "file_write",
+            "alice",
+            "telegram",
+            "chat-9",
+            None,
+            None,
+        );
+        assert_eq!(d.request_id, e.request_id, "None fingerprint dedups by (tool, scope)");
+    }
+
+    #[test]
     fn list_pending_non_cli_approvals_filters_scope() {
         let mgr = ApprovalManager::from_config(&supervised_config());
-        mgr.create_non_cli_pending_request("shell", "alice", "telegram", "chat-1", None);
-        mgr.create_non_cli_pending_request("file_write", "bob", "telegram", "chat-1", None);
-        mgr.create_non_cli_pending_request("browser_open", "alice", "discord", "chat-9", None);
-        mgr.create_non_cli_pending_request("schedule", "alice", "telegram", "chat-2", None);
+        mgr.create_non_cli_pending_request("shell", "alice", "telegram", "chat-1", None, None);
+        mgr.create_non_cli_pending_request("file_write", "bob", "telegram", "chat-1", None, None);
+        mgr.create_non_cli_pending_request("browser_open", "alice", "discord", "chat-9", None, None);
+        mgr.create_non_cli_pending_request("schedule", "alice", "telegram", "chat-2", None, None);
 
         let alice_telegram =
             mgr.list_non_cli_pending_requests(Some("alice"), Some("telegram"), Some("chat-1"));
@@ -1073,7 +1152,7 @@ mod tests {
     #[test]
     fn pending_non_cli_approval_expiry_is_pruned() {
         let mgr = ApprovalManager::from_config(&supervised_config());
-        let req = mgr.create_non_cli_pending_request("shell", "alice", "telegram", "chat-1", None);
+        let req = mgr.create_non_cli_pending_request("shell", "alice", "telegram", "chat-1", None, None);
 
         {
             let mut pending = mgr.pending_non_cli_requests.lock();

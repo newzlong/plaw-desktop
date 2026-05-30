@@ -120,6 +120,7 @@ mod tests {
             "telegram",
             "chat-1",
             None,
+            None,
         );
         mgr.record_non_cli_pending_resolution(&pending.request_id, ApprovalResponse::Yes);
 
@@ -165,6 +166,7 @@ mod tests {
             "alice",
             "telegram",
             "chat-1",
+            None,
             None,
         );
         let token = CancellationToken::new();

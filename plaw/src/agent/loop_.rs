@@ -641,11 +641,21 @@ pub(crate) async fn run_tool_call_loop(
                     let decision = if channel_name == "cli" {
                         mgr.prompt_cli(&request)
                     } else if let Some(ctx) = non_cli_approval_context.as_ref() {
+                        // Fingerprint = canonical JSON form of the call's
+                        // arguments. Passed to dedup so two parallel calls
+                        // of the same tool with different args (e.g.
+                        // git_operations status vs git_operations diff)
+                        // each get their own pending + their own action
+                        // card, instead of collapsing into one shared
+                        // approval that auto-resolves both when the user
+                        // clicks the first card.
+                        let args_fingerprint = tool_args.to_string();
                         let pending = mgr.create_non_cli_pending_request(
                             &tool_name,
                             &ctx.sender,
                             channel_name,
                             &ctx.reply_target,
+                            Some(&args_fingerprint),
                             Some(
                                 "interactive approval required for supervised non-cli tool execution"
                                     .to_string(),
