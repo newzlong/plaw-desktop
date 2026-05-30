@@ -153,7 +153,10 @@ impl ApprovalManager {
     /// Check whether a tool call requires interactive approval.
     ///
     /// Returns `true` if the call needs a prompt, `false` if it can proceed.
-    pub fn needs_approval(&self, tool_name: &str) -> bool {
+    ///
+    /// `args` is the tool's argument object. It is consulted only for
+    /// `shell:<prefix>` command-prefix grants; whole-tool grants ignore it.
+    pub fn needs_approval(&self, tool_name: &str, args: &serde_json::Value) -> bool {
         // Full autonomy never prompts.
         if self.autonomy_level == AutonomyLevel::Full {
             return false;
@@ -164,24 +167,66 @@ impl ApprovalManager {
             return false;
         }
 
-        // always_ask overrides everything.
+        // always_ask overrides everything (whole-tool only).
         if self.always_ask.read().contains(tool_name) {
             return true;
         }
 
-        // auto_approve skips the prompt.
-        if self.auto_approve.read().contains(tool_name) {
-            return false;
-        }
-
-        // Session allowlist (from prior "Always" responses).
-        let allowlist = self.session_allowlist.lock();
-        if allowlist.contains(tool_name) {
+        // auto_approve / session allowlist (whole-tool OR safe shell prefix).
+        if self.call_is_pre_approved(tool_name, args) {
             return false;
         }
 
         // Default: supervised mode requires approval.
         true
+    }
+
+    /// Whether a specific tool call is pre-approved by the runtime
+    /// `auto_approve` set or the session allowlist.
+    ///
+    /// Two entry shapes are honored (see module docs / config schema):
+    ///   - `"<tool>"`           whole-tool grant — matches any call to that tool.
+    ///   - `"shell:<prefix>"`   shell command-prefix grant — matches a `shell`
+    ///                          call only when the command satisfies the safe
+    ///                          prefix rule (see [`prefix_match_is_safe`]).
+    ///
+    /// This deliberately does NOT consult `always_ask`; the caller
+    /// ([`needs_approval`]) applies the always_ask override first.
+    pub fn call_is_pre_approved(&self, tool_name: &str, args: &serde_json::Value) -> bool {
+        let auto = self.auto_approve.read();
+        if Self::entries_match_call(&auto, tool_name, args) {
+            return true;
+        }
+        drop(auto);
+
+        let session = self.session_allowlist.lock();
+        Self::entries_match_call(&session, tool_name, args)
+    }
+
+    /// Returns true if any entry in `entries` grants this `tool_name`/`args` call.
+    fn entries_match_call(
+        entries: &HashSet<String>,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> bool {
+        // Whole-tool grant matches first (cheap, also backwards-compatible).
+        if entries.contains(tool_name) {
+            return true;
+        }
+
+        // shell:<prefix> grants apply only to the shell tool.
+        if tool_name != "shell" {
+            return false;
+        }
+        let Some(command) = shell_command_str(args) else {
+            return false;
+        };
+        let shell_prefix = "shell:";
+        entries.iter().any(|entry| {
+            entry
+                .strip_prefix(shell_prefix)
+                .is_some_and(|prefix| prefix_match_is_safe(command, prefix))
+        })
     }
 
     /// Record an approval decision and update session state.
@@ -529,6 +574,17 @@ impl ApprovalManager {
         pending.contains_key(request_id)
     }
 
+    /// Look up the tool name of a pending non-CLI request by its id.
+    ///
+    /// Used by the desktop gateway to build a persistent grant pattern
+    /// (`"<tool>"` or `"shell:<prefix>"`) when the user picks
+    /// "allow & remember". Returns `None` if the request is unknown/expired.
+    pub fn non_cli_pending_request_tool_name(&self, request_id: &str) -> Option<String> {
+        let mut pending = self.pending_non_cli_requests.lock();
+        prune_expired_pending_requests(&mut pending);
+        pending.get(request_id).map(|req| req.tool_name.clone())
+    }
+
     /// Record a yes/no resolution for a pending non-CLI request.
     pub fn record_non_cli_pending_resolution(&self, request_id: &str, decision: ApprovalResponse) {
         if !matches!(decision, ApprovalResponse::Yes | ApprovalResponse::No) {
@@ -623,6 +679,54 @@ fn prompt_cli_interactive(request: &ApprovalRequest) -> ApprovalResponse {
     }
 }
 
+/// Extract the `command` string from a `shell` tool's arguments, if present.
+fn shell_command_str(args: &serde_json::Value) -> Option<&str> {
+    args.get("command").and_then(|v| v.as_str())
+}
+
+/// Shell control / chaining metacharacters. If ANY of these appear anywhere in
+/// the command we refuse to auto-approve, regardless of prefix — a prefix grant
+/// must never approve a chained / piped / substituted / redirected command.
+const SHELL_CONTROL_METACHARS: &[char] = &[
+    ';', '|', '&', '$', '`', '>', '<', '(', ')', '{', '}', '\n', '\r',
+];
+
+/// Whether a `shell:<prefix>` grant safely matches command string `command`.
+///
+/// All of the following must hold (fail-closed otherwise):
+///   1. `prefix` is non-empty after trimming (empty prefix is NOT a wildcard;
+///      it never matches — an empty/whole-tool grant is expressed as `"shell"`).
+///   2. The command, with leading whitespace trimmed, `starts_with(prefix)`.
+///   3. Boundary: the match ends at a word boundary — either the command is
+///      exactly the prefix, or the next byte is ASCII whitespace. So
+///      `"git status"` matches `"git status -s"` but NOT `"git statusfoo"`.
+///   4. The command contains NONE of [`SHELL_CONTROL_METACHARS`] anywhere.
+fn prefix_match_is_safe(command: &str, prefix: &str) -> bool {
+    // (1) Empty/whitespace-only prefix never matches via this path.
+    let prefix = prefix.trim();
+    if prefix.is_empty() {
+        return false;
+    }
+
+    // (4) Any control/chaining metacharacter forces a prompt. Check the full
+    // (untrimmed) command so leading/embedded metachars cannot slip through.
+    if command.contains(SHELL_CONTROL_METACHARS) {
+        return false;
+    }
+
+    // (2) Prefix match against the leading-whitespace-trimmed command.
+    let c = command.trim_start();
+    let Some(rest) = c.strip_prefix(prefix) else {
+        return false;
+    };
+
+    // (3) Word boundary: exact match, or next byte is ASCII whitespace.
+    match rest.as_bytes().first() {
+        None => true,
+        Some(b) => b.is_ascii_whitespace(),
+    }
+}
+
 /// Produce a short human-readable summary of tool arguments.
 fn summarize_args(args: &serde_json::Value) -> String {
     match args {
@@ -701,29 +805,29 @@ mod tests {
     #[test]
     fn auto_approve_tools_skip_prompt() {
         let mgr = ApprovalManager::from_config(&supervised_config());
-        assert!(!mgr.needs_approval("file_read"));
-        assert!(!mgr.needs_approval("memory_recall"));
+        assert!(!mgr.needs_approval("file_read", &serde_json::Value::Null));
+        assert!(!mgr.needs_approval("memory_recall", &serde_json::Value::Null));
     }
 
     #[test]
     fn always_ask_tools_always_prompt() {
         let mgr = ApprovalManager::from_config(&supervised_config());
-        assert!(mgr.needs_approval("shell"));
+        assert!(mgr.needs_approval("shell", &serde_json::Value::Null));
     }
 
     #[test]
     fn unknown_tool_needs_approval_in_supervised() {
         let mgr = ApprovalManager::from_config(&supervised_config());
-        assert!(mgr.needs_approval("file_write"));
-        assert!(mgr.needs_approval("http_request"));
+        assert!(mgr.needs_approval("file_write", &serde_json::Value::Null));
+        assert!(mgr.needs_approval("http_request", &serde_json::Value::Null));
     }
 
     #[test]
     fn full_autonomy_never_prompts() {
         let mgr = ApprovalManager::from_config(&full_config());
-        assert!(!mgr.needs_approval("shell"));
-        assert!(!mgr.needs_approval("file_write"));
-        assert!(!mgr.needs_approval("anything"));
+        assert!(!mgr.needs_approval("shell", &serde_json::Value::Null));
+        assert!(!mgr.needs_approval("file_write", &serde_json::Value::Null));
+        assert!(!mgr.needs_approval("anything", &serde_json::Value::Null));
     }
 
     #[test]
@@ -733,7 +837,7 @@ mod tests {
             ..AutonomyConfig::default()
         };
         let mgr = ApprovalManager::from_config(&config);
-        assert!(!mgr.needs_approval("shell"));
+        assert!(!mgr.needs_approval("shell", &serde_json::Value::Null));
     }
 
     // ── session allowlist ────────────────────────────────────
@@ -741,7 +845,7 @@ mod tests {
     #[test]
     fn always_response_adds_to_session_allowlist() {
         let mgr = ApprovalManager::from_config(&supervised_config());
-        assert!(mgr.needs_approval("file_write"));
+        assert!(mgr.needs_approval("file_write", &serde_json::Value::Null));
 
         mgr.record_decision(
             "file_write",
@@ -751,7 +855,7 @@ mod tests {
         );
 
         // Now file_write should be in session allowlist.
-        assert!(!mgr.needs_approval("file_write"));
+        assert!(!mgr.needs_approval("file_write", &serde_json::Value::Null));
     }
 
     #[test]
@@ -767,7 +871,7 @@ mod tests {
         );
 
         // shell is in always_ask, so it still needs approval.
-        assert!(mgr.needs_approval("shell"));
+        assert!(mgr.needs_approval("shell", &serde_json::Value::Null));
     }
 
     #[test]
@@ -779,7 +883,7 @@ mod tests {
             ApprovalResponse::Yes,
             "cli",
         );
-        assert!(mgr.needs_approval("file_write"));
+        assert!(mgr.needs_approval("file_write", &serde_json::Value::Null));
     }
 
     #[test]
@@ -834,10 +938,10 @@ mod tests {
     #[test]
     fn persistent_runtime_grant_updates_policy_immediately() {
         let mgr = ApprovalManager::from_config(&supervised_config());
-        assert!(mgr.needs_approval("shell"));
+        assert!(mgr.needs_approval("shell", &serde_json::Value::Null));
 
         mgr.apply_persistent_runtime_grant("shell");
-        assert!(!mgr.needs_approval("shell"));
+        assert!(!mgr.needs_approval("shell", &serde_json::Value::Null));
         assert!(mgr.auto_approve_tools().contains("shell"));
         assert!(!mgr.always_ask_tools().contains("shell"));
     }
@@ -845,10 +949,10 @@ mod tests {
     #[test]
     fn persistent_runtime_revoke_updates_policy_immediately() {
         let mgr = ApprovalManager::from_config(&supervised_config());
-        assert!(!mgr.needs_approval("file_read"));
+        assert!(!mgr.needs_approval("file_read", &serde_json::Value::Null));
 
         assert!(mgr.apply_persistent_runtime_revoke("file_read"));
-        assert!(mgr.needs_approval("file_read"));
+        assert!(mgr.needs_approval("file_read", &serde_json::Value::Null));
         assert!(!mgr.apply_persistent_runtime_revoke("file_read"));
     }
 
@@ -1048,8 +1152,8 @@ mod tests {
             &mode_overrides,
         );
 
-        assert!(!mgr.needs_approval("mock_price"));
-        assert!(mgr.needs_approval("shell"));
+        assert!(!mgr.needs_approval("mock_price", &serde_json::Value::Null));
+        assert!(mgr.needs_approval("shell", &serde_json::Value::Null));
         assert!(mgr.is_non_cli_approval_actor_allowed("telegram", "alice"));
         assert!(!mgr.is_non_cli_approval_actor_allowed("telegram", "bob"));
         assert_eq!(
@@ -1165,5 +1269,190 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         let parsed: ApprovalRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.tool_name, "shell");
+    }
+
+    // ── prefix_match_is_safe (security-critical core) ─────────
+
+    #[test]
+    fn prefix_match_approves_exact_and_word_boundary_extensions() {
+        // Exact match.
+        assert!(prefix_match_is_safe("git status", "git status"));
+        // Single-space extension.
+        assert!(prefix_match_is_safe("git status -s", "git status"));
+        // Multi-space extension (boundary is the first byte after the prefix).
+        assert!(prefix_match_is_safe("git status  --short", "git status"));
+        // Leading whitespace on the command is trimmed before matching.
+        assert!(prefix_match_is_safe("   git status -s", "git status"));
+    }
+
+    #[test]
+    fn prefix_match_rejects_word_boundary_violation() {
+        // "git statusfoo" must NOT match prefix "git status".
+        assert!(!prefix_match_is_safe("git statusfoo", "git status"));
+        assert!(!prefix_match_is_safe("git status-extra", "git status"));
+    }
+
+    #[test]
+    fn prefix_match_rejects_shell_metacharacters() {
+        // Every chaining / piping / substitution / redirection metachar forces
+        // a prompt even when the prefix would otherwise match.
+        assert!(!prefix_match_is_safe("git status; rm -rf /", "git status"));
+        assert!(!prefix_match_is_safe("git status && x", "git status"));
+        assert!(!prefix_match_is_safe("git status | sh", "git status"));
+        assert!(!prefix_match_is_safe("git status $(x)", "git status"));
+        assert!(!prefix_match_is_safe("git status `x`", "git status"));
+        assert!(!prefix_match_is_safe("git status > /etc/passwd", "git status"));
+        assert!(!prefix_match_is_safe("git status < in", "git status"));
+        assert!(!prefix_match_is_safe("git status (x)", "git status"));
+        assert!(!prefix_match_is_safe("git status {x}", "git status"));
+        assert!(!prefix_match_is_safe("git status\nrm -rf /", "git status"));
+        assert!(!prefix_match_is_safe("git status\rrm -rf /", "git status"));
+        // A bare `&` (background) is also a control metachar.
+        assert!(!prefix_match_is_safe("git status &", "git status"));
+    }
+
+    #[test]
+    fn prefix_match_rejects_empty_and_whitespace_only_prefix() {
+        assert!(!prefix_match_is_safe("git status", ""));
+        assert!(!prefix_match_is_safe("git status", "   "));
+        // Even an empty command with empty prefix must not match.
+        assert!(!prefix_match_is_safe("", ""));
+    }
+
+    #[test]
+    fn prefix_match_rejects_non_prefix_command() {
+        assert!(!prefix_match_is_safe("ls -la", "git status"));
+    }
+
+    // ── shell_command_str ────────────────────────────────────
+
+    #[test]
+    fn shell_command_str_extracts_command_field() {
+        let args = serde_json::json!({"command": "git status"});
+        assert_eq!(shell_command_str(&args), Some("git status"));
+        assert_eq!(shell_command_str(&serde_json::json!({})), None);
+        assert_eq!(shell_command_str(&serde_json::Value::Null), None);
+        assert_eq!(shell_command_str(&serde_json::json!({"command": 5})), None);
+    }
+
+    // ── call_is_pre_approved ──────────────────────────────────
+
+    fn empty_config() -> AutonomyConfig {
+        AutonomyConfig {
+            level: AutonomyLevel::Supervised,
+            ..AutonomyConfig::default()
+        }
+    }
+
+    #[test]
+    fn call_is_pre_approved_whole_tool_grant() {
+        let cfg = AutonomyConfig {
+            level: AutonomyLevel::Supervised,
+            auto_approve: vec!["file_read".into()],
+            ..AutonomyConfig::default()
+        };
+        let mgr = ApprovalManager::from_config(&cfg);
+        // Whole-tool grant matches any args (including none).
+        assert!(mgr.call_is_pre_approved("file_read", &serde_json::Value::Null));
+        assert!(mgr.call_is_pre_approved("file_read", &serde_json::json!({"path": "x"})));
+        assert!(!mgr.call_is_pre_approved("file_write", &serde_json::Value::Null));
+    }
+
+    #[test]
+    fn call_is_pre_approved_bare_shell_is_backwards_compatible() {
+        // A bare "shell" entry (today's format) approves every shell call.
+        let cfg = AutonomyConfig {
+            level: AutonomyLevel::Supervised,
+            auto_approve: vec!["shell".into()],
+            ..AutonomyConfig::default()
+        };
+        let mgr = ApprovalManager::from_config(&cfg);
+        assert!(mgr.call_is_pre_approved("shell", &serde_json::json!({"command": "rm -rf /"})));
+    }
+
+    #[test]
+    fn call_is_pre_approved_shell_prefix_grant_matches_safely() {
+        let cfg = AutonomyConfig {
+            level: AutonomyLevel::Supervised,
+            auto_approve: vec!["shell:git status".into()],
+            ..AutonomyConfig::default()
+        };
+        let mgr = ApprovalManager::from_config(&cfg);
+        // Safe matches.
+        assert!(mgr.call_is_pre_approved("shell", &serde_json::json!({"command": "git status"})));
+        assert!(
+            mgr.call_is_pre_approved("shell", &serde_json::json!({"command": "git status -s"}))
+        );
+        // Boundary violation — does NOT match.
+        assert!(
+            !mgr.call_is_pre_approved("shell", &serde_json::json!({"command": "git statusfoo"}))
+        );
+        // Metachar — does NOT match.
+        assert!(!mgr.call_is_pre_approved(
+            "shell",
+            &serde_json::json!({"command": "git status; rm -rf /"})
+        ));
+        // Different command — does NOT match.
+        assert!(!mgr.call_is_pre_approved("shell", &serde_json::json!({"command": "ls"})));
+        // A shell:<prefix> grant never approves a non-shell tool.
+        assert!(!mgr.call_is_pre_approved("file_read", &serde_json::json!({"command": "git status"})));
+    }
+
+    #[test]
+    fn call_is_pre_approved_honors_session_allowlist_prefix() {
+        let mgr = ApprovalManager::from_config(&empty_config());
+        assert!(!mgr.call_is_pre_approved("shell", &serde_json::json!({"command": "git status"})));
+
+        // record_decision(Always) inserts the bare tool name; whole-tool grant.
+        mgr.record_decision(
+            "file_write",
+            &serde_json::json!({"path": "x"}),
+            ApprovalResponse::Always,
+            "cli",
+        );
+        assert!(mgr.call_is_pre_approved("file_write", &serde_json::Value::Null));
+    }
+
+    #[test]
+    fn needs_approval_shell_prefix_grant_via_auto_approve() {
+        let cfg = AutonomyConfig {
+            level: AutonomyLevel::Supervised,
+            auto_approve: vec!["shell:git status".into()],
+            ..AutonomyConfig::default()
+        };
+        let mgr = ApprovalManager::from_config(&cfg);
+        // Pre-approved safe shell call skips the prompt.
+        assert!(!mgr.needs_approval("shell", &serde_json::json!({"command": "git status -s"})));
+        // Non-matching shell call still prompts.
+        assert!(mgr.needs_approval("shell", &serde_json::json!({"command": "rm -rf /"})));
+        // Chained call still prompts even though prefix matches.
+        assert!(mgr.needs_approval(
+            "shell",
+            &serde_json::json!({"command": "git status && rm -rf /"})
+        ));
+    }
+
+    #[test]
+    fn needs_approval_always_ask_overrides_shell_prefix_grant() {
+        let cfg = AutonomyConfig {
+            level: AutonomyLevel::Supervised,
+            auto_approve: vec!["shell:git status".into()],
+            always_ask: vec!["shell".into()],
+            ..AutonomyConfig::default()
+        };
+        let mgr = ApprovalManager::from_config(&cfg);
+        // always_ask("shell") forces a prompt regardless of the prefix grant.
+        assert!(mgr.needs_approval("shell", &serde_json::json!({"command": "git status"})));
+    }
+
+    #[test]
+    fn apply_persistent_runtime_grant_accepts_shell_prefix_pattern() {
+        let mgr = ApprovalManager::from_config(&empty_config());
+        assert!(mgr.needs_approval("shell", &serde_json::json!({"command": "git status"})));
+
+        // The gateway passes a full "shell:<prefix>" pattern verbatim.
+        mgr.apply_persistent_runtime_grant("shell:git status");
+        assert!(!mgr.needs_approval("shell", &serde_json::json!({"command": "git status -s"})));
+        assert!(mgr.needs_approval("shell", &serde_json::json!({"command": "git push"})));
     }
 }

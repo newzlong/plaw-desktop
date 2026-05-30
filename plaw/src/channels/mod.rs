@@ -1921,7 +1921,10 @@ async fn handle_runtime_command_if_needed(
                 format!(
                     "Unknown tool `{tool_name}`.\nKnown tools (top 12): {preview}\nUse `/approve-request <tool-name>` with an exact tool name."
                 )
-            } else if !ctx.approval_manager.needs_approval(&tool_name) {
+            } else if !ctx
+                .approval_manager
+                .needs_approval(&tool_name, &serde_json::Value::Null)
+            {
                 format!(
                     "`{tool_name}` is already approved in the current runtime policy. You can use it directly."
                 )
@@ -6576,7 +6579,8 @@ BTC is currently around $65,000 based on latest tool output."#
         assert!(runtime_ctx
             .approval_manager
             .is_non_cli_session_granted("mock_price"));
-        assert!(!runtime_ctx.approval_manager.needs_approval("mock_price"));
+        assert!(!runtime_ctx.approval_manager
+            .needs_approval("mock_price", &serde_json::Value::Null));
         assert_eq!(provider_impl.call_count.load(Ordering::SeqCst), 0);
 
         let saved_raw = tokio::fs::read_to_string(&config_path)
@@ -6702,7 +6706,8 @@ BTC is currently around $65,000 based on latest tool output."#
         assert!(!runtime_ctx
             .approval_manager
             .is_non_cli_session_granted("mock_price"));
-        assert!(runtime_ctx.approval_manager.needs_approval("mock_price"));
+        assert!(runtime_ctx.approval_manager
+            .needs_approval("mock_price", &serde_json::Value::Null));
         assert_eq!(provider_impl.call_count.load(Ordering::SeqCst), 0);
 
         let saved_raw = tokio::fs::read_to_string(&config_path)
@@ -6807,7 +6812,8 @@ BTC is currently around $65,000 based on latest tool output."#
         assert!(!runtime_ctx
             .approval_manager
             .is_non_cli_session_granted("mock_price"));
-        assert!(runtime_ctx.approval_manager.needs_approval("mock_price"));
+        assert!(runtime_ctx.approval_manager
+            .needs_approval("mock_price", &serde_json::Value::Null));
         assert_eq!(provider_impl.call_count.load(Ordering::SeqCst), 0);
 
         let saved_raw = tokio::fs::read_to_string(&config_path)
@@ -7042,7 +7048,8 @@ BTC is currently around $65,000 based on latest tool output."#
         assert!(runtime_ctx
             .approval_manager
             .is_non_cli_session_granted("mock_price"));
-        assert!(!runtime_ctx.approval_manager.needs_approval("mock_price"));
+        assert!(!runtime_ctx.approval_manager
+            .needs_approval("mock_price", &serde_json::Value::Null));
         assert!(runtime_ctx
             .approval_manager
             .list_non_cli_pending_requests(Some("alice"), Some("telegram"), Some("chat-1"))
@@ -7295,7 +7302,8 @@ BTC is currently around $65,000 based on latest tool output."#
         assert!(runtime_ctx
             .approval_manager
             .is_non_cli_session_granted("mock_price"));
-        assert!(!runtime_ctx.approval_manager.needs_approval("mock_price"));
+        assert!(!runtime_ctx.approval_manager
+            .needs_approval("mock_price", &serde_json::Value::Null));
         assert!(runtime_ctx
             .approval_manager
             .list_non_cli_pending_requests(Some("alice"), Some("telegram"), Some("chat-1"))
@@ -7414,7 +7422,8 @@ BTC is currently around $65,000 based on latest tool output."#
         assert!(!runtime_ctx
             .approval_manager
             .is_non_cli_session_granted("mock_price"));
-        assert!(runtime_ctx.approval_manager.needs_approval("mock_price"));
+        assert!(runtime_ctx.approval_manager
+            .needs_approval("mock_price", &serde_json::Value::Null));
         assert_eq!(provider_impl.call_count.load(Ordering::SeqCst), 0);
     }
 
@@ -7512,7 +7521,8 @@ BTC is currently around $65,000 based on latest tool output."#
         assert!(!runtime_ctx
             .approval_manager
             .is_non_cli_session_granted("mock_price"));
-        assert!(runtime_ctx.approval_manager.needs_approval("mock_price"));
+        assert!(runtime_ctx.approval_manager
+            .needs_approval("mock_price", &serde_json::Value::Null));
 
         process_channel_message(
             runtime_ctx.clone(),
@@ -7535,7 +7545,8 @@ BTC is currently around $65,000 based on latest tool output."#
         assert!(runtime_ctx
             .approval_manager
             .is_non_cli_session_granted("mock_price"));
-        assert!(!runtime_ctx.approval_manager.needs_approval("mock_price"));
+        assert!(!runtime_ctx.approval_manager
+            .needs_approval("mock_price", &serde_json::Value::Null));
         assert_eq!(provider_impl.call_count.load(Ordering::SeqCst), 0);
 
         let saved_raw = tokio::fs::read_to_string(&config_path)
