@@ -74,28 +74,8 @@
                   <span v-html="renderMarkdown(step.content)" />
                 </div>
                 <!-- Approval request step (interactive action card) -->
-                <div v-else-if="step.type === 'approval'" class="step-approval">
-                  <div class="step-approval__header">
-                    <span class="step-approval__icon" />
-                    <span class="step-approval__title">{{ isZh ? '需要授权' : 'Approval required' }}</span>
-                    <span class="step-approval__tool">{{ step.name }}</span>
-                  </div>
-                  <pre v-if="step.args" class="step-approval__args">{{ formatArgs(step.args) }}</pre>
-                  <!-- Shell-only: editable command prefix to remember (verbatim, user-editable). -->
-                  <label v-if="step.status === 'pending' && isShellApproval(step)" class="step-approval__prefix">
-                    <span class="step-approval__prefix-label">{{ isZh ? '记住前缀' : 'Remember prefix' }}</span>
-                    <input v-model="step.prefixInput" type="text" class="step-approval__prefix-input"
-                      :placeholder="isZh ? '例如：git status' : 'e.g. git status'" spellcheck="false" autocomplete="off" />
-                  </label>
-                  <div v-if="step.status === 'pending'" class="step-approval__actions">
-                    <GlassButton size="sm" variant="primary" @click="sendApproval(step, 'allow_once')">{{ isZh ? '允许一次' : 'Allow once' }}</GlassButton>
-                    <GlassButton size="sm" @click="sendApproval(step, 'allow_and_remember', step.prefixInput)">{{ isZh ? '允许并记住' : 'Allow & remember' }}</GlassButton>
-                    <GlassButton size="sm" variant="danger" @click="sendApproval(step, 'deny')">{{ isZh ? '拒绝' : 'Deny' }}</GlassButton>
-                  </div>
-                  <div v-else class="step-approval__resolved">
-                    {{ step.decision === 'deny' ? (isZh ? '已拒绝' : 'Denied') : (isZh ? '已允许' : 'Allowed') }}
-                  </div>
-                </div>
+                <ActionCard v-else-if="step.type === 'approval'" :step="step" :is-zh="isZh"
+                  @decision="(d, p) => sendApproval(step, d, p)" />
               </div>
             </div>
             <!-- User attached images -->
@@ -231,6 +211,7 @@ import { useNotifications } from '../composables/useNotifications'
 import { marked } from 'marked'
 import GlassDialog from '../components/glass/GlassDialog.vue'
 import GlassButton from '../components/glass/GlassButton.vue'
+import ActionCard from '../components/ActionCard.vue'
 
 // Configure marked for safe, clean output
 marked.setOptions({
@@ -1064,11 +1045,6 @@ function cancelMessage() {
   }
 }
 
-/** True when this approval card is for the shell tool with a string command. */
-function isShellApproval(step) {
-  return step && step.name === 'shell' && typeof step.args?.command === 'string'
-}
-
 /**
  * Sensible default prefix for "allow & remember" (shell only): the first
  * up-to-2 whitespace-separated tokens of the command (e.g. "git status").
@@ -1599,88 +1575,6 @@ onUnmounted(() => {
   font-size: 0.88rem;
   line-height: 1.6;
   color: var(--text-primary);
-}
-
-/* Approval request — inline action card */
-.step-approval {
-  margin: 4px 0;
-  padding: 10px 12px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-raised);
-  border: 1px solid var(--status-warn, var(--border-strong));
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.step-approval__header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 0.82rem;
-}
-.step-approval__icon {
-  width: 8px;
-  height: 8px;
-  flex-shrink: 0;
-  border-radius: 50%;
-  background: var(--status-warn, var(--plaw-accent));
-}
-.step-approval__title {
-  font-weight: 600;
-  color: var(--text-primary);
-}
-.step-approval__tool {
-  font-family: 'Cascadia Code', 'Fira Code', monospace;
-  font-size: 0.74rem;
-  color: var(--text-muted);
-}
-.step-approval__args {
-  margin: 0;
-  padding: 6px 8px;
-  background: var(--bg-base);
-  border-radius: var(--radius-sm);
-  font-family: 'Cascadia Code', 'Fira Code', monospace;
-  font-size: 0.74rem;
-  line-height: 1.4;
-  color: var(--text-secondary);
-  white-space: pre-wrap;
-  word-break: break-all;
-  max-height: 160px;
-  overflow-y: auto;
-}
-.step-approval__prefix {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.step-approval__prefix-label {
-  font-size: 0.72rem;
-  color: var(--text-muted);
-}
-.step-approval__prefix-input {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 5px 8px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border-strong);
-  background: var(--bg-base);
-  color: var(--text-primary);
-  font-family: 'Cascadia Code', 'Fira Code', monospace;
-  font-size: 0.74rem;
-  outline: none;
-}
-.step-approval__prefix-input:focus {
-  border-color: var(--status-warn, var(--plaw-accent));
-}
-.step-approval__actions {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-.step-approval__resolved {
-  font-size: 0.76rem;
-  color: var(--text-muted);
-  font-style: italic;
 }
 
 .step-tool__body {
