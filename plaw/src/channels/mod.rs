@@ -1875,6 +1875,7 @@ async fn handle_runtime_command_if_needed(
                 sender,
                 source_channel,
                 reply_target,
+                None,
                 Some("human-confirmed one-time bypass request for all tools/commands".to_string()),
             );
             runtime_trace::record_event(
@@ -1934,6 +1935,7 @@ async fn handle_runtime_command_if_needed(
                     sender,
                     source_channel,
                     reply_target,
+                    None,
                     None,
                 );
                 runtime_trace::record_event(
