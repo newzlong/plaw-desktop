@@ -48,6 +48,26 @@
         </div>
       </GlassCard>
 
+      <!-- Approved tools: entries saved via the action card's "Allow & remember". -->
+      <GlassCard :hoverable="false">
+        <label class="field-label">{{ isZh ? '已批准操作' : 'Approved tools' }}</label>
+        <p class="approved-hint">{{ isZh
+          ? '通过聊天卡片的"允许并记住"保存的条目。删除后保存并重启 Plaw 生效。'
+          : 'Entries saved via the action card\'s "Allow & remember". Delete + Save + Restart Plaw to take effect.'
+        }}</p>
+        <div v-if="!form.autoApprove.length" class="approved-empty">
+          {{ isZh ? '尚无已批准的操作。' : 'No approved tools yet.' }}
+        </div>
+        <ul v-else class="approved-list">
+          <li v-for="(entry, idx) in form.autoApprove" :key="entry + ':' + idx" class="approved-item">
+            <code class="approved-entry">{{ entry }}</code>
+            <span class="approved-kind">{{ entryKind(entry) }}</span>
+            <button class="approved-delete" :title="isZh ? '移除' : 'Remove'"
+              @click="form.autoApprove.splice(idx, 1)">×</button>
+          </li>
+        </ul>
+      </GlassCard>
+
     </div>
 
     <!-- Sticky save bar -->
@@ -76,7 +96,7 @@ import { Eye, ShieldCheck, Zap } from 'lucide-vue-next'
 import { GlassCard, GlassButton, GlassToggle, GlassTag } from '../components/glass'
 import { readConfig, writeConfig, restartPlaw, getPlawStatus } from '../api/tauri'
 import { useI18n } from '../composables/useI18n'
-const { t } = useI18n()
+const { t, isZh } = useI18n()
 
 const saving = ref(false)
 const saveMsg = ref('')
@@ -89,6 +109,7 @@ const form = reactive({
   workspaceOnly: true,
   allowedCommands: [],
   forbiddenPaths: [],
+  autoApprove: [],
 })
 
 const presets = [
@@ -119,6 +140,17 @@ const presets = [
   },
 ]
 
+/**
+ * Classify an auto_approve entry for display: shell command-prefix grants
+ * are stored as "shell:<prefix>"; everything else is a whole-tool grant.
+ */
+function entryKind(entry) {
+  if (typeof entry === 'string' && entry.startsWith('shell:') && entry.length > 6) {
+    return isZh.value ? 'shell 前缀' : 'shell prefix'
+  }
+  return isZh.value ? '整个工具' : 'whole tool'
+}
+
 function applyPreset(p) {
   form.level = p.value
   form.workspaceOnly = p.config.workspaceOnly
@@ -134,6 +166,9 @@ onMounted(async () => {
       form.workspaceOnly = cfg.autonomy.workspace_only !== false
       form.allowedCommands = cfg.autonomy.allowed_commands || []
       form.forbiddenPaths = cfg.autonomy.forbidden_paths || []
+      form.autoApprove = Array.isArray(cfg.autonomy.auto_approve)
+        ? [...cfg.autonomy.auto_approve]
+        : []
       // Full autonomy uses wildcard — normalize loaded commands
       if (form.level === 'full' && !form.allowedCommands.includes('*')) {
         form.allowedCommands = ['*']
@@ -154,6 +189,7 @@ async function save() {
       workspace_only: form.workspaceOnly,
       allowed_commands: form.level === 'full' ? ['*'] : (form.allowedCommands || []),
       forbidden_paths: form.forbiddenPaths || [],
+      auto_approve: form.autoApprove || [],
       max_actions_per_hour: cfg.autonomy?.max_actions_per_hour || 1000,
       max_cost_per_day_cents: cfg.autonomy?.max_cost_per_day_cents || 10000,
     }
@@ -281,6 +317,65 @@ async function doRestart() {
 .setting-hint {
   font-size: 0.78rem;
   color: var(--text-muted);
+}
+
+.approved-hint {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin: 0 0 10px;
+  line-height: 1.5;
+}
+.approved-empty {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 6px 2px;
+}
+.approved-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.approved-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+.approved-entry {
+  flex: 1;
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 0.82rem;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+.approved-kind {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.approved-delete {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-out);
+}
+.approved-delete:hover {
+  border-color: var(--status-err, var(--plaw-accent));
+  color: var(--status-err, var(--plaw-accent));
 }
 
 .save-msg { font-size: 0.82rem; font-weight: 500; transition: opacity 0.3s; }
