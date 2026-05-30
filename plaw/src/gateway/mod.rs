@@ -431,7 +431,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         (None, None)
     };
 
-    let tools_registry_exec: Arc<Vec<Box<dyn Tool>>> = Arc::new(tools::all_tools_with_runtime_readonly(
+    let mut exec_tools = tools::all_tools_with_runtime_readonly(
         Arc::new(config.clone()),
         &security,
         runtime,
@@ -445,7 +445,29 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         &config.agents,
         config.api_key.as_deref(),
         &config,
-    ));
+    );
+    // ── MCP client (Phase 0, stdio only) ─────────────────────────────
+    // Spawn each configured MCP server eagerly so any handshake failure
+    // surfaces in startup logs (not mid-conversation), then expose the
+    // single `mcp_call` proxy tool to the agent loop. Per-server failures
+    // are non-fatal — the registry reports them via `statuses()` and
+    // the proxy tool's description surfaces availability to the LLM.
+    if config.mcp.enabled {
+        let mcp_registry = std::sync::Arc::new(
+            crate::tools::mcp::McpRegistry::connect_all(&config.mcp.servers).await,
+        );
+        let connected = mcp_registry.connected_count();
+        let configured = mcp_registry.configured_count();
+        tracing::info!(
+            connected,
+            configured,
+            "MCP registry initialized"
+        );
+        if configured > 0 {
+            exec_tools.push(Box::new(crate::tools::mcp::McpTool::new(mcp_registry)));
+        }
+    }
+    let tools_registry_exec: Arc<Vec<Box<dyn Tool>>> = Arc::new(exec_tools);
     let tools_registry: Arc<Vec<ToolSpec>> =
         Arc::new(tools_registry_exec.iter().map(|t| t.spec()).collect());
     let max_tool_iterations = config.agent.max_tool_iterations;
