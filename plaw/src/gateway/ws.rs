@@ -685,17 +685,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             > = {
                 let cfg = state.config.lock();
                 if cfg.agent.checkpoint.enabled {
-                    let raw = cfg.agent.checkpoint.dir.trim();
-                    let configured = std::path::PathBuf::from(if raw.is_empty() {
-                        "state/checkpoints"
-                    } else {
-                        raw
-                    });
-                    let root = if configured.is_absolute() {
-                        configured
-                    } else {
-                        cfg.workspace_dir.join(configured)
-                    };
+                    let root = crate::agent::checkpoint::resolve_checkpoint_root(&cfg);
                     Some(std::sync::Arc::new(
                         crate::agent::checkpoint::FsCheckpointWriter::new(root),
                     ))
