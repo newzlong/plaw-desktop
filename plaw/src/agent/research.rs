@@ -91,7 +91,11 @@ When you have enough information, summarize what you found in this format:
 pub async fn run_research_phase(
     config: &ResearchPhaseConfig,
     provider: &dyn Provider,
-    tools: &[Box<dyn Tool>],
+    // Slice of borrowed tool refs (not owned Boxes) so callers can pass a
+    // filtered subset of the production registry without cloning. Method
+    // calls inside this fn auto-deref through `&&dyn Tool` just like they
+    // did for `&Box<dyn Tool>`.
+    tools: &[&dyn Tool],
     user_message: &str,
     model: &str,
     temperature: f64,
@@ -250,7 +254,7 @@ pub async fn run_research_phase(
 }
 
 /// Execute a single tool call.
-async fn execute_tool_call(tools: &[Box<dyn Tool>], tool_call: &ToolCall) -> ToolResult {
+async fn execute_tool_call(tools: &[&dyn Tool], tool_call: &ToolCall) -> ToolResult {
     // Find the tool
     let tool = tools.iter().find(|t| t.name() == tool_call.name);
 

@@ -548,6 +548,64 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             .clone()
             .unwrap_or_else(|| "unknown".to_string());
 
+        // Research phase (if enabled + triggered for this user message).
+        // Runs a focused pre-loop info-gathering turn against a FILTERED
+        // tools registry — only `Tool::side_effects() == ReadOnly` tools
+        // are exposed, so a research turn whose model ignores its system
+        // prompt and tries to mutate state can't (the registry simply
+        // doesn't contain shell/file_write/etc.). The collected context
+        // is injected as a system message right before the user message
+        // so the main agent loop sees ambient grounding without
+        // polluting the user's text.
+        let research_config = state.config.lock().research.clone();
+        if crate::agent::research::should_trigger(&research_config, &content) {
+            use crate::tools::traits::SideEffectClass;
+            let readonly_tools: Vec<&dyn crate::tools::Tool> = state
+                .tools_registry_exec
+                .iter()
+                .filter(|t| t.side_effects() == SideEffectClass::ReadOnly)
+                .map(|t| t.as_ref())
+                .collect();
+            match crate::agent::research::run_research_phase(
+                &research_config,
+                state.provider.as_ref(),
+                &readonly_tools,
+                &content,
+                &state.model,
+                state.temperature,
+                state.observer.clone(),
+            )
+            .await
+            {
+                Ok(research) if !research.context.trim().is_empty() => {
+                    // Insert as a system note BEFORE the user message so
+                    // the main loop sees: [system prompts...] [research
+                    // context] [user]. Use saturating_sub so a brand-new
+                    // history with only the user message still inserts
+                    // safely at index 0.
+                    let user_msg_idx = history.len().saturating_sub(1);
+                    history.insert(
+                        user_msg_idx,
+                        ChatMessage::system(format!(
+                            "[Research context]\n{}",
+                            research.context.trim()
+                        )),
+                    );
+                    tracing::info!(
+                        tool_calls = research.tool_call_count,
+                        duration_ms = research.duration.as_millis() as u64,
+                        "research phase injected context into history"
+                    );
+                }
+                Ok(_) => {
+                    tracing::debug!("research phase ran but found nothing usable");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "research phase failed; continuing without research context");
+                }
+            }
+        }
+
         // Broadcast agent_start event
         let _ = state.event_tx.send(serde_json::json!({
             "type": "agent_start",
