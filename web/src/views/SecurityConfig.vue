@@ -123,31 +123,31 @@ onMounted(async () => {
         ? [...cfg.autonomy.auto_approve]
         : []
     }
-  } catch { /* no config yet */ }
+  } catch (e) {
+    // Surface to console so a missing/malformed config doesn't masquerade
+    // as a UI bug.
+    console.warn('[SecurityConfig] readConfig failed:', e)
+  }
 })
 
 async function save() {
   saving.value = true
   try {
-    const cfg = {}
-    try { Object.assign(cfg, await readConfig()) } catch {}
-
-    // Preserve whatever `level` is already on disk (the field is no longer
-    // edited from this page; SecurityPolicy still consults it for FS
-    // confinement / command allowlist enforcement). Default to "supervised"
-    // when the config is brand new.
-    cfg.autonomy = {
-      ...cfg.autonomy,
-      level: cfg.autonomy?.level || 'supervised',
-      workspace_only: form.workspaceOnly,
-      allowed_commands: form.allowedCommands || [],
-      forbidden_paths: form.forbiddenPaths || [],
-      auto_approve: form.autoApprove || [],
-      max_actions_per_hour: cfg.autonomy?.max_actions_per_hour || 1000,
-      max_cost_per_day_cents: cfg.autonomy?.max_cost_per_day_cents || 10000,
-    }
-
-    await writeConfig(cfg)
+    // Send ONLY the autonomy section we edit on this page. The Tauri
+    // write_config command deep-merges this partial into the on-disk
+    // config, so other sections (web_fetch, agent, browser, ...) are
+    // preserved untouched. This avoids round-tripping large integer
+    // defaults (e.g. plaw's [agent].max_tool_iterations near i64::MAX)
+    // through JS Number, which loses precision and then fails toml's
+    // i64-typed deserialize on the way back.
+    await writeConfig({
+      autonomy: {
+        workspace_only: form.workspaceOnly,
+        allowed_commands: form.allowedCommands || [],
+        forbidden_paths: form.forbiddenPaths || [],
+        auto_approve: form.autoApprove || [],
+      },
+    })
     saveOk.value = true
     saveMsg.value = t('common.saved')
     try {
@@ -156,10 +156,18 @@ async function save() {
     } catch {}
   } catch (e) {
     saveOk.value = false
-    saveMsg.value = e?.message || t('common.saveFailed')
+    // Tauri Result<_, String> errors arrive as plain strings, not Error
+    // objects — `e.message` was always undefined before, so the user saw
+    // only the generic fallback. Coerce string/object/null so the real
+    // Rust error surfaces in the toast.
+    const detail = (e && typeof e === 'object' && 'message' in e)
+      ? e.message
+      : (typeof e === 'string' ? e : String(e ?? ''))
+    console.error('[SecurityConfig] save failed:', e)
+    saveMsg.value = detail || t('common.saveFailed')
   } finally {
     saving.value = false
-    setTimeout(() => { saveMsg.value = '' }, 3000)
+    setTimeout(() => { saveMsg.value = '' }, 5000)
   }
 }
 
