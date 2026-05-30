@@ -56,6 +56,7 @@ mod agent;
 mod approval;
 mod auth;
 mod channels;
+mod checkpoint_cli;
 mod rag {
     pub use plaw::rag::*;
 }
@@ -95,8 +96,8 @@ use config::Config;
 
 // Re-export so binary modules can use crate::<CommandEnum> while keeping a single source of truth.
 pub use plaw::{
-    ChannelCommands, CronCommands, HardwareCommands, IntegrationCommands, MigrateCommands,
-    PeripheralCommands, ServiceCommands, SkillCommands,
+    ChannelCommands, CheckpointCommands, CronCommands, HardwareCommands, IntegrationCommands,
+    MigrateCommands, PeripheralCommands, ServiceCommands, SkillCommands,
 };
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -376,6 +377,29 @@ Examples:
     Cron {
         #[command(subcommand)]
         cron_command: CronCommands,
+    },
+
+    /// Inspect per-iteration agent loop snapshots (see `[agent.checkpoint]` config)
+    #[command(long_about = "\
+Inspect per-iteration agent loop snapshots.
+
+Snapshots are written to disk after every iteration of the agent loop
+when `[agent.checkpoint] enabled = true` in config.toml. Default
+location: `<workspace_dir>/state/checkpoints/<turn_id>/<iter:06>.json`.
+
+This command is read-only — no resume / fork capability ships here yet.
+For forensics after a crashed turn, `plaw checkpoint list` enumerates
+turns; `plaw checkpoint show <turn_id>` walks a specific turn's history.
+
+Examples:
+  plaw checkpoint list
+  plaw checkpoint list --json
+  plaw checkpoint show 9f1c-abc...
+  plaw checkpoint show 9f1c-abc... --iteration 0
+  plaw checkpoint show 9f1c-abc... --iteration 0 --json")]
+    Checkpoint {
+        #[command(subcommand)]
+        checkpoint_command: CheckpointCommands,
     },
 
     /// Manage provider model catalogs
@@ -1015,6 +1039,10 @@ async fn main() -> Result<()> {
         } => handle_estop_command(&config, estop_command, level, domains, tools),
 
         Commands::Cron { cron_command } => cron::handle_command(cron_command, &config),
+
+        Commands::Checkpoint { checkpoint_command } => {
+            checkpoint_cli::handle_command(checkpoint_command, &config)
+        }
 
         Commands::Models { model_command } => match model_command {
             ModelCommands::Refresh {
