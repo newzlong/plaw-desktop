@@ -75,7 +75,11 @@ pub struct ApprovalManager {
     auto_approve: RwLock<HashSet<String>>,
     /// Tools that always need approval, ignoring session allowlist (config + runtime updates).
     always_ask: RwLock<HashSet<String>>,
-    /// Autonomy level from config.
+    /// Autonomy level from config. Stage 6 collapse: the tier is no longer
+    /// consulted by `needs_approval` — the action card + `auto_approve` is
+    /// the sole gate. Retained on the struct so config snapshots / future
+    /// hot-reload paths (and any out-of-tree consumers) can still read it.
+    #[allow(dead_code)]
     autonomy_level: AutonomyLevel,
     /// Session-scoped allowlist built from "Always" responses.
     session_allowlist: Mutex<HashSet<String>>,
@@ -156,28 +160,25 @@ impl ApprovalManager {
     ///
     /// `args` is the tool's argument object. It is consulted only for
     /// `shell:<prefix>` command-prefix grants; whole-tool grants ignore it.
+    ///
+    /// The autonomy tier (`autonomy_level`) is intentionally NOT consulted
+    /// here: per-operation approval is now the sole gate (defense-in-depth
+    /// like workspace_only / command allowlist still applies in
+    /// `SecurityPolicy`). To opt out of prompts entirely, put the literal
+    /// wildcard `"*"` in `auto_approve` (see [`entries_match_call`]).
     pub fn needs_approval(&self, tool_name: &str, args: &serde_json::Value) -> bool {
-        // Full autonomy never prompts.
-        if self.autonomy_level == AutonomyLevel::Full {
-            return false;
-        }
-
-        // ReadOnly blocks everything — handled elsewhere; no prompt needed.
-        if self.autonomy_level == AutonomyLevel::ReadOnly {
-            return false;
-        }
-
-        // always_ask overrides everything (whole-tool only).
+        // always_ask overrides everything — including the "*" wildcard.
         if self.always_ask.read().contains(tool_name) {
             return true;
         }
 
-        // auto_approve / session allowlist (whole-tool OR safe shell prefix).
+        // auto_approve / session allowlist (whole-tool, "*" wildcard,
+        // OR safe shell prefix).
         if self.call_is_pre_approved(tool_name, args) {
             return false;
         }
 
-        // Default: supervised mode requires approval.
+        // Default: fail-closed — supervised semantics for everything else.
         true
     }
 
@@ -204,17 +205,36 @@ impl ApprovalManager {
     }
 
     /// Returns true if any entry in `entries` grants this `tool_name`/`args` call.
+    ///
+    /// Match order (deliberate):
+    ///   1. Whole-tool entry `"<tool_name>"` — backwards-compatible.
+    ///   2. Literal `"*"` wildcard entry — approves any tool with any args,
+    ///      including shell with metachars. This is "I want full autonomy";
+    ///      the caller ([`needs_approval`]) still enforces `always_ask`
+    ///      OUTSIDE this function so the wildcard can never bypass it.
+    ///      Only the exact one-character string `"*"` is a wildcard — entries
+    ///      like `"*git*"`, `"shell*"`, or `"file_*"` are treated as literal
+    ///      tool names (no glob / prefix expansion).
+    ///   3. `"shell:<prefix>"` safe-prefix grant — applies only to the
+    ///      shell tool and only if [`prefix_match_is_safe`] holds.
     fn entries_match_call(
         entries: &HashSet<String>,
         tool_name: &str,
         args: &serde_json::Value,
     ) -> bool {
-        // Whole-tool grant matches first (cheap, also backwards-compatible).
+        // (1) Whole-tool grant matches first (cheap, also backwards-compatible).
         if entries.contains(tool_name) {
             return true;
         }
 
-        // shell:<prefix> grants apply only to the shell tool.
+        // (2) Literal "*" wildcard — opt-in "no prompts" for any tool.
+        // Exact-string match only; "*foo" / "foo*" / "*" surrounded by other
+        // characters in another entry never act as wildcards.
+        if entries.contains("*") {
+            return true;
+        }
+
+        // (3) shell:<prefix> grants apply only to the shell tool.
         if tool_name != "shell" {
             return false;
         }
@@ -823,21 +843,30 @@ mod tests {
     }
 
     #[test]
-    fn full_autonomy_never_prompts() {
+    fn full_tier_alone_no_longer_skips_prompt() {
+        // Stage 6 collapse: the autonomy tier no longer short-circuits
+        // needs_approval. A bare "level = full" config with an empty
+        // auto_approve set must now PROMPT for every tool — to opt out the
+        // user has to explicitly add "*" to auto_approve (see migration in
+        // src-tauri/services/config.rs ensure_config_defaults).
         let mgr = ApprovalManager::from_config(&full_config());
-        assert!(!mgr.needs_approval("shell", &serde_json::Value::Null));
-        assert!(!mgr.needs_approval("file_write", &serde_json::Value::Null));
-        assert!(!mgr.needs_approval("anything", &serde_json::Value::Null));
+        assert!(mgr.needs_approval("shell", &serde_json::Value::Null));
+        assert!(mgr.needs_approval("file_write", &serde_json::Value::Null));
+        assert!(mgr.needs_approval("anything", &serde_json::Value::Null));
     }
 
     #[test]
-    fn readonly_never_prompts() {
+    fn readonly_tier_alone_no_longer_skips_prompt() {
+        // Stage 6 collapse: ReadOnly used to early-return false (no prompt
+        // — blocking happens elsewhere). The tier is no longer consulted,
+        // so the prompt fires just like Supervised. SecurityPolicy still
+        // enforces ReadOnly-flavoured denials at a lower layer.
         let config = AutonomyConfig {
             level: AutonomyLevel::ReadOnly,
             ..AutonomyConfig::default()
         };
         let mgr = ApprovalManager::from_config(&config);
-        assert!(!mgr.needs_approval("shell", &serde_json::Value::Null));
+        assert!(mgr.needs_approval("shell", &serde_json::Value::Null));
     }
 
     // ── session allowlist ────────────────────────────────────
@@ -1454,5 +1483,84 @@ mod tests {
         mgr.apply_persistent_runtime_grant("shell:git status");
         assert!(!mgr.needs_approval("shell", &serde_json::json!({"command": "git status -s"})));
         assert!(mgr.needs_approval("shell", &serde_json::json!({"command": "git push"})));
+    }
+
+    // ── "*" wildcard (Stage 6 collapse) ───────────────────────
+
+    #[test]
+    fn wildcard_approves_any_tool() {
+        // auto_approve = ["*"] is "I want full autonomy" — every tool with
+        // any args is pre-approved, including shell with arbitrary commands.
+        // The wildcard deliberately skips the prefix-safety check (it's the
+        // user's explicit opt-out of the supervised default).
+        let cfg = AutonomyConfig {
+            level: AutonomyLevel::Supervised,
+            auto_approve: vec!["*".into()],
+            ..AutonomyConfig::default()
+        };
+        let mgr = ApprovalManager::from_config(&cfg);
+        assert!(!mgr.needs_approval("file_read", &serde_json::Value::Null));
+        assert!(!mgr.needs_approval("file_write", &serde_json::json!({"path": "x"})));
+        assert!(!mgr.needs_approval("shell", &serde_json::json!({"command": "ls"})));
+        // Shell metachars are NOT a barrier under the wildcard — by design.
+        assert!(!mgr.needs_approval(
+            "shell",
+            &serde_json::json!({"command": "rm -rf / ; echo pwned"})
+        ));
+        assert!(!mgr.needs_approval("any_unknown_tool", &serde_json::Value::Null));
+    }
+
+    #[test]
+    fn wildcard_does_not_bypass_always_ask() {
+        // always_ask is checked OUTSIDE entries_match_call so the "*"
+        // wildcard cannot override an explicit always_ask entry. The user
+        // can opt out of prompts globally with "*" but still force prompts
+        // for specific dangerous tools.
+        let cfg = AutonomyConfig {
+            level: AutonomyLevel::Supervised,
+            auto_approve: vec!["*".into()],
+            always_ask: vec!["shell".into()],
+            ..AutonomyConfig::default()
+        };
+        let mgr = ApprovalManager::from_config(&cfg);
+        assert!(mgr.needs_approval("shell", &serde_json::json!({"command": "ls"})));
+        // Other tools are still wildcard-approved.
+        assert!(!mgr.needs_approval("file_write", &serde_json::Value::Null));
+    }
+
+    #[test]
+    fn wildcard_is_exact_string_match_only() {
+        // "*git*" / "shell*" / "file_*" are literal tool names — NOT globs.
+        // Only the exact one-character "*" entry triggers the wildcard path.
+        let cfg = AutonomyConfig {
+            level: AutonomyLevel::Supervised,
+            auto_approve: vec!["*git*".into(), "shell*".into(), "file_*".into()],
+            ..AutonomyConfig::default()
+        };
+        let mgr = ApprovalManager::from_config(&cfg);
+        // None of these should be wildcard-matched.
+        assert!(mgr.needs_approval("git_operations", &serde_json::Value::Null));
+        assert!(mgr.needs_approval("shell", &serde_json::json!({"command": "ls"})));
+        assert!(mgr.needs_approval("file_read", &serde_json::Value::Null));
+        assert!(mgr.needs_approval("file_write", &serde_json::Value::Null));
+        // The literal "shell*" entry would match a tool literally named
+        // "shell*" — exercise that to prove it's whole-tool matching.
+        assert!(!mgr.needs_approval("shell*", &serde_json::Value::Null));
+    }
+
+    #[test]
+    fn empty_auto_approve_still_prompts() {
+        // No regression: when auto_approve is genuinely empty (clear the
+        // schema default which seeds {file_read, memory_recall}), every
+        // non-pre-approved tool prompts.
+        let cfg = AutonomyConfig {
+            level: AutonomyLevel::Supervised,
+            auto_approve: vec![],
+            ..AutonomyConfig::default()
+        };
+        let mgr = ApprovalManager::from_config(&cfg);
+        assert!(mgr.needs_approval("file_read", &serde_json::Value::Null));
+        assert!(mgr.needs_approval("shell", &serde_json::json!({"command": "ls"})));
+        assert!(mgr.needs_approval("anything", &serde_json::Value::Null));
     }
 }

@@ -2,26 +2,12 @@
   <div>
     <h1 class="page-title">{{ t('security.title') }}</h1>
     <p class="page-desc">{{ t('security.desc') }}</p>
+    <p class="page-hint">{{ isZh
+      ? '权限通过聊天卡片即时授权（允许一次 / 允许并记住 / 拒绝）。下方是底层防御措施与已记住的授权。'
+      : 'Permission is granted interactively via the chat action card (allow once / allow & remember / deny). Below are the defense-in-depth limits and remembered grants.'
+    }}</p>
 
     <div class="max-w-xl space-y-5">
-      <!-- Autonomy Level Presets -->
-      <GlassCard :hoverable="false">
-        <label class="field-label">{{ t('security.autonomyLevel') }}</label>
-        <div class="preset-grid">
-          <button
-            v-for="p in presets"
-            :key="p.value"
-            class="preset-card"
-            :class="{ 'preset-card--active': form.level === p.value }"
-            @click="applyPreset(p)"
-          >
-            <component :is="p.icon" class="w-5 h-5 mb-2" />
-            <div class="preset-card__title">{{ t(p.i18nLabel) }}</div>
-            <div class="preset-card__desc">{{ t(p.i18nDesc) }}</div>
-          </button>
-        </div>
-      </GlassCard>
-
       <!-- Detailed Settings -->
       <GlassCard :hoverable="false">
         <label class="field-label">{{ t('security.detailedSettings') }}</label>
@@ -92,7 +78,6 @@
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
-import { Eye, ShieldCheck, Zap } from 'lucide-vue-next'
 import { GlassCard, GlassButton, GlassToggle, GlassTag } from '../components/glass'
 import { readConfig, writeConfig, restartPlaw, getPlawStatus } from '../api/tauri'
 import { useI18n } from '../composables/useI18n'
@@ -104,41 +89,17 @@ const saveOk = ref(false)
 const needRestart = ref(false)
 const restarting = ref(false)
 
+// Stage 6 collapse: per-operation approval moved entirely into the action
+// card (allow once / allow & remember / deny). The autonomy tier preset
+// grid is gone; this page now only edits the defense-in-depth limits
+// (workspace_only, allowed_commands, forbidden_paths) and the remembered
+// grants (auto_approve).
 const form = reactive({
-  level: 'supervised',
   workspaceOnly: true,
   allowedCommands: [],
   forbiddenPaths: [],
   autoApprove: [],
 })
-
-const presets = [
-  {
-    value: 'readonly',
-    i18nLabel: 'security.conservative',
-    i18nDesc: 'security.conservativeDesc',
-    icon: Eye,
-    config: { workspaceOnly: true, allowedCommands: [], forbiddenPaths: [] },
-  },
-  {
-    value: 'supervised',
-    i18nLabel: 'security.standard',
-    i18nDesc: 'security.standardDesc',
-    icon: ShieldCheck,
-    config: {
-      workspaceOnly: true,
-      allowedCommands: ['git', 'ls', 'cat', 'grep', 'find', 'head', 'tail', 'wc'],
-      forbiddenPaths: [],
-    },
-  },
-  {
-    value: 'full',
-    i18nLabel: 'security.permissive',
-    i18nDesc: 'security.permissiveDesc',
-    icon: Zap,
-    config: { workspaceOnly: false, allowedCommands: ['*'], forbiddenPaths: [] },
-  },
-]
 
 /**
  * Classify an auto_approve entry for display: shell command-prefix grants
@@ -151,28 +112,16 @@ function entryKind(entry) {
   return isZh.value ? '整个工具' : 'whole tool'
 }
 
-function applyPreset(p) {
-  form.level = p.value
-  form.workspaceOnly = p.config.workspaceOnly
-  form.allowedCommands = [...p.config.allowedCommands]
-  form.forbiddenPaths = [...p.config.forbiddenPaths]
-}
-
 onMounted(async () => {
   try {
     const cfg = await readConfig()
     if (cfg.autonomy) {
-      form.level = cfg.autonomy.level || 'supervised'
       form.workspaceOnly = cfg.autonomy.workspace_only !== false
       form.allowedCommands = cfg.autonomy.allowed_commands || []
       form.forbiddenPaths = cfg.autonomy.forbidden_paths || []
       form.autoApprove = Array.isArray(cfg.autonomy.auto_approve)
         ? [...cfg.autonomy.auto_approve]
         : []
-      // Full autonomy uses wildcard — normalize loaded commands
-      if (form.level === 'full' && !form.allowedCommands.includes('*')) {
-        form.allowedCommands = ['*']
-      }
     }
   } catch { /* no config yet */ }
 })
@@ -183,58 +132,19 @@ async function save() {
     const cfg = {}
     try { Object.assign(cfg, await readConfig()) } catch {}
 
+    // Preserve whatever `level` is already on disk (the field is no longer
+    // edited from this page; SecurityPolicy still consults it for FS
+    // confinement / command allowlist enforcement). Default to "supervised"
+    // when the config is brand new.
     cfg.autonomy = {
       ...cfg.autonomy,
-      level: form.level,
+      level: cfg.autonomy?.level || 'supervised',
       workspace_only: form.workspaceOnly,
-      allowed_commands: form.level === 'full' ? ['*'] : (form.allowedCommands || []),
+      allowed_commands: form.allowedCommands || [],
       forbidden_paths: form.forbiddenPaths || [],
       auto_approve: form.autoApprove || [],
       max_actions_per_hour: cfg.autonomy?.max_actions_per_hour || 1000,
       max_cost_per_day_cents: cfg.autonomy?.max_cost_per_day_cents || 10000,
-    }
-
-    // Sync all config sections based on autonomy level
-    if (form.level === 'full') {
-      cfg.autonomy.block_high_risk_commands = false
-      cfg.autonomy.require_approval_for_medium_risk = false
-      cfg.autonomy.non_cli_excluded_tools = []
-      cfg.web_fetch = { ...cfg.web_fetch, allowed_domains: ['*'], enabled: true }
-      cfg.http_request = { ...cfg.http_request, allowed_domains: ['*'], allow_local: true, enabled: true }
-      cfg.browser = { ...cfg.browser, enabled: true, allowed_domains: ['*'] }
-      // Full mode: no iteration limit
-      cfg.agent = { ...cfg.agent }
-      delete cfg.agent.max_tool_iterations  // let code default to unlimited
-      cfg.skills = { ...cfg.skills, prompt_injection_mode: 'compact' }
-    } else if (form.level === 'supervised') {
-      cfg.autonomy.block_high_risk_commands = true
-      cfg.autonomy.require_approval_for_medium_risk = true
-      cfg.autonomy.non_cli_excluded_tools = [
-        'shell', 'file_write', 'file_edit', 'git_operations',
-        'browser', 'browser_open', 'memory_forget',
-      ]
-      cfg.web_fetch = { ...cfg.web_fetch, allowed_domains: ['*'], enabled: true }
-      cfg.http_request = { ...cfg.http_request, allowed_domains: ['localhost', '127.0.0.1'], allow_local: true, enabled: true }
-      cfg.browser = { ...cfg.browser, enabled: false }
-      // Supervised: moderate iteration limit
-      cfg.agent = { ...cfg.agent, max_tool_iterations: 200 }
-      cfg.skills = { ...cfg.skills, prompt_injection_mode: 'compact' }
-    } else {
-      // readonly
-      cfg.autonomy.block_high_risk_commands = true
-      cfg.autonomy.require_approval_for_medium_risk = true
-      cfg.autonomy.non_cli_excluded_tools = [
-        'shell', 'file_write', 'file_edit', 'git_operations',
-        'browser', 'browser_open', 'http_request',
-        'schedule', 'cron_add', 'cron_remove', 'cron_update', 'cron_run',
-        'memory_store', 'memory_forget', 'proxy_config', 'model_routing_config',
-      ]
-      cfg.web_fetch = { ...cfg.web_fetch, allowed_domains: [], enabled: false }
-      cfg.http_request = { ...cfg.http_request, allowed_domains: [], allow_local: false, enabled: false }
-      cfg.browser = { ...cfg.browser, enabled: false, allowed_domains: [] }
-      // ReadOnly: lower iteration limit, compact skill injection
-      cfg.agent = { ...cfg.agent, max_tool_iterations: 50 }
-      cfg.skills = { ...cfg.skills, prompt_injection_mode: 'compact' }
     }
 
     await writeConfig(cfg)
@@ -272,42 +182,19 @@ async function doRestart() {
 .page-desc {
   color: var(--text-secondary);
   font-size: 0.875rem;
-  margin-bottom: 24px;
+  margin-bottom: 8px;
+}
+.page-hint {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  margin-bottom: 20px;
 }
 .field-label {
   display: block;
   font-size: 0.8rem; font-weight: 600;
   color: var(--text-secondary);
   margin-bottom: 12px;
-}
-
-.preset-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 12px;
-}
-.preset-card {
-  display: flex; flex-direction: column; align-items: center;
-  background: var(--bg-raised);
-  border: 2px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  padding: 1rem; text-align: center;
-  cursor: pointer; color: var(--text-primary);
-  transition: all var(--duration-fast) var(--ease-out);
-}
-.preset-card:hover { border-color: var(--border-strong); }
-.preset-card--active {
-  border-color: var(--plaw-primary);
-  background: var(--plaw-primary-soft);
-  box-shadow: var(--shadow-glow);
-}
-.preset-card__title {
-  font-size: 0.9rem; font-weight: 600;
-  margin-bottom: 4px;
-}
-.preset-card__desc {
-  font-size: 0.75rem;
-  color: var(--text-muted);
 }
 
 .setting-row {
