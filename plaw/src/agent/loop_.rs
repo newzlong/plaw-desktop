@@ -966,6 +966,27 @@ pub(crate) async fn run_tool_call_loop(
                     .await;
             }
         }
+
+        // ── Checkpoint: durable snapshot at iteration boundary ──
+        // Best-effort: a failing checkpoint writer logs and the loop
+        // continues. Losing a snapshot is strictly better than failing
+        // the turn over a transient filesystem error. See
+        // [`crate::agent::checkpoint`].
+        if let Some(writer) = wrappers::current_checkpoint_writer() {
+            let snapshot = crate::agent::checkpoint::Snapshot::new(
+                turn_id.clone(),
+                iteration,
+                history.clone(),
+            );
+            if let Err(err) = writer.put(&snapshot) {
+                tracing::warn!(
+                    %turn_id,
+                    %iteration,
+                    error = %err,
+                    "checkpoint write failed; agent loop continues"
+                );
+            }
+        }
     }
 
     runtime_trace::record_event(
@@ -2549,6 +2570,7 @@ mod tests {
             None,
             None,
             &[],
+            None, // no checkpoint writer
         )
         .await
         .expect("tool loop should continue after non-cli approval");
@@ -4380,5 +4402,162 @@ Let me check the result."#;
         let parsed: serde_json::Value = serde_json::from_str(result.as_deref().unwrap()).unwrap();
         assert_eq!(parsed["content"].as_str(), Some("answer"));
         assert!(parsed.get("reasoning_content").is_none());
+    }
+
+    #[tokio::test]
+    async fn run_tool_call_loop_writes_checkpoint_when_writer_is_scoped() {
+        use crate::agent::checkpoint::{FsCheckpointWriter, Snapshot};
+        use std::sync::Arc as StdArc;
+        use tempfile::TempDir;
+
+        // 1st response: tool call → iteration runs to completion → snapshot.
+        // 2nd response: plain text → loop exits before snapshot point.
+        let provider = ScriptedProvider::from_text_responses(vec![
+            r#"<tool_call>
+{"name":"shell","arguments":{"command":"echo hi"}}
+</tool_call>"#,
+            "done",
+        ]);
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let tools_registry: Vec<Box<dyn Tool>> = vec![Box::new(DelayTool::new(
+            "shell",
+            10,
+            Arc::clone(&active),
+            Arc::clone(&max_active),
+        ))];
+
+        // Auto-approve so the supervised "shell" tool runs without prompting.
+        let approval_cfg = crate::config::AutonomyConfig {
+            level: crate::security::AutonomyLevel::Full,
+            auto_approve: vec!["*".into()],
+            always_ask: vec![],
+            ..crate::config::AutonomyConfig::default()
+        };
+        let approval_mgr = ApprovalManager::from_config(&approval_cfg);
+
+        let mut history = vec![
+            ChatMessage::system("test-system"),
+            ChatMessage::user("run shell"),
+        ];
+        let observer = NoopObserver;
+
+        let tmp = TempDir::new().unwrap();
+        let writer: StdArc<dyn crate::agent::checkpoint::CheckpointWriter> =
+            StdArc::new(FsCheckpointWriter::new(tmp.path()));
+
+        let result = run_tool_call_loop_with_non_cli_approval_context(
+            &provider,
+            &mut history,
+            &tools_registry,
+            &observer,
+            "mock-provider",
+            "mock-model",
+            0.0,
+            true,
+            Some(&approval_mgr),
+            "telegram",
+            None,
+            &crate::config::MultimodalConfig::default(),
+            4,
+            None,
+            None,
+            None,
+            &[],
+            Some(writer),
+        )
+        .await
+        .expect("tool loop should complete");
+
+        assert_eq!(result, "done");
+
+        // Inventory: exactly one snapshot — iteration 0's tool result push.
+        // Iteration 1 returned text-only and exited before the snapshot
+        // point, so no second file.
+        let turn_dirs: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.path().is_dir())
+            .collect();
+        assert_eq!(turn_dirs.len(), 1, "exactly one turn directory expected");
+        let snapshot_files: Vec<_> = std::fs::read_dir(turn_dirs[0].path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(snapshot_files.len(), 1, "exactly one snapshot file expected");
+        let snap_path = snapshot_files[0].path();
+        assert_eq!(snap_path.file_name().unwrap(), "000000.json");
+
+        let body = std::fs::read_to_string(&snap_path).unwrap();
+        let snapshot: Snapshot = serde_json::from_str(&body).unwrap();
+        assert_eq!(snapshot.iteration, 0);
+        assert_eq!(snapshot.parent_iteration, None);
+        // History at snapshot time includes the iteration's pushes; the
+        // exact count varies by tool dispatcher mode, so assert lower-bound.
+        assert!(
+            snapshot.history.len() >= 4,
+            "snapshot history should include the iteration's pushes, got {}",
+            snapshot.history.len()
+        );
+        assert_eq!(snapshot.history[0].role, "system");
+        assert_eq!(snapshot.history[1].role, "user");
+    }
+
+    #[tokio::test]
+    async fn run_tool_call_loop_does_not_write_checkpoints_without_writer_in_scope() {
+        // Same scenario as above but no writer scoped — verifies the
+        // default path emits zero side effects.
+        let provider = ScriptedProvider::from_text_responses(vec![
+            r#"<tool_call>
+{"name":"shell","arguments":{"command":"echo hi"}}
+</tool_call>"#,
+            "done",
+        ]);
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let tools_registry: Vec<Box<dyn Tool>> = vec![Box::new(DelayTool::new(
+            "shell",
+            10,
+            Arc::clone(&active),
+            Arc::clone(&max_active),
+        ))];
+        let approval_cfg = crate::config::AutonomyConfig {
+            level: crate::security::AutonomyLevel::Full,
+            auto_approve: vec!["*".into()],
+            always_ask: vec![],
+            ..crate::config::AutonomyConfig::default()
+        };
+        let approval_mgr = ApprovalManager::from_config(&approval_cfg);
+        let mut history = vec![
+            ChatMessage::system("test-system"),
+            ChatMessage::user("run shell"),
+        ];
+        let observer = NoopObserver;
+
+        let result = run_tool_call_loop_with_non_cli_approval_context(
+            &provider,
+            &mut history,
+            &tools_registry,
+            &observer,
+            "mock-provider",
+            "mock-model",
+            0.0,
+            true,
+            Some(&approval_mgr),
+            "telegram",
+            None,
+            &crate::config::MultimodalConfig::default(),
+            4,
+            None,
+            None,
+            None,
+            &[],
+            None, // no checkpoint writer
+        )
+        .await
+        .expect("tool loop should complete");
+        assert_eq!(result, "done");
     }
 }

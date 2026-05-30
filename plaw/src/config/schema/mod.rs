@@ -667,6 +667,44 @@ pub struct AgentConfig {
     /// post-Phase-2 baseline.
     #[serde(default)]
     pub intent_routing_enabled: bool,
+    /// Per-iteration durable snapshots of the agent loop. See
+    /// [`crate::agent::checkpoint`] for the on-disk format. Default: disabled.
+    #[serde(default)]
+    pub checkpoint: CheckpointConfig,
+}
+
+/// Configuration for per-iteration agent loop snapshots
+/// (`[agent.checkpoint]` section).
+///
+/// Phase 0: writer-only. The on-disk format is documented at
+/// [`crate::agent::checkpoint::Snapshot`]; resume / CLI inspection land in
+/// follow-up PRs. Default `enabled = false` — opt-in until users explicitly
+/// want the disk usage (~1 KB / iteration / turn).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CheckpointConfig {
+    /// When `true`, the agent loop writes a snapshot to disk after every
+    /// iteration via [`crate::agent::checkpoint::FsCheckpointWriter`].
+    /// When `false`, the loop emits no snapshots (zero disk I/O).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Directory (relative to the plaw data dir) where snapshots are
+    /// persisted. Default: `state/checkpoints`. Files land at
+    /// `<data_dir>/<dir>/<turn_id>/<iteration:06>.json`.
+    #[serde(default = "default_checkpoint_dir")]
+    pub dir: String,
+}
+
+fn default_checkpoint_dir() -> String {
+    "state/checkpoints".into()
+}
+
+impl Default for CheckpointConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            dir: default_checkpoint_dir(),
+        }
+    }
 }
 
 fn default_agent_max_tool_iterations() -> usize {
@@ -699,6 +737,7 @@ impl Default for AgentConfig {
             tool_dispatcher: default_agent_tool_dispatcher(),
             max_context_tokens: default_agent_max_context_tokens(),
             intent_routing_enabled: false,
+            checkpoint: CheckpointConfig::default(),
         }
     }
 }

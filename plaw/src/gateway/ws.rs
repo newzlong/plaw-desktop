@@ -677,6 +677,33 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 prompt_tx: approval_tx,
             };
 
+            // Per-iteration checkpoint writer (opt-in via
+            // [agent.checkpoint].enabled). Resolved freshly per turn so a
+            // config hot-reload takes effect on the next message.
+            let checkpoint_writer: Option<
+                std::sync::Arc<dyn crate::agent::checkpoint::CheckpointWriter>,
+            > = {
+                let cfg = state.config.lock();
+                if cfg.agent.checkpoint.enabled {
+                    let raw = cfg.agent.checkpoint.dir.trim();
+                    let configured = std::path::PathBuf::from(if raw.is_empty() {
+                        "state/checkpoints"
+                    } else {
+                        raw
+                    });
+                    let root = if configured.is_absolute() {
+                        configured
+                    } else {
+                        cfg.workspace_dir.join(configured)
+                    };
+                    Some(std::sync::Arc::new(
+                        crate::agent::checkpoint::FsCheckpointWriter::new(root),
+                    ))
+                } else {
+                    None
+                }
+            };
+
             let loop_fut = run_tool_call_loop_with_non_cli_approval_context(
                 state.provider.as_ref(),
                 &mut history,
@@ -695,6 +722,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 Some(delta_tx),    // delta streaming — enables real-time progress
                 state.hooks.as_deref(), // hooks — fires PreCompact / before_tool_call / on_after_tool_call etc.
                 &[],               // excluded tools
+                checkpoint_writer,
             );
             tokio::pin!(loop_fut);
 
