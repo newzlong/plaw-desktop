@@ -55,6 +55,7 @@ pub mod agent;
 pub(crate) mod approval;
 pub(crate) mod auth;
 pub mod channels;
+pub(crate) mod checkpoint_cli;
 pub mod config;
 pub mod coordination;
 pub(crate) mod cost;
@@ -471,4 +472,53 @@ Examples:
     },
     /// Flash Plaw firmware to Nucleo-F401RE (builds + probe-rs run)
     FlashNucleo,
+}
+
+/// `plaw checkpoint ...` subcommands — forensic inspection of the
+/// per-iteration agent loop snapshots written by
+/// [`crate::agent::checkpoint::FsCheckpointWriter`]. See PR #58 / #59
+/// for the on-disk format and reader API.
+#[derive(Subcommand, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CheckpointCommands {
+    /// List every turn that has persisted snapshots, with counts and
+    /// the highest iteration index per turn.
+    #[command(long_about = "\
+List every turn with persisted checkpoint snapshots.
+
+Reads `<workspace_dir>/<agent.checkpoint.dir>/<turn_id>/*.json` and
+prints one row per turn. Combine with `--json` to pipe through `jq`
+or feed a script.
+
+Examples:
+  plaw checkpoint list
+  plaw checkpoint list --json")]
+    List {
+        /// Emit JSON instead of the default human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a specific turn's snapshots: latest by default, or a
+    /// specific iteration with `--iteration N`.
+    #[command(long_about = "\
+Show snapshots for a specific turn.
+
+Without --iteration, prints a one-line summary per snapshot.
+With --iteration N, prints the full snapshot at that iteration
+(including the conversation history). Combine with --json for
+machine-readable output.
+
+Examples:
+  plaw checkpoint show 9f1c-...
+  plaw checkpoint show 9f1c-... --iteration 0
+  plaw checkpoint show 9f1c-... --iteration 0 --json")]
+    Show {
+        /// Turn identifier (directory name under the checkpoint root).
+        turn_id: String,
+        /// Specific iteration index. When omitted, lists all iterations.
+        #[arg(long)]
+        iteration: Option<usize>,
+        /// Emit JSON instead of the default human-readable view.
+        #[arg(long)]
+        json: bool,
+    },
 }
