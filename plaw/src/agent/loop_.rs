@@ -2178,8 +2178,13 @@ mod tests {
                 tool_call_id: None,
             },
         ];
+        // Stage 6 collapse: "no interactive approvals" is no longer expressed
+        // by `level = Full` (the tier is not consulted by needs_approval).
+        // The user opts out by adding the "*" wildcard to auto_approve.
         let approval_cfg = crate::config::AutonomyConfig {
             level: crate::security::AutonomyLevel::Full,
+            auto_approve: vec!["*".into()],
+            always_ask: vec![],
             ..crate::config::AutonomyConfig::default()
         };
         let approval_mgr = ApprovalManager::from_config(&approval_cfg);
@@ -2219,8 +2224,11 @@ mod tests {
             )),
         ];
 
+        // Stage 6 collapse: opt out of prompts via auto_approve = ["*"].
         let approval_cfg = crate::config::AutonomyConfig {
             level: crate::security::AutonomyLevel::Full,
+            auto_approve: vec!["*".into()],
+            always_ask: vec![],
             ..crate::config::AutonomyConfig::default()
         };
         let approval_mgr = ApprovalManager::from_config(&approval_cfg);

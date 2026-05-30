@@ -89,12 +89,21 @@ pub fn ensure_config_defaults(data_dir: &Path) {
                 sec.insert("level".into(), toml::Value::String("supervised".into()));
                 changed = true;
             }
-            let level = sec.get("level").and_then(|v| v.as_str()).unwrap_or("supervised");
-            let cmds = sec.get("allowed_commands").and_then(|v| v.as_array());
-            let cmds_empty = cmds.map(|a| a.is_empty()).unwrap_or(true);
-            let has_wildcard = cmds
-                .map(|a| a.iter().any(|v| v.as_str() == Some("*")))
-                .unwrap_or(false);
+            // Own the level string so the mutating branches below don't
+            // collide with an immutable borrow of `sec`.
+            let level = sec
+                .get("level")
+                .and_then(|v| v.as_str())
+                .unwrap_or("supervised")
+                .to_string();
+            let (cmds_empty, has_wildcard) = sec
+                .get("allowed_commands")
+                .and_then(|v| v.as_array())
+                .map(|a| (
+                    a.is_empty(),
+                    a.iter().any(|v| v.as_str() == Some("*")),
+                ))
+                .unwrap_or((true, false));
 
             if level == "full" && !has_wildcard {
                 sec.insert("allowed_commands".into(),
@@ -116,6 +125,25 @@ pub fn ensure_config_defaults(data_dir: &Path) {
             if sec.get("workspace_only").is_none() {
                 sec.insert("workspace_only".into(), toml::Value::Boolean(true));
                 changed = true;
+            }
+
+            // Stage 6 collapse migration: the autonomy tier no longer
+            // short-circuits the approval gate. To preserve the "no prompts"
+            // behavior that pre-Stage-6 `level = "full"` users relied on,
+            // seed the literal "*" wildcard into auto_approve once. After
+            // that, the user manages opt-in/out from the SecurityConfig UI.
+            if level == "full" {
+                let mut list: Vec<toml::Value> = sec
+                    .get("auto_approve")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let already_wild = list.iter().any(|v| v.as_str() == Some("*"));
+                if !already_wild {
+                    list.push(toml::Value::String("*".into()));
+                    sec.insert("auto_approve".into(), toml::Value::Array(list));
+                    changed = true;
+                }
             }
         }
     }
