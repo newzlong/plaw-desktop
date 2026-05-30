@@ -9,12 +9,18 @@
 //! standalone JSON file at
 //! `<data_dir>/state/checkpoints/<turn_id>/<iteration:06>.json`.
 //!
-//! This module ships the **writer surface only** as Phase 0. There is no
-//! reader API, no resume capability, no fork/branch semantics yet — those
-//! are deliberately split into follow-up PRs so this slice stays
-//! reviewable. Today's value: post-crash forensics (the on-disk snapshots
-//! capture the full conversation history at every iteration boundary)
-//! plus a stable foundation for the resume path that lands next.
+//! Read-side companion: [`FsCheckpointReader`] enumerates turns
+//! ([`TurnSummary`]), lists per-turn snapshots sorted by iteration, and
+//! loads the latest snapshot for resume-target selection. Reader and
+//! writer share [`FsCheckpointWriter::path_for`] / [`FsCheckpointReader::path_for`]
+//! so any layout change touches one place.
+//!
+//! Together these two halves cover Phase 0 (durable persistence,
+//! PR #58) and Phase 1 (forensic read). The remaining capabilities —
+//! actual agent-loop resume from a snapshot, CLI / desktop UI for
+//! browsing checkpoint history, and fork / time-travel semantics —
+//! are deliberately split into follow-up PRs so each slice stays
+//! reviewable.
 //!
 //! Design DNA borrowed from LangGraph's persistence layer (per the
 //! `rig-rs-spike-discovery` workflow, lens C): full state per super-step
@@ -159,6 +165,157 @@ impl FsCheckpointWriter {
     /// `plaw checkpoint list` CLI / UI.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+}
+
+impl Snapshot {
+    /// Read a single snapshot from a JSON file produced by
+    /// [`FsCheckpointWriter::put`]. Returns an error if the file is
+    /// missing, unreadable, or its `schema_version` is newer than this
+    /// build understands (forward-incompatible).
+    pub fn load_from(path: &Path) -> Result<Self> {
+        let body = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("failed to read snapshot at {}: {e}", path.display()))?;
+        let snapshot: Snapshot = serde_json::from_str(&body)
+            .map_err(|e| anyhow::anyhow!("failed to parse snapshot at {}: {e}", path.display()))?;
+        if snapshot.schema_version > SNAPSHOT_SCHEMA_VERSION {
+            anyhow::bail!(
+                "snapshot at {} has schema_version {} but this build only \
+                 understands up to version {SNAPSHOT_SCHEMA_VERSION}",
+                path.display(),
+                snapshot.schema_version
+            );
+        }
+        Ok(snapshot)
+    }
+}
+
+/// One-line summary of a turn's persisted snapshots, returned by
+/// [`FsCheckpointReader::list_turns`]. Designed for a future
+/// `plaw checkpoint list` CLI / desktop forensic UI: enough information
+/// to render a row in a table without loading every snapshot body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnSummary {
+    /// Turn identifier (directory name).
+    pub turn_id: String,
+    /// Number of snapshot files present for this turn.
+    pub snapshot_count: usize,
+    /// Highest iteration index seen (i.e. most recent snapshot's
+    /// `iteration` field). Useful for resume-target picking. `None`
+    /// when no snapshot files are present (empty turn directory) —
+    /// should be rare but possible if the writer crashed before any
+    /// `put` completed.
+    pub latest_iteration: Option<usize>,
+}
+
+/// Read-side companion to [`FsCheckpointWriter`]. Enumerates and loads
+/// snapshots from the on-disk layout `<root>/<turn_id>/<iter:06>.json`.
+///
+/// Cheap to construct (no I/O); methods perform the directory walking.
+/// Returned snapshots are eager (full JSON parse per file) — fine at
+/// plaw's scale (snapshots are ~1 KB) but worth revisiting if turn
+/// directories ever grow into the tens of thousands of iterations.
+pub struct FsCheckpointReader {
+    root: PathBuf,
+}
+
+impl FsCheckpointReader {
+    /// Build a reader rooted at `root`. The directory is NOT created;
+    /// missing roots surface as "no turns" via [`Self::list_turns`].
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    /// Path layout helper — same as [`FsCheckpointWriter::path_for`]
+    /// so callers can use either side of the API interchangeably.
+    pub fn path_for(&self, turn_id: &str, iteration: usize) -> PathBuf {
+        self.root.join(turn_id).join(format!("{iteration:06}.json"))
+    }
+
+    /// Root directory this reader observes.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// List every turn directory under the root, with a one-row summary
+    /// per turn. Missing root → empty `Vec`. Subdirectories that fail
+    /// to enumerate are skipped (logged) rather than aborting — partial
+    /// forensic data is better than none.
+    ///
+    /// Result is sorted by `turn_id` (lexicographic, stable).
+    pub fn list_turns(&self) -> Result<Vec<TurnSummary>> {
+        let entries = match std::fs::read_dir(&self.root) {
+            Ok(it) => it,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+
+        let mut summaries = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(turn_id) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let snapshots = match self.list_for_turn(turn_id) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        turn_id = %turn_id,
+                        error = %e,
+                        "skipping unreadable turn directory in list_turns"
+                    );
+                    continue;
+                }
+            };
+            let snapshot_count = snapshots.len();
+            let latest_iteration = snapshots.last().map(|s| s.iteration);
+            summaries.push(TurnSummary {
+                turn_id: turn_id.to_string(),
+                snapshot_count,
+                latest_iteration,
+            });
+        }
+        summaries.sort_by(|a, b| a.turn_id.cmp(&b.turn_id));
+        Ok(summaries)
+    }
+
+    /// Load every snapshot for a turn, sorted by iteration ascending.
+    /// Missing turn directory → empty `Vec`. Files whose names don't
+    /// match the `<iter:06>.json` pattern (e.g. stray `.tmp` siblings
+    /// from a crash mid-write) are skipped. Files that fail JSON
+    /// parsing surface an error — partial corruption shouldn't be
+    /// silently swallowed at the per-turn level.
+    pub fn list_for_turn(&self, turn_id: &str) -> Result<Vec<Snapshot>> {
+        let dir = self.root.join(turn_id);
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(it) => it,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+
+        let mut paths: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension().and_then(|s| s.to_str()) == Some("json")
+                    && p.file_stem().and_then(|s| s.to_str()).is_some_and(|name| {
+                        name.len() == 6 && name.chars().all(|c| c.is_ascii_digit())
+                    })
+            })
+            .collect();
+        paths.sort();
+
+        paths.iter().map(|p| Snapshot::load_from(p)).collect()
+    }
+
+    /// Load only the highest-iteration snapshot for a turn — the natural
+    /// resume point. Returns `Ok(None)` when the turn has no snapshots
+    /// (or doesn't exist), matching `list_for_turn` semantics.
+    pub fn latest_for_turn(&self, turn_id: &str) -> Result<Option<Snapshot>> {
+        Ok(self.list_for_turn(turn_id)?.pop())
     }
 }
 
@@ -332,5 +489,248 @@ mod tests {
         assert!(tmp.path().join("turn-a").join("000000.json").exists());
         assert!(tmp.path().join("turn-a").join("000001.json").exists());
         assert!(tmp.path().join("turn-b").join("000000.json").exists());
+    }
+
+    // ── Reader API tests ────────────────────────────────────────────
+
+    #[test]
+    fn snapshot_load_from_roundtrips_a_file_written_by_writer() {
+        let tmp = TempDir::new().unwrap();
+        let writer = FsCheckpointWriter::new(tmp.path());
+        let original = Snapshot::new("turn-1", 3, sample_history());
+        writer.put(&original).unwrap();
+
+        let loaded = Snapshot::load_from(&writer.path_for("turn-1", 3)).unwrap();
+        assert_eq!(loaded, original);
+    }
+
+    #[test]
+    fn snapshot_load_from_returns_error_on_missing_file() {
+        let tmp = TempDir::new().unwrap();
+        let result = Snapshot::load_from(&tmp.path().join("nonexistent.json"));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("failed to read snapshot"),
+            "expected error to mention 'failed to read snapshot', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn snapshot_load_from_rejects_forward_incompatible_schema_version() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("000000.json");
+        // Hand-craft a snapshot JSON with a schema_version higher than
+        // the current build understands; the loader must reject it.
+        let bogus = serde_json::json!({
+            "schema_version": SNAPSHOT_SCHEMA_VERSION + 1,
+            "turn_id": "future",
+            "iteration": 0,
+            "parent_iteration": null,
+            "history": [],
+            "created_at": "2099-01-01T00:00:00Z"
+        });
+        std::fs::write(&path, serde_json::to_vec(&bogus).unwrap()).unwrap();
+
+        let result = Snapshot::load_from(&path);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("schema_version"),
+            "error must mention schema_version, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn snapshot_load_from_returns_parse_error_on_corrupt_json() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("corrupt.json");
+        std::fs::write(&path, b"{ this isn't json").unwrap();
+
+        let result = Snapshot::load_from(&path);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("failed to parse snapshot"));
+    }
+
+    #[test]
+    fn reader_list_turns_returns_empty_for_missing_root() {
+        let tmp = TempDir::new().unwrap();
+        let reader = FsCheckpointReader::new(tmp.path().join("does-not-exist"));
+        let turns = reader.list_turns().unwrap();
+        assert!(turns.is_empty());
+    }
+
+    #[test]
+    fn reader_list_turns_returns_empty_for_empty_root() {
+        let tmp = TempDir::new().unwrap();
+        let reader = FsCheckpointReader::new(tmp.path());
+        let turns = reader.list_turns().unwrap();
+        assert!(turns.is_empty());
+    }
+
+    #[test]
+    fn reader_list_turns_summarizes_each_turn_directory() {
+        let tmp = TempDir::new().unwrap();
+        let writer = FsCheckpointWriter::new(tmp.path());
+
+        // turn-a has 3 iterations.
+        for i in 0..3 {
+            writer
+                .put(&Snapshot::new("turn-a", i, sample_history()))
+                .unwrap();
+        }
+        // turn-b has 1 iteration.
+        writer
+            .put(&Snapshot::new("turn-b", 0, sample_history()))
+            .unwrap();
+
+        let reader = FsCheckpointReader::new(tmp.path());
+        let turns = reader.list_turns().unwrap();
+        assert_eq!(turns.len(), 2);
+        // Sorted lexicographically.
+        assert_eq!(turns[0].turn_id, "turn-a");
+        assert_eq!(turns[0].snapshot_count, 3);
+        assert_eq!(turns[0].latest_iteration, Some(2));
+        assert_eq!(turns[1].turn_id, "turn-b");
+        assert_eq!(turns[1].snapshot_count, 1);
+        assert_eq!(turns[1].latest_iteration, Some(0));
+    }
+
+    #[test]
+    fn reader_list_turns_ignores_non_directory_entries_in_root() {
+        let tmp = TempDir::new().unwrap();
+        let writer = FsCheckpointWriter::new(tmp.path());
+        writer
+            .put(&Snapshot::new("turn-a", 0, sample_history()))
+            .unwrap();
+        // Stray file at root level (e.g. a lock file or accidental drop).
+        std::fs::write(tmp.path().join("README.txt"), b"not a turn").unwrap();
+
+        let reader = FsCheckpointReader::new(tmp.path());
+        let turns = reader.list_turns().unwrap();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].turn_id, "turn-a");
+    }
+
+    #[test]
+    fn reader_list_for_turn_returns_snapshots_sorted_by_iteration() {
+        let tmp = TempDir::new().unwrap();
+        let writer = FsCheckpointWriter::new(tmp.path());
+        // Write out of order to verify the reader sorts, not the FS.
+        for i in [5, 0, 2, 1, 3, 4] {
+            writer
+                .put(&Snapshot::new("turn-a", i, sample_history()))
+                .unwrap();
+        }
+
+        let reader = FsCheckpointReader::new(tmp.path());
+        let snapshots = reader.list_for_turn("turn-a").unwrap();
+        assert_eq!(snapshots.len(), 6);
+        for (idx, snap) in snapshots.iter().enumerate() {
+            assert_eq!(snap.iteration, idx);
+        }
+    }
+
+    #[test]
+    fn reader_list_for_turn_returns_empty_for_missing_turn() {
+        let tmp = TempDir::new().unwrap();
+        let reader = FsCheckpointReader::new(tmp.path());
+        let snapshots = reader.list_for_turn("nonexistent").unwrap();
+        assert!(snapshots.is_empty());
+    }
+
+    #[test]
+    fn reader_list_for_turn_skips_unrelated_files() {
+        let tmp = TempDir::new().unwrap();
+        let writer = FsCheckpointWriter::new(tmp.path());
+        writer
+            .put(&Snapshot::new("turn-a", 0, sample_history()))
+            .unwrap();
+        // Stray .tmp sibling (simulates a crashed mid-write).
+        let turn_dir = tmp.path().join("turn-a");
+        std::fs::write(turn_dir.join("000001.json.tmp"), b"partial").unwrap();
+        // Stray non-iteration filename.
+        std::fs::write(turn_dir.join("notes.txt"), b"hand-edited").unwrap();
+        // Stray differently-named JSON (resume-marker etc.).
+        std::fs::write(turn_dir.join("resume.json"), b"{}").unwrap();
+
+        let reader = FsCheckpointReader::new(tmp.path());
+        let snapshots = reader.list_for_turn("turn-a").unwrap();
+        // Only the well-formed 000000.json should appear.
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].iteration, 0);
+    }
+
+    #[test]
+    fn reader_list_for_turn_surfaces_parse_errors_on_corrupt_files() {
+        let tmp = TempDir::new().unwrap();
+        let writer = FsCheckpointWriter::new(tmp.path());
+        writer
+            .put(&Snapshot::new("turn-a", 0, sample_history()))
+            .unwrap();
+        // Truncate the file in place — convincing-looking 000001.json but
+        // not parseable. We expect list_for_turn to surface the error
+        // (per-turn level corruption is not silent).
+        let path = tmp.path().join("turn-a").join("000001.json");
+        std::fs::write(&path, b"{ truncated").unwrap();
+
+        let reader = FsCheckpointReader::new(tmp.path());
+        let result = reader.list_for_turn("turn-a");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reader_latest_for_turn_returns_the_highest_iteration() {
+        let tmp = TempDir::new().unwrap();
+        let writer = FsCheckpointWriter::new(tmp.path());
+        writer
+            .put(&Snapshot::new("turn-a", 0, sample_history()))
+            .unwrap();
+        writer
+            .put(&Snapshot::new("turn-a", 7, sample_history()))
+            .unwrap();
+        writer
+            .put(&Snapshot::new("turn-a", 3, sample_history()))
+            .unwrap();
+
+        let reader = FsCheckpointReader::new(tmp.path());
+        let latest = reader.latest_for_turn("turn-a").unwrap();
+        assert!(latest.is_some());
+        assert_eq!(latest.unwrap().iteration, 7);
+    }
+
+    #[test]
+    fn reader_latest_for_turn_returns_none_for_missing_turn() {
+        let tmp = TempDir::new().unwrap();
+        let reader = FsCheckpointReader::new(tmp.path());
+        let latest = reader.latest_for_turn("nonexistent").unwrap();
+        assert!(latest.is_none());
+    }
+
+    #[test]
+    fn reader_and_writer_use_identical_path_layout() {
+        // Regression guard: any divergence in path layout would break
+        // round-trip and is easy to introduce silently if either side
+        // hardcodes the format.
+        let tmp = TempDir::new().unwrap();
+        let writer = FsCheckpointWriter::new(tmp.path());
+        let reader = FsCheckpointReader::new(tmp.path());
+        for &(turn, iter) in &[("a", 0_usize), ("b-with-dashes", 42), ("c", 999_999)] {
+            assert_eq!(writer.path_for(turn, iter), reader.path_for(turn, iter));
+        }
+    }
+
+    #[test]
+    fn turn_summary_json_serialization_uses_expected_keys() {
+        let summary = TurnSummary {
+            turn_id: "abc".to_string(),
+            snapshot_count: 3,
+            latest_iteration: Some(2),
+        };
+        let v = serde_json::to_value(&summary).unwrap();
+        assert_eq!(v["turn_id"], "abc");
+        assert_eq!(v["snapshot_count"], 3);
+        assert_eq!(v["latest_iteration"], 2);
     }
 }
