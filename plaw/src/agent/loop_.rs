@@ -1015,7 +1015,15 @@ pub(crate) async fn run_tool_call_loop(
 // interactive REPL mode. The interactive loop manages history compaction
 // and hard trimming to keep the context window bounded.
 
+/// Single-turn agent entry point with optional snapshot resume.
+///
+/// When `resume_from_turn_id` is `Some(turn_id)`, the agent loop's
+/// `history` is seeded from the latest snapshot for that turn instead
+/// of starting fresh — used by the `plaw resume` CLI subcommand for
+/// crash-recovery / mid-task continuation. Interactive mode does not
+/// yet support resume; pass `None` from the REPL path.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     config: Config,
     message: Option<String>,
@@ -1024,6 +1032,7 @@ pub async fn run(
     temperature: f64,
     peripheral_overrides: Vec<String>,
     interactive: bool,
+    resume_from_turn_id: Option<String>,
 ) -> Result<String> {
     // ── Wire up agnostic subsystems ──────────────────────────────
     let base_observer = observability::create_observer(&config.observability);
@@ -1288,7 +1297,53 @@ pub async fn run(
 
     let mut final_output = String::new();
 
-    if let Some(msg) = message {
+    if let Some(turn_id) = resume_from_turn_id.as_deref() {
+        // ── Resume path: seed history from the latest snapshot for
+        // this turn and continue the loop. The system prompt is
+        // already in the snapshot; do not re-prepend it.
+        //
+        // For v1, resume is a one-shot continuation. `message` is
+        // accepted as an additional user turn appended after the
+        // snapshot's history when present (allows the user to nudge
+        // the resumed agent with new instructions). Interactive
+        // resume / new-message-with-resume in the REPL is deferred.
+        let snapshot =
+            crate::agent::checkpoint::load_resume_snapshot(&config, turn_id)?;
+        let resumed_iter = snapshot.iteration;
+        let mut history = snapshot.history;
+        if let Some(msg) = &message {
+            let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
+            history.push(ChatMessage::user(format!("[{now}] {msg}")));
+        }
+        eprintln!(
+            "▶ Resuming turn {turn_id} from iteration {resumed_iter} \
+             ({} messages in history)",
+            history.len()
+        );
+
+        let response = run_tool_call_loop(
+            provider.as_ref(),
+            &mut history,
+            &tools_registry,
+            observer.as_ref(),
+            provider_name,
+            model_name,
+            temperature,
+            false,
+            approval_manager.as_ref(),
+            channel_name,
+            &config.multimodal,
+            config.agent.max_tool_iterations,
+            None,
+            None,
+            None,
+            &[],
+        )
+        .await?;
+        final_output = response.clone();
+        println!("{response}");
+        observer.record_event(&ObserverEvent::TurnComplete);
+    } else if let Some(msg) = message {
         // Auto-save user message to memory (skip short/trivial messages)
         if config.memory.auto_save && msg.chars().count() >= AUTOSAVE_MIN_MESSAGE_CHARS {
             let user_key = autosave_memory_key("user_msg");

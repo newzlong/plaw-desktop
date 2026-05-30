@@ -11,27 +11,11 @@
 //! forensic-only consumer that pairs with PR #58 + PR #59. The resume
 //! entry point and Tauri / desktop UI bindings are follow-up PRs.
 
-use crate::agent::checkpoint::{FsCheckpointReader, Snapshot, TurnSummary};
+use crate::agent::checkpoint::{
+    resolve_checkpoint_root, FsCheckpointReader, Snapshot, TurnSummary,
+};
 use crate::config::Config;
 use anyhow::{bail, Context, Result};
-use std::path::PathBuf;
-
-/// Resolve the checkpoint root from config, matching the same logic
-/// used by `gateway/ws.rs` so the CLI sees the exact files the writer
-/// produced.
-fn resolve_checkpoint_root(config: &Config) -> PathBuf {
-    let raw = config.agent.checkpoint.dir.trim();
-    let configured = PathBuf::from(if raw.is_empty() {
-        "state/checkpoints"
-    } else {
-        raw
-    });
-    if configured.is_absolute() {
-        configured
-    } else {
-        config.workspace_dir.join(configured)
-    }
-}
 
 #[allow(dead_code)]
 #[allow(clippy::needless_pass_by_value)]
@@ -239,35 +223,9 @@ mod tests {
         cfg
     }
 
-    #[test]
-    fn resolve_checkpoint_root_uses_default_when_dir_blank() {
-        let tmp = TempDir::new().unwrap();
-        let mut cfg = config_for(tmp.path());
-        cfg.agent.checkpoint.dir = String::new();
-        let resolved = resolve_checkpoint_root(&cfg);
-        assert_eq!(resolved, tmp.path().join("state/checkpoints"));
-    }
-
-    #[test]
-    fn resolve_checkpoint_root_respects_configured_relative_dir() {
-        let tmp = TempDir::new().unwrap();
-        let mut cfg = config_for(tmp.path());
-        cfg.agent.checkpoint.dir = "alt/snapshots".to_string();
-        let resolved = resolve_checkpoint_root(&cfg);
-        assert_eq!(resolved, tmp.path().join("alt/snapshots"));
-    }
-
-    #[test]
-    fn resolve_checkpoint_root_passes_through_absolute_paths_unchanged() {
-        let tmp = TempDir::new().unwrap();
-        let mut cfg = config_for(tmp.path());
-        // Use a separate absolute path so we don't depend on the layout of `tmp`.
-        let absolute = TempDir::new().unwrap();
-        let abs_path = absolute.path().to_string_lossy().to_string();
-        cfg.agent.checkpoint.dir = abs_path.clone();
-        let resolved = resolve_checkpoint_root(&cfg);
-        assert_eq!(resolved, PathBuf::from(abs_path));
-    }
+    // Path-resolution tests live next to the helper in
+    // `agent::checkpoint::tests` after PR #61 moved `resolve_checkpoint_root`
+    // there (Rule of Three: three call sites = one shared helper).
 
     #[test]
     fn list_turns_handler_succeeds_on_missing_root() {

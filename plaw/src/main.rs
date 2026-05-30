@@ -231,6 +231,42 @@ Examples:
         memory_backend: Option<String>,
     },
 
+    /// Resume an agent turn from its latest on-disk checkpoint snapshot
+    #[command(long_about = "\
+Resume an agent turn from the latest snapshot persisted under
+`<workspace_dir>/<agent.checkpoint.dir>/<turn_id>/`. The snapshot's
+full conversation history is loaded; the agent loop continues from
+there. Optionally pass --message to nudge the resumed agent with new
+instructions.
+
+Requires `[agent.checkpoint] enabled = true` to have produced snapshots
+for the target turn. Run `plaw checkpoint list` to see available turns.
+
+Examples:
+  plaw resume 9f1c-abc...
+  plaw resume 9f1c-abc... -m \"Now summarize what you've done\"
+  plaw resume 9f1c-abc... -p anthropic --model claude-sonnet-4-6")]
+    Resume {
+        /// Turn id to resume from (directory name under the checkpoint root).
+        turn_id: String,
+
+        /// Optional additional user message appended after the resumed history.
+        #[arg(short, long)]
+        message: Option<String>,
+
+        /// Provider override (defaults to config default_provider).
+        #[arg(short, long)]
+        provider: Option<String>,
+
+        /// Model override (defaults to provider default).
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Temperature override.
+        #[arg(short, long, default_value = "0.7", value_parser = parse_temperature)]
+        temperature: f64,
+    },
+
     /// Start the gateway server (webhooks, websockets)
     #[command(long_about = "\
 Start the gateway server (webhooks, websockets).
@@ -893,10 +929,30 @@ async fn main() -> Result<()> {
                 temperature,
                 peripheral,
                 true,
+                None, // fresh agent invocation — no resume
             )
             .await
             .map(|_| ())
         }
+
+        Commands::Resume {
+            turn_id,
+            message,
+            provider,
+            model,
+            temperature,
+        } => agent::run(
+            config,
+            message,
+            provider,
+            model,
+            temperature,
+            vec![],
+            true,
+            Some(turn_id),
+        )
+        .await
+        .map(|_| ()),
 
         Commands::Gateway {
             port,

@@ -41,7 +41,50 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use crate::config::Config;
 use crate::providers::ChatMessage;
+
+/// Resolve the checkpoint root directory from a [`Config`]. Mirrors the
+/// path-resolution logic the gateway uses for writes so the reader sees
+/// exactly what the writer produced.
+///
+/// - Empty `agent.checkpoint.dir` → default `"state/checkpoints"`.
+/// - Relative `dir` → joined onto `workspace_dir`.
+/// - Absolute `dir` → used verbatim.
+///
+/// Factored out as the third-copy threshold per plaw/CLAUDE.md §3.3
+/// (Rule of Three): the writer side (gateway/ws.rs), the CLI side
+/// (checkpoint_cli.rs), and the resume side ([`load_resume_snapshot`])
+/// all need the same resolution.
+pub fn resolve_checkpoint_root(config: &Config) -> PathBuf {
+    let raw = config.agent.checkpoint.dir.trim();
+    let configured = PathBuf::from(if raw.is_empty() {
+        "state/checkpoints"
+    } else {
+        raw
+    });
+    if configured.is_absolute() {
+        configured
+    } else {
+        config.workspace_dir.join(configured)
+    }
+}
+
+/// Load the highest-iteration snapshot for `turn_id`, ready for use as
+/// the seed history of a resumed agent loop. Errors when the turn
+/// directory is missing or contains no snapshots — resume against an
+/// unknown turn id is a user mistake worth surfacing loudly.
+pub fn load_resume_snapshot(config: &Config, turn_id: &str) -> Result<Snapshot> {
+    let root = resolve_checkpoint_root(config);
+    let reader = FsCheckpointReader::new(&root);
+    reader.latest_for_turn(turn_id)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "no snapshots found for turn {turn_id} under {}. \
+             Run `plaw checkpoint list` to see available turns.",
+            root.display()
+        )
+    })
+}
 
 /// Schema version of the on-disk [`Snapshot`] format. Bumped only when an
 /// incompatible field change ships; the resume PR that lands later will
@@ -732,5 +775,80 @@ mod tests {
         assert_eq!(v["turn_id"], "abc");
         assert_eq!(v["snapshot_count"], 3);
         assert_eq!(v["latest_iteration"], 2);
+    }
+
+    // ── resolve_checkpoint_root + load_resume_snapshot tests ────────
+
+    fn config_for(workspace: &std::path::Path) -> Config {
+        let mut cfg = Config::default();
+        cfg.workspace_dir = workspace.to_path_buf();
+        cfg
+    }
+
+    #[test]
+    fn resolve_checkpoint_root_uses_default_when_dir_blank() {
+        let tmp = TempDir::new().unwrap();
+        let mut cfg = config_for(tmp.path());
+        cfg.agent.checkpoint.dir = String::new();
+        let resolved = resolve_checkpoint_root(&cfg);
+        assert_eq!(resolved, tmp.path().join("state/checkpoints"));
+    }
+
+    #[test]
+    fn resolve_checkpoint_root_respects_configured_relative_dir() {
+        let tmp = TempDir::new().unwrap();
+        let mut cfg = config_for(tmp.path());
+        cfg.agent.checkpoint.dir = "alt/snapshots".to_string();
+        let resolved = resolve_checkpoint_root(&cfg);
+        assert_eq!(resolved, tmp.path().join("alt/snapshots"));
+    }
+
+    #[test]
+    fn resolve_checkpoint_root_passes_through_absolute_paths_unchanged() {
+        let tmp = TempDir::new().unwrap();
+        let mut cfg = config_for(tmp.path());
+        // Use a separate TempDir to avoid layout assumptions on `tmp`.
+        let absolute = TempDir::new().unwrap();
+        let abs_str = absolute.path().to_string_lossy().to_string();
+        cfg.agent.checkpoint.dir = abs_str.clone();
+        let resolved = resolve_checkpoint_root(&cfg);
+        assert_eq!(resolved, PathBuf::from(abs_str));
+    }
+
+    #[test]
+    fn load_resume_snapshot_returns_latest_iteration_for_a_real_turn() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = config_for(tmp.path());
+        let writer = FsCheckpointWriter::new(resolve_checkpoint_root(&cfg));
+        writer
+            .put(&Snapshot::new("turn-r", 0, sample_history()))
+            .unwrap();
+        writer
+            .put(&Snapshot::new("turn-r", 2, sample_history()))
+            .unwrap();
+        writer
+            .put(&Snapshot::new("turn-r", 1, sample_history()))
+            .unwrap();
+
+        let snap = load_resume_snapshot(&cfg, "turn-r").unwrap();
+        assert_eq!(snap.iteration, 2, "should return the highest iteration");
+        assert_eq!(snap.turn_id, "turn-r");
+    }
+
+    #[test]
+    fn load_resume_snapshot_errors_when_turn_is_missing() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = config_for(tmp.path());
+        let result = load_resume_snapshot(&cfg, "ghost");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("no snapshots found for turn ghost"),
+            "error should name the turn id, got: {msg}"
+        );
+        assert!(
+            msg.contains("plaw checkpoint list"),
+            "error should hint at the discovery command, got: {msg}"
+        );
     }
 }
