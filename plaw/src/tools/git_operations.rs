@@ -1,4 +1,4 @@
-use super::traits::{Tool, ToolResult};
+use super::traits::{Tool, ToolResult, ToolResultValue, TypedToolResult};
 use crate::security::{AutonomyLevel, SecurityPolicy};
 use async_trait::async_trait;
 use serde_json::json;
@@ -566,6 +566,39 @@ impl Tool for GitOperationsTool {
             }),
         }
     }
+
+    async fn execute_typed(&self, args: serde_json::Value) -> anyhow::Result<TypedToolResult> {
+        // Capture the operation before `args` is consumed by `execute`.
+        let operation = args
+            .get("operation")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let result = self.execute(args).await?;
+
+        // For the JSON-shaped read operations the inner helper already
+        // serialized a `serde_json::Value` via `to_string_pretty`. Re-parse
+        // the canonical text form to surface a typed value for callers that
+        // want structured access. The free-text mutating ops (commit/add/
+        // checkout/stash) intentionally do not promote — their output is a
+        // human status line, not JSON.
+        //
+        // The round-trip is an MVP shortcut; a follow-up may thread the
+        // already-built `serde_json::Value` through the inner helpers and
+        // avoid the re-parse.
+        let value = operation
+            .as_deref()
+            .filter(|_| result.success)
+            .and_then(|op| match op {
+                "status" | "diff" | "log" | "branch" => {
+                    serde_json::from_str::<serde_json::Value>(&result.output)
+                        .ok()
+                        .map(|data| ToolResultValue::Json { data })
+                }
+                _ => None,
+            });
+
+        Ok(TypedToolResult { result, value })
+    }
 }
 
 #[cfg(test)]
@@ -811,5 +844,78 @@ mod tests {
         let truncated = GitOperationsTool::truncate_commit_message(&long);
 
         assert_eq!(truncated.chars().count(), 2000);
+    }
+
+    #[tokio::test]
+    async fn execute_typed_promotes_branch_listing_to_json_variant() {
+        let tmp = TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        let tool = test_tool(tmp.path());
+
+        let typed = tool
+            .execute_typed(json!({"operation": "branch"}))
+            .await
+            .unwrap();
+
+        assert!(
+            typed.result.success,
+            "branch listing should succeed in fresh repo"
+        );
+        let Some(ToolResultValue::Json { data }) = typed.value else {
+            panic!("expected Json variant, got {:?}", typed.value);
+        };
+        // Schema: { "current": "...", "branches": [...] }
+        assert!(data.get("branches").is_some(), "expected 'branches' field");
+        assert!(data.get("current").is_some(), "expected 'current' field");
+    }
+
+    #[tokio::test]
+    async fn execute_typed_skips_non_json_operations() {
+        let tmp = TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        // Allow write operations
+        let security = Arc::new(SecurityPolicy {
+            autonomy: AutonomyLevel::Full,
+            ..SecurityPolicy::default()
+        });
+        let tool = GitOperationsTool::new(security, tmp.path().to_path_buf());
+
+        // `add` returns free-text ("Staged: ..."); execute_typed must NOT
+        // attempt to promote it to a typed value.
+        let typed = tool
+            .execute_typed(json!({"operation": "add", "paths": "."}))
+            .await
+            .unwrap();
+
+        assert!(
+            typed.value.is_none(),
+            "free-text ops should not produce a typed value"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_typed_skips_failed_operations() {
+        let tmp = TempDir::new().unwrap();
+        // No git init — `status` will fail.
+        let tool = test_tool(tmp.path());
+
+        let typed = tool
+            .execute_typed(json!({"operation": "status"}))
+            .await
+            .unwrap();
+
+        assert!(!typed.result.success);
+        assert!(
+            typed.value.is_none(),
+            "failed ops must not produce a typed value"
+        );
     }
 }
