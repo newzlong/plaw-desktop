@@ -193,6 +193,7 @@ pub(super) struct ToolExecutionOutcome {
 
 pub(super) fn should_execute_tools_in_parallel(
     tool_calls: &[ParsedToolCall],
+    tools_registry: &[Box<dyn Tool>],
     approval: Option<&ApprovalManager>,
 ) -> bool {
     if tool_calls.len() <= 1 {
@@ -208,7 +209,27 @@ pub(super) fn should_execute_tools_in_parallel(
         }
     }
 
-    true
+    // Parallel-safety gate: only run in parallel if EVERY tool declares
+    // `SideEffectClass::ReadOnly`. Anything that mutates local FS/process,
+    // talks to a remote endpoint, spawns sub-agents, or hasn't declared
+    // (`Unknown`) is treated as potentially racy with concurrent calls and
+    // forced sequential — e.g. two `shell` calls touching the same path
+    // would otherwise interleave non-deterministically, even when the user
+    // has waived approval. Tool authors opt into parallelism by overriding
+    // `Tool::side_effects()` to `ReadOnly` (see `tools/traits.rs`).
+    //
+    // Unknown tool name (not in the live registry) is treated conservatively
+    // as non-ReadOnly — the dispatcher will reject it shortly anyway, but
+    // we shouldn't widen the parallel window based on a name we can't
+    // verify.
+    use crate::tools::traits::SideEffectClass;
+    tool_calls.iter().all(|call| {
+        tools_registry
+            .iter()
+            .find(|t| t.name() == call.name)
+            .map(|t| t.side_effects() == SideEffectClass::ReadOnly)
+            .unwrap_or(false)
+    })
 }
 
 pub(super) async fn execute_tools_parallel(

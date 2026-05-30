@@ -537,7 +537,8 @@ pub(crate) async fn run_tool_call_loop(
         let mut individual_results: Vec<(Option<String>, String)> = Vec::new();
         let mut ordered_results: Vec<Option<(String, Option<String>, ToolExecutionOutcome)>> =
             (0..tool_calls.len()).map(|_| None).collect();
-        let allow_parallel_execution = should_execute_tools_in_parallel(&tool_calls, approval);
+        let allow_parallel_execution =
+            should_execute_tools_in_parallel(&tool_calls, tools_registry, approval);
         let mut executable_indices: Vec<usize> = Vec::new();
         let mut executable_calls: Vec<ParsedToolCall> = Vec::new();
 
@@ -2140,6 +2141,45 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
+    /// Test-only mock whose only purpose is to declare a chosen
+    /// `SideEffectClass` for the parallel-gate tests below. Execute is
+    /// unreachable — the gate inspects metadata, not behavior.
+    struct SideEffectMockTool {
+        name: String,
+        side_effects: crate::tools::traits::SideEffectClass,
+    }
+
+    impl SideEffectMockTool {
+        fn new(name: &str, side_effects: crate::tools::traits::SideEffectClass) -> Self {
+            Self {
+                name: name.to_string(),
+                side_effects,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Tool for SideEffectMockTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn description(&self) -> &str {
+            "side-effect-only test mock"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+        ) -> anyhow::Result<crate::tools::ToolResult> {
+            unreachable!("side-effect mock is only inspected, never executed")
+        }
+        fn side_effects(&self) -> crate::tools::traits::SideEffectClass {
+            self.side_effects
+        }
+    }
+
     #[test]
     fn should_execute_tools_in_parallel_returns_false_for_single_call() {
         let calls = vec![ParsedToolCall {
@@ -2148,7 +2188,7 @@ mod tests {
             tool_call_id: None,
         }];
 
-        assert!(!should_execute_tools_in_parallel(&calls, None));
+        assert!(!should_execute_tools_in_parallel(&calls, &[], None));
     }
 
     #[test]
@@ -2170,12 +2210,61 @@ mod tests {
 
         assert!(!should_execute_tools_in_parallel(
             &calls,
+            &[],
             Some(&approval_mgr)
         ));
     }
 
     #[test]
-    fn should_execute_tools_in_parallel_returns_true_when_cli_has_no_interactive_approvals() {
+    fn should_execute_tools_in_parallel_returns_true_for_all_readonly_tools_with_approvals_waived() {
+        // Two ReadOnly tools (e.g. file_read + glob_search) + every approval
+        // waived via the "*" wildcard => the parallel gate opens.
+        let calls = vec![
+            ParsedToolCall {
+                name: "file_read".to_string(),
+                arguments: serde_json::json!({"path": "a.txt"}),
+                tool_call_id: None,
+            },
+            ParsedToolCall {
+                name: "glob_search".to_string(),
+                arguments: serde_json::json!({"pattern": "*.rs"}),
+                tool_call_id: None,
+            },
+        ];
+        let registry: Vec<Box<dyn Tool>> = vec![
+            Box::new(SideEffectMockTool::new(
+                "file_read",
+                crate::tools::traits::SideEffectClass::ReadOnly,
+            )),
+            Box::new(SideEffectMockTool::new(
+                "glob_search",
+                crate::tools::traits::SideEffectClass::ReadOnly,
+            )),
+        ];
+        // Stage 6 collapse: "no interactive approvals" is opt-in via the
+        // "*" wildcard in auto_approve, not via the tier.
+        let approval_cfg = crate::config::AutonomyConfig {
+            level: crate::security::AutonomyLevel::Full,
+            auto_approve: vec!["*".into()],
+            always_ask: vec![],
+            ..crate::config::AutonomyConfig::default()
+        };
+        let approval_mgr = ApprovalManager::from_config(&approval_cfg);
+
+        assert!(should_execute_tools_in_parallel(
+            &calls,
+            &registry,
+            Some(&approval_mgr)
+        ));
+    }
+
+    #[test]
+    fn should_execute_tools_in_parallel_returns_false_when_any_tool_is_not_readonly() {
+        // Even with every approval waived, mixing a mutating tool
+        // (shell = LocalExecute) into a parallel batch must force sequential
+        // — otherwise two `shell` calls touching the same path would
+        // interleave non-deterministically. The same applies to
+        // LocalWrite / NetworkWrite / Spawn / Unknown.
         let calls = vec![
             ParsedToolCall {
                 name: "shell".to_string(),
@@ -2188,9 +2277,16 @@ mod tests {
                 tool_call_id: None,
             },
         ];
-        // Stage 6 collapse: "no interactive approvals" is no longer expressed
-        // by `level = Full` (the tier is not consulted by needs_approval).
-        // The user opts out by adding the "*" wildcard to auto_approve.
+        let registry: Vec<Box<dyn Tool>> = vec![
+            Box::new(SideEffectMockTool::new(
+                "shell",
+                crate::tools::traits::SideEffectClass::LocalExecute,
+            )),
+            Box::new(SideEffectMockTool::new(
+                "http_request",
+                crate::tools::traits::SideEffectClass::NetworkWrite,
+            )),
+        ];
         let approval_cfg = crate::config::AutonomyConfig {
             level: crate::security::AutonomyLevel::Full,
             auto_approve: vec!["*".into()],
@@ -2199,8 +2295,43 @@ mod tests {
         };
         let approval_mgr = ApprovalManager::from_config(&approval_cfg);
 
-        assert!(should_execute_tools_in_parallel(
+        assert!(!should_execute_tools_in_parallel(
             &calls,
+            &registry,
+            Some(&approval_mgr)
+        ));
+    }
+
+    #[test]
+    fn should_execute_tools_in_parallel_returns_false_for_unknown_tool_name() {
+        // Unknown tool name => conservatively non-ReadOnly => sequential.
+        // The dispatcher will reject the unknown name shortly afterwards,
+        // but the gate must not optimistically widen the parallel window.
+        let calls = vec![
+            ParsedToolCall {
+                name: "file_read".to_string(),
+                arguments: serde_json::json!({"path": "a.txt"}),
+                tool_call_id: None,
+            },
+            ParsedToolCall {
+                name: "made_up_tool".to_string(),
+                arguments: serde_json::json!({}),
+                tool_call_id: None,
+            },
+        ];
+        let registry: Vec<Box<dyn Tool>> = vec![Box::new(SideEffectMockTool::new(
+            "file_read",
+            crate::tools::traits::SideEffectClass::ReadOnly,
+        ))];
+        let approval_cfg = crate::config::AutonomyConfig {
+            auto_approve: vec!["*".into()],
+            ..crate::config::AutonomyConfig::default()
+        };
+        let approval_mgr = ApprovalManager::from_config(&approval_cfg);
+
+        assert!(!should_execute_tools_in_parallel(
+            &calls,
+            &registry,
             Some(&approval_mgr)
         ));
     }
