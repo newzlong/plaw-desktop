@@ -255,6 +255,13 @@ pub struct Config {
     #[serde(default)]
     pub pipelines: HashMap<String, PipelineConfig>,
 
+    /// Model Context Protocol (MCP) client configuration. When enabled,
+    /// plaw spawns the configured MCP servers at startup and exposes
+    /// them via a single `mcp_call` proxy tool to the agent loop. See
+    /// [`crate::tools::mcp`] for the on-the-wire protocol details.
+    #[serde(default)]
+    pub mcp: McpConfig,
+
     /// Delegate coordination runtime configuration (`[coordination]`).
     #[serde(default)]
     pub coordination: CoordinationConfig,
@@ -431,6 +438,88 @@ pub enum PipelineErrorPolicy {
     /// `output_key` but the pipeline continues. Useful for
     /// best-effort gather-and-synthesize workflows.
     Continue,
+}
+
+// ── MCP ──────────────────────────────────────────────────────────
+
+/// Model Context Protocol (MCP) client configuration (`[mcp]` section).
+///
+/// MCP is an open standard published by Anthropic that lets external
+/// processes expose tools to LLM applications via JSON-RPC over stdio
+/// (or HTTP/SSE — plaw Phase 0 only implements stdio). Each configured
+/// server is spawned as a subprocess at agent startup; its advertised
+/// tools become callable from the LLM via a single proxy tool
+/// `mcp_call(server, tool, arguments)`.
+///
+/// Phase 0 scope: stdio transport only, `tools/list` + `tools/call`,
+/// no `resources` / `prompts` / `sampling`. See spec at
+/// <https://modelcontextprotocol.io/specification/2025-06-18>.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct McpConfig {
+    /// Global enable flag. When `false`, no MCP servers are spawned
+    /// and the `mcp_call` proxy tool is not registered (zero overhead).
+    #[serde(default)]
+    pub enabled: bool,
+    /// List of MCP servers to spawn. Order is not significant; servers
+    /// are addressed by `name` in tool calls.
+    #[serde(default)]
+    pub servers: Vec<McpServerConfig>,
+}
+
+/// One MCP server entry (`[[mcp.servers]]` array element).
+///
+/// Defines the subprocess to spawn and the policy applied to its
+/// advertised tools. Each server must have a unique `name`; the name
+/// becomes the `server` argument of the proxy tool's `mcp_call`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct McpServerConfig {
+    /// Stable identifier used to address this server in `mcp_call`.
+    /// Conventional shape: lowercase alphanumeric + hyphen, e.g.
+    /// `"github"`, `"filesystem"`, `"sqlite-local"`.
+    pub name: String,
+    /// Command to execute. Same semantics as `tokio::process::Command::new`.
+    /// Typical: `"npx"` for npm-published servers, `"uvx"` for Python.
+    pub command: String,
+    /// Arguments passed to `command`. Often holds the server's
+    /// package id, e.g. `["-y", "@modelcontextprotocol/server-github"]`.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Environment variables visible to the spawned subprocess.
+    /// Inherits plaw's environment by default; entries here override
+    /// or add to it. Use for tokens / API keys / paths the MCP server
+    /// reads at startup (e.g. `GITHUB_TOKEN`, `OPENAI_API_KEY`).
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    /// Whitelist of tool names this server is allowed to expose. The
+    /// special value `"*"` admits every tool the server advertises.
+    /// Tools advertised by the server but not in this list are dropped
+    /// from `tools/list` and reject `tools/call` with a clear error.
+    /// Default: `["*"]` (trust the server).
+    #[serde(default = "default_mcp_allowed_tools")]
+    pub allowed_tools: Vec<String>,
+    /// Maximum time the initial `initialize` handshake may take before
+    /// the server is marked as failed and excluded from the registry.
+    /// Default: 10 seconds.
+    #[serde(default = "default_mcp_startup_timeout_ms")]
+    pub startup_timeout_ms: u64,
+    /// Maximum time for a single `tools/call` request before plaw
+    /// sends `notifications/cancelled` and surfaces a timeout error.
+    /// Default: 60 seconds (MCP servers vary widely; some shell out
+    /// to slow external APIs).
+    #[serde(default = "default_mcp_request_timeout_ms")]
+    pub request_timeout_ms: u64,
+}
+
+fn default_mcp_allowed_tools() -> Vec<String> {
+    vec!["*".into()]
+}
+
+fn default_mcp_startup_timeout_ms() -> u64 {
+    10_000
+}
+
+fn default_mcp_request_timeout_ms() -> u64 {
+    60_000
 }
 
 impl std::fmt::Debug for Config {
@@ -4073,6 +4162,7 @@ impl Default for Config {
             peripherals: PeripheralsConfig::default(),
             agents: HashMap::new(),
             pipelines: HashMap::new(),
+            mcp: McpConfig::default(),
             coordination: CoordinationConfig::default(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
@@ -6143,6 +6233,7 @@ default_temperature = 0.7
             peripherals: PeripheralsConfig::default(),
             agents: HashMap::new(),
             pipelines: HashMap::new(),
+            mcp: McpConfig::default(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             transcription: TranscriptionConfig::default(),
@@ -6516,6 +6607,7 @@ tool_dispatcher = "xml"
             peripherals: PeripheralsConfig::default(),
             agents: HashMap::new(),
             pipelines: HashMap::new(),
+            mcp: McpConfig::default(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             transcription: TranscriptionConfig::default(),
