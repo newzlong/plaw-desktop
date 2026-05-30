@@ -505,10 +505,12 @@ impl Agent {
                 println!("[Research] Gathering information...");
             }
 
+            let tool_refs: Vec<&dyn crate::tools::Tool> =
+                self.tools.iter().map(|t| t.as_ref()).collect();
             match research::run_research_phase(
                 &self.research_config,
                 self.provider.as_ref(),
-                &self.tools,
+                &tool_refs,
                 user_message,
                 &self.model_name,
                 self.temperature,
