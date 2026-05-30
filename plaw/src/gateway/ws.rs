@@ -606,6 +606,48 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             }
         }
 
+        // Intent routing (gated on `agent.intent_routing_enabled`, default
+        // false → off, byte-for-byte parity with the pre-intent path). When
+        // enabled, classify each user message into one of seven intents
+        // (WrongPremise / Ambiguous / ConflictingConstraints /
+        // BorderlineSafety / AdversarialInjection / FactualLookup /
+        // TaskRequest) and inject the matching prompt scaffold as a system
+        // message right before the user message. FactualLookup +
+        // TaskRequest deliberately yield empty scaffolds — most messages
+        // see no scaffold injection, only the edge cases that benefit from
+        // an explicit nudge.
+        //
+        // Same dormant-subsystem wiring pattern as the research-phase block
+        // above: the engine code already exists (`agent/intent.rs`,
+        // `HybridRouter`, `scaffold_for`), only the gateway entry point
+        // was missing.
+        let intent_routing_enabled = state.config.lock().agent.intent_routing_enabled;
+        if intent_routing_enabled {
+            let router = crate::agent::intent::HybridRouter::with_llm_fallback(
+                state.provider.clone(),
+                state.model.clone(),
+            );
+            let intent = {
+                use crate::agent::intent::IntentRouter;
+                router.classify(&content).await
+            };
+            let scaffold = crate::agent::intent::scaffold_for(intent);
+            if !scaffold.is_empty() {
+                let user_msg_idx = history.len().saturating_sub(1);
+                history.insert(
+                    user_msg_idx,
+                    ChatMessage::system(scaffold.text.to_string()),
+                );
+                tracing::info!(
+                    ?intent,
+                    scaffold_chars = scaffold.text.len(),
+                    "intent scaffold injected"
+                );
+            } else {
+                tracing::debug!(?intent, "intent classified; no scaffold needed");
+            }
+        }
+
         // Broadcast agent_start event
         let _ = state.event_tx.send(serde_json::json!({
             "type": "agent_start",
