@@ -1079,9 +1079,19 @@ function sendApproval(step, decision, prefix) {
       return
     }
   }
-  // Mark resolved so the buttons disable / collapse to a status line.
+  // Mark resolved on BOTH the displayed copy (instant visual feedback) AND the
+  // source step in currentAssistant.value.steps — otherwise the next
+  // updateLastAssistant() snapshot overwrites msg.steps with a fresh copy
+  // where status is still 'pending', and the buttons reappear.
   step.status = 'resolved'
   step.decision = decision
+  const live = currentAssistant.value.steps.find(
+    s => s.type === 'approval' && s.request_id === step.request_id,
+  )
+  if (live) {
+    live.status = 'resolved'
+    live.decision = decision
+  }
   updateLastAssistant()
 }
 
