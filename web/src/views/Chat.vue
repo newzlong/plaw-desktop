@@ -840,10 +840,35 @@ function handleWsMessage(data) {
 
 function updateLastAssistant() {
   const last = messages.value[messages.value.length - 1]
-  if (last && last.role === 'assistant') {
-    last.content = currentAssistant.value.content
-    last.steps = currentAssistant.value.steps.map(s => ({ ...s }))
+  if (!last || last.role !== 'assistant') return
+  last.content = currentAssistant.value.content
+  // Snapshot any approval steps the user has already resolved in the
+  // currently-displayed last.steps. Without this, sendApproval's status
+  // mutation on the displayed copy gets overwritten on the next stream
+  // frame because we replace last.steps wholesale from currentAssistant —
+  // where the source step might still be 'pending' (e.g. if our find-by-id
+  // sync to the live step lost the race against a click). Belt-and-suspenders
+  // alongside that sync.
+  const resolvedByReqId = new Map()
+  for (const s of last.steps || []) {
+    if (s.type === 'approval' && s.status === 'resolved' && s.request_id) {
+      resolvedByReqId.set(s.request_id, {
+        status: s.status,
+        decision: s.decision,
+        rememberedPrefix: s.rememberedPrefix,
+      })
+    }
   }
+  last.steps = currentAssistant.value.steps.map(s => {
+    const copy = { ...s }
+    if (s.type === 'approval' && s.request_id && resolvedByReqId.has(s.request_id)) {
+      const prev = resolvedByReqId.get(s.request_id)
+      copy.status = prev.status
+      copy.decision = prev.decision
+      if (prev.rememberedPrefix !== undefined) copy.rememberedPrefix = prev.rememberedPrefix
+    }
+    return copy
+  })
 }
 
 function rollbackTo(index) {
@@ -1085,12 +1110,18 @@ function sendApproval(step, decision, prefix) {
   // where status is still 'pending', and the buttons reappear.
   step.status = 'resolved'
   step.decision = decision
+  if (decision === 'allow_and_remember') {
+    step.rememberedPrefix = typeof prefix === 'string' ? prefix.trim() : ''
+  }
   const live = currentAssistant.value.steps.find(
     s => s.type === 'approval' && s.request_id === step.request_id,
   )
   if (live) {
     live.status = 'resolved'
     live.decision = decision
+    if (decision === 'allow_and_remember') {
+      live.rememberedPrefix = typeof prefix === 'string' ? prefix.trim() : ''
+    }
   }
   updateLastAssistant()
 }

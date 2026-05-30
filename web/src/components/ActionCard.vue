@@ -17,8 +17,18 @@
       <GlassButton size="sm" @click="emit('decision', 'allow_and_remember', step.prefixInput)">{{ isZh ? '允许并记住' : 'Allow & remember' }}</GlassButton>
       <GlassButton size="sm" variant="danger" @click="emit('decision', 'deny')">{{ isZh ? '拒绝' : 'Deny' }}</GlassButton>
     </div>
-    <div v-else class="step-approval__resolved">
-      {{ step.decision === 'deny' ? (isZh ? '已拒绝' : 'Denied') : (isZh ? '已允许' : 'Allowed') }}
+    <div v-else class="step-approval__resolved" :class="resolvedClass">
+      <template v-if="step.decision === 'deny'">
+        <span>{{ isZh ? '已拒绝' : 'Denied' }}</span>
+      </template>
+      <template v-else-if="step.decision === 'allow_once'">
+        <span>{{ isZh ? '已允许一次' : 'Allowed once' }}</span>
+      </template>
+      <template v-else>
+        <span>{{ isZh ? '已允许并记住' : 'Allowed and remembered' }}</span>
+        <code v-if="step.rememberedPrefix" class="step-approval__remembered">{{ step.rememberedPrefix }}</code>
+        <span v-else class="step-approval__remembered-note">{{ isZh ? '（整个工具）' : '(whole tool)' }}</span>
+      </template>
     </div>
   </div>
 </template>
@@ -44,6 +54,14 @@ const formattedArgs = computed(() => {
   return Object.entries(args)
     .map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`)
     .join('\n')
+})
+
+// Distinct visual treatment per decision so allow-once vs remembered vs denied
+// are immediately distinguishable at a glance.
+const resolvedClass = computed(() => {
+  if (props.step?.decision === 'deny') return 'step-approval__resolved--deny'
+  if (props.step?.decision === 'allow_and_remember') return 'step-approval__resolved--remember'
+  return 'step-approval__resolved--once'
 })
 </script>
 
@@ -124,8 +142,40 @@ const formattedArgs = computed(() => {
   flex-wrap: wrap;
 }
 .step-approval__resolved {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
   font-size: 0.76rem;
   color: var(--text-muted);
   font-style: italic;
+}
+.step-approval__resolved--once {
+  color: var(--status-ok, var(--text-secondary));
+}
+.step-approval__resolved--remember {
+  color: var(--status-ok, var(--text-secondary));
+  font-weight: 600;
+  font-style: normal;
+}
+.step-approval__resolved--deny {
+  color: var(--status-err, var(--text-muted));
+  font-weight: 600;
+}
+.step-approval__remembered {
+  padding: 1px 6px;
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 0.72rem;
+  font-weight: normal;
+  font-style: normal;
+  color: var(--text-secondary);
+}
+.step-approval__remembered-note {
+  font-size: 0.72rem;
+  font-weight: normal;
+  color: var(--text-muted);
 }
 </style>
