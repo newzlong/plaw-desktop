@@ -2973,6 +2973,10 @@ async fn process_channel_message(
                 delta_tx,
                 ctx.hooks.as_deref(),
                 &excluded_tools_snapshot,
+                // Channels do not yet wire a checkpoint writer; webchat
+                // (gateway/ws.rs) does. Follow-up PR adds the same
+                // `agent.checkpoint.enabled` plumbing here.
+                None,
             ),
         ) => LlmExecutionResult::Completed(result),
     };

@@ -33,11 +33,13 @@
 //! `current_*` getters consumed by the loop body. Lateral access
 //! from other parts of the crate is impossible.
 
+use crate::agent::checkpoint::CheckpointWriter;
 use crate::approval::ApprovalManager;
 use crate::observability::Observer;
 use crate::providers::{ChatMessage, Provider};
 use crate::tools::Tool;
 use anyhow::Result;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use super::non_cli_approval::NonCliApprovalContext;
@@ -59,6 +61,15 @@ tokio::task_local! {
     static TOOL_LOOP_NON_CLI_APPROVAL_CONTEXT: Option<NonCliApprovalContext>;
 }
 
+tokio::task_local! {
+    /// Optional checkpoint writer for per-iteration agent loop snapshots.
+    /// Set by the gateway / channel runtime when `agent.checkpoint.enabled`
+    /// is true; read by the loop body at iteration-boundary save points.
+    /// `Arc<dyn CheckpointWriter>` so the same writer can be shared across
+    /// concurrent turns (the writer implementations are `Send + Sync`).
+    static TOOL_LOOP_CHECKPOINT_WRITER: Option<Arc<dyn CheckpointWriter>>;
+}
+
 /// Read the current task's reply-target if a scope has been set.
 /// Returns `None` outside any scope (e.g. CLI / direct invocations).
 pub(super) fn current_reply_target() -> Option<String> {
@@ -78,10 +89,21 @@ pub(super) fn current_non_cli_approval_context() -> Option<NonCliApprovalContext
         .flatten()
 }
 
-/// Run the tool loop with optional non-CLI approval context scoped
-/// to this task. The reply_target scope is automatically derived
-/// from the approval context's `reply_target` field so chat-channel
-/// auto-routing keeps working without the caller having to set both.
+/// Read the current task's checkpoint writer if one has been pushed into
+/// scope. Returns `None` outside any scope (CLI / direct invocations /
+/// tests) — callers in the loop body treat `None` as a no-op.
+pub(crate) fn current_checkpoint_writer() -> Option<Arc<dyn CheckpointWriter>> {
+    TOOL_LOOP_CHECKPOINT_WRITER
+        .try_with(Clone::clone)
+        .ok()
+        .flatten()
+}
+
+/// Run the tool loop with optional non-CLI approval context and
+/// per-iteration checkpoint writer scoped to this task. The
+/// reply_target scope is automatically derived from the approval
+/// context's `reply_target` field so chat-channel auto-routing keeps
+/// working without the caller having to set both.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_tool_call_loop_with_non_cli_approval_context(
     provider: &dyn Provider,
@@ -101,33 +123,37 @@ pub(crate) async fn run_tool_call_loop_with_non_cli_approval_context(
     on_delta: Option<tokio::sync::mpsc::Sender<String>>,
     hooks: Option<&crate::hooks::HookRunner>,
     excluded_tools: &[String],
+    checkpoint_writer: Option<Arc<dyn CheckpointWriter>>,
 ) -> Result<String> {
     let reply_target = non_cli_approval_context
         .as_ref()
         .map(|ctx| ctx.reply_target.clone());
 
-    TOOL_LOOP_NON_CLI_APPROVAL_CONTEXT
+    TOOL_LOOP_CHECKPOINT_WRITER
         .scope(
-            non_cli_approval_context,
-            TOOL_LOOP_REPLY_TARGET.scope(
-                reply_target,
-                run_tool_call_loop(
-                    provider,
-                    history,
-                    tools_registry,
-                    observer,
-                    provider_name,
-                    model,
-                    temperature,
-                    silent,
-                    approval,
-                    channel_name,
-                    multimodal_config,
-                    max_tool_iterations,
-                    cancellation_token,
-                    on_delta,
-                    hooks,
-                    excluded_tools,
+            checkpoint_writer,
+            TOOL_LOOP_NON_CLI_APPROVAL_CONTEXT.scope(
+                non_cli_approval_context,
+                TOOL_LOOP_REPLY_TARGET.scope(
+                    reply_target,
+                    run_tool_call_loop(
+                        provider,
+                        history,
+                        tools_registry,
+                        observer,
+                        provider_name,
+                        model,
+                        temperature,
+                        silent,
+                        approval,
+                        channel_name,
+                        multimodal_config,
+                        max_tool_iterations,
+                        cancellation_token,
+                        on_delta,
+                        hooks,
+                        excluded_tools,
+                    ),
                 ),
             ),
         )
@@ -182,6 +208,25 @@ mod tests {
             None,
             "scope must not leak after the inner future completes"
         );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_writer_returns_none_outside_scope() {
+        // The agent loop's snapshot site MUST tolerate the absence of a
+        // checkpoint writer — CLI invocations and unit tests never set one.
+        assert!(current_checkpoint_writer().is_none());
+    }
+
+    #[tokio::test]
+    async fn checkpoint_writer_visible_inside_scope() {
+        use crate::agent::checkpoint::NullCheckpointWriter;
+        let writer: Arc<dyn CheckpointWriter> = Arc::new(NullCheckpointWriter);
+        let result = TOOL_LOOP_CHECKPOINT_WRITER
+            .scope(Some(writer.clone()), async {
+                current_checkpoint_writer().is_some()
+            })
+            .await;
+        assert!(result, "scoped writer should be visible inside the future");
     }
 
     #[tokio::test]
