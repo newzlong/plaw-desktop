@@ -50,6 +50,7 @@ pub mod memory_store;
 pub mod model_routing_config;
 pub mod parallel_delegate;
 pub mod pdf_read;
+pub mod pipeline;
 pub mod process;
 pub mod proxy_config;
 pub mod pushover;
@@ -577,14 +578,28 @@ fn all_tools_impl(
 
             delegate_tool = delegate_tool
                 .with_coordination_bus(coordination_bus.clone(), coordination_lead_agent);
-            tool_arcs.push(Arc::new(delegate_tool));
+            let delegate_arc: Arc<dyn Tool> = Arc::new(delegate_tool);
+            tool_arcs.push(delegate_arc.clone());
             tool_arcs.push(Arc::new(DelegateCoordinationStatusTool::new(
                 coordination_bus,
                 security.clone(),
             )));
+            if !root_config.pipelines.is_empty() {
+                tool_arcs.push(Arc::new(crate::tools::pipeline::PipelineTool::new(
+                    Arc::new(root_config.pipelines.clone()),
+                    delegate_arc,
+                )));
+            }
         } else {
             delegate_tool = delegate_tool.with_coordination_disabled();
-            tool_arcs.push(Arc::new(delegate_tool));
+            let delegate_arc: Arc<dyn Tool> = Arc::new(delegate_tool);
+            tool_arcs.push(delegate_arc.clone());
+            if !root_config.pipelines.is_empty() {
+                tool_arcs.push(Arc::new(crate::tools::pipeline::PipelineTool::new(
+                    Arc::new(root_config.pipelines.clone()),
+                    delegate_arc,
+                )));
+            }
         }
 
         let subagent_registry = Arc::new(SubAgentRegistry::new());

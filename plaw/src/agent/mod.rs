@@ -6,6 +6,7 @@ pub mod dispatcher;
 pub mod intent;
 pub mod loop_;
 pub mod memory_loader;
+pub mod pipeline;
 pub mod prompt;
 pub mod prompt_dag;
 pub mod research;
