@@ -13,6 +13,48 @@ pub struct ToolResult {
     pub error: Option<String>,
 }
 
+/// Optional structured representation of a tool's output, carried alongside the
+/// canonical [`ToolResult`] text form. Tools that produce well-typed payloads
+/// (JSON, base64-encoded binary, etc.) can override [`Tool::execute_typed`] to
+/// expose this variant; consumers that want typed access call `execute_typed`
+/// instead of `execute`.
+///
+/// Variants intentionally cover only the payload kinds in use today.
+/// Streaming is *not* a variant: real-time progress is delivered via
+/// [`ProgressTx`] in [`Tool::execute_with_progress`]; the final value still
+/// fits one of these shapes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ToolResultValue {
+    /// Free-text or markdown payload — the default human-readable form.
+    Text { content: String },
+    /// Structured JSON payload — for tools like `git_operations`, `http_request`,
+    /// and `cron_list` that already construct typed data internally.
+    Json { data: serde_json::Value },
+    /// Binary payload, base64-encoded with a MIME type — for tools like
+    /// `screenshot` and `image_info` that return image bytes.
+    Bytes { mime: String, base64: String },
+}
+
+/// [`ToolResult`] paired with an optional [`ToolResultValue`]. Returned from
+/// [`Tool::execute_typed`]. The default implementation of `execute_typed`
+/// returns `value: None`; tools that want to expose a typed value override.
+#[derive(Debug, Clone)]
+pub struct TypedToolResult {
+    pub result: ToolResult,
+    pub value: Option<ToolResultValue>,
+}
+
+impl TypedToolResult {
+    /// Construct a typed result from a plain [`ToolResult`] with no structured value.
+    pub fn untyped(result: ToolResult) -> Self {
+        Self {
+            result,
+            value: None,
+        }
+    }
+}
+
 /// Description of a tool for the LLM
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolSpec {
@@ -97,6 +139,23 @@ pub trait Tool: Send + Sync {
         self.execute(args).await
     }
 
+    /// Execute and return the result paired with an optional structured value.
+    ///
+    /// Default delegates to [`Self::execute`] and returns `value: None` —
+    /// callers should treat [`ToolResult::output`] as text.
+    ///
+    /// Tools whose outputs are already typed (JSON via `serde_json::Value`,
+    /// base64-encoded binary, etc.) should override this so consumers can
+    /// route on the payload kind without re-parsing the `output` string.
+    ///
+    /// The canonical text form in `result.output` must remain populated even
+    /// when `value` is `Some(...)`; the LLM-facing path and existing log /
+    /// scrub / inject scanning pipelines all read `output`.
+    async fn execute_typed(&self, args: serde_json::Value) -> anyhow::Result<TypedToolResult> {
+        let result = self.execute(args).await?;
+        Ok(TypedToolResult::untyped(result))
+    }
+
     /// Validate `args` against `parameters_schema()` and short-circuit with a
     /// structured `ToolResult` error before [`Self::execute`] runs if they
     /// don't conform. On validation success, delegates to [`Self::execute`].
@@ -105,10 +164,7 @@ pub trait Tool: Send + Sync {
     /// machine-readable error so it can retry with corrected args instead of
     /// guessing what `"Missing 'command' parameter"` meant. Tool authors do
     /// not implement this; the default body covers all cases.
-    async fn execute_validated(
-        &self,
-        args: serde_json::Value,
-    ) -> anyhow::Result<ToolResult> {
+    async fn execute_validated(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         if let Err(failures) =
             crate::tools::validation::validate_against_schema(&args, &self.parameters_schema())
         {
@@ -245,9 +301,7 @@ mod tests {
 
     #[test]
     fn idempotency_serializes_with_tag() {
-        let by_key = Idempotency::IdempotentByKey {
-            key: "path".into(),
-        };
+        let by_key = Idempotency::IdempotentByKey { key: "path".into() };
         let json = serde_json::to_value(&by_key).unwrap();
         assert_eq!(json["kind"], "idempotent_by_key");
         assert_eq!(json["key"], "path");
@@ -286,5 +340,71 @@ mod tests {
 
         assert!(!parsed.success);
         assert_eq!(parsed.error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn tool_result_value_text_roundtrip() {
+        let v = ToolResultValue::Text {
+            content: "hello".into(),
+        };
+        let json = serde_json::to_value(&v).unwrap();
+        assert_eq!(json["kind"], "text");
+        assert_eq!(json["content"], "hello");
+
+        let parsed: ToolResultValue = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, v);
+    }
+
+    #[test]
+    fn tool_result_value_json_roundtrip() {
+        let v = ToolResultValue::Json {
+            data: serde_json::json!({"branch": "main", "clean": true}),
+        };
+        let json = serde_json::to_value(&v).unwrap();
+        assert_eq!(json["kind"], "json");
+        assert_eq!(json["data"]["branch"], "main");
+        assert_eq!(json["data"]["clean"], true);
+
+        let parsed: ToolResultValue = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, v);
+    }
+
+    #[test]
+    fn tool_result_value_bytes_roundtrip() {
+        let v = ToolResultValue::Bytes {
+            mime: "image/png".into(),
+            base64: "iVBORw0KGgo".into(),
+        };
+        let json = serde_json::to_value(&v).unwrap();
+        assert_eq!(json["kind"], "bytes");
+        assert_eq!(json["mime"], "image/png");
+        assert_eq!(json["base64"], "iVBORw0KGgo");
+
+        let parsed: ToolResultValue = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, v);
+    }
+
+    #[tokio::test]
+    async fn default_execute_typed_returns_no_value() {
+        let tool = DummyTool;
+        let typed = tool
+            .execute_typed(serde_json::json!({ "value": "x" }))
+            .await
+            .unwrap();
+        assert!(typed.result.success);
+        assert_eq!(typed.result.output, "x");
+        assert!(typed.value.is_none());
+    }
+
+    #[test]
+    fn typed_tool_result_untyped_constructor() {
+        let r = ToolResult {
+            success: true,
+            output: "ok".into(),
+            error: None,
+        };
+        let typed = TypedToolResult::untyped(r);
+        assert!(typed.value.is_none());
+        assert_eq!(typed.result.output, "ok");
     }
 }
