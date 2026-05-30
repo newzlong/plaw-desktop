@@ -381,7 +381,6 @@ impl OpenAiCompatibleProvider {
             format!("{normalized_base}/v1/responses")
         }
     }
-
 }
 
 #[derive(Debug, Serialize)]
@@ -698,7 +697,12 @@ struct ResponsesWebSocketCreateEvent {
 /// Server-Sent Event stream chunk for OpenAI-compatible streaming.
 #[derive(Debug, Deserialize)]
 struct StreamChunkResponse {
+    #[serde(default)]
     choices: Vec<StreamChoice>,
+    /// Captured from the final chunk when `stream_options.include_usage = true`
+    /// (and from providers that ship usage in the terminal chunk by default).
+    #[serde(default)]
+    usage: Option<UsageInfo>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -713,6 +717,30 @@ struct StreamDelta {
     /// Reasoning/thinking models may stream output via `reasoning_content`.
     #[serde(default)]
     reasoning_content: Option<String>,
+    /// Tool call deltas. OpenAI streams tool calls as incremental fragments
+    /// keyed by `index`; each fragment may carry the id (typically arrives
+    /// once), the function name (typically arrives once), and a partial
+    /// `arguments` string. Consumers must accumulate across fragments.
+    #[serde(default)]
+    tool_calls: Option<Vec<StreamToolCallDelta>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamToolCallDelta {
+    #[serde(default)]
+    index: u32,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<StreamFunctionDelta>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamFunctionDelta {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
 }
 
 /// Parse SSE (Server-Sent Events) stream from OpenAI-compatible providers.
@@ -835,6 +863,173 @@ fn sse_bytes_to_chunks(
         rx.recv().await.map(|chunk| (chunk, rx))
     })
     .boxed()
+}
+
+/// Per-index accumulator for an OpenAI-compatible streaming tool call.
+#[derive(Debug, Default, Clone)]
+struct ToolCallBuilder {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+/// Stateful accumulator for an OpenAI-compatible Chat Completions SSE body.
+///
+/// Used by [`OpenAiCompatibleProvider::chat_streaming`] to consume an HTTP
+/// `bytes_stream()` incrementally. Each call to [`SseAccumulator::process_chunk`]
+/// pushes more bytes into an internal line buffer; complete `data: {...}` lines
+/// are parsed and folded into the running text / reasoning / tool-call /
+/// usage state. Text content is forwarded to the optional `on_token` sender
+/// via `try_send` (drop-on-full, matching the trait contract).
+///
+/// Call [`SseAccumulator::finalize`] after the stream ends to produce the
+/// final [`ProviderChatResponse`].
+struct SseAccumulator {
+    buffer: String,
+    accumulated_text: String,
+    accumulated_reasoning: String,
+    tool_call_builders: std::collections::BTreeMap<u32, ToolCallBuilder>,
+    usage: Option<TokenUsage>,
+    /// Tracks whether we've seen the `data: [DONE]` sentinel. Further `data:`
+    /// lines after `[DONE]` are ignored (defensive; providers occasionally
+    /// emit a trailing newline after the sentinel).
+    done_seen: bool,
+}
+
+impl SseAccumulator {
+    fn new() -> Self {
+        Self {
+            buffer: String::new(),
+            accumulated_text: String::new(),
+            accumulated_reasoning: String::new(),
+            tool_call_builders: std::collections::BTreeMap::new(),
+            usage: None,
+            done_seen: false,
+        }
+    }
+
+    /// Push more bytes into the accumulator. Complete SSE lines are parsed
+    /// and folded into the running state; partial lines stay in `buffer`
+    /// until the next call.
+    fn process_chunk(&mut self, text: &str, on_token: Option<&tokio::sync::mpsc::Sender<String>>) {
+        self.buffer.push_str(text);
+
+        while let Some(pos) = self.buffer.find('\n') {
+            let line = self.buffer[..=pos].to_string();
+            self.buffer = self.buffer[pos + 1..].to_string();
+            self.process_line(&line, on_token);
+        }
+    }
+
+    fn process_line(&mut self, raw: &str, on_token: Option<&tokio::sync::mpsc::Sender<String>>) {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with(':') {
+            return;
+        }
+        let Some(data) = line.strip_prefix("data:") else {
+            return;
+        };
+        let data = data.trim();
+        if data == "[DONE]" {
+            self.done_seen = true;
+            return;
+        }
+        if self.done_seen {
+            return;
+        }
+        let chunk: StreamChunkResponse = match serde_json::from_str(data) {
+            Ok(c) => c,
+            Err(_) => return, // ignore non-JSON keep-alive / provider heartbeats
+        };
+
+        if let Some(u) = chunk.usage {
+            self.usage = Some(TokenUsage {
+                input_tokens: u.prompt_tokens,
+                output_tokens: u.completion_tokens,
+            });
+        }
+
+        for choice in &chunk.choices {
+            let delta = &choice.delta;
+
+            if let Some(content) = delta.content.as_deref() {
+                if !content.is_empty() {
+                    self.accumulated_text.push_str(content);
+                    if let Some(tx) = on_token {
+                        // try_send + drop-on-full per Provider::chat_streaming
+                        // contract: chat tokens are progress hints, not
+                        // load-bearing state.
+                        let _ = tx.try_send(content.to_string());
+                    }
+                }
+            }
+
+            if let Some(reasoning) = delta.reasoning_content.as_deref() {
+                if !reasoning.is_empty() {
+                    self.accumulated_reasoning.push_str(reasoning);
+                }
+            }
+
+            if let Some(tool_call_deltas) = &delta.tool_calls {
+                for tcd in tool_call_deltas {
+                    let builder = self.tool_call_builders.entry(tcd.index).or_default();
+                    if let Some(id) = &tcd.id {
+                        if !id.is_empty() {
+                            builder.id = id.clone();
+                        }
+                    }
+                    if let Some(f) = &tcd.function {
+                        if let Some(name) = &f.name {
+                            if !name.is_empty() {
+                                builder.name = name.clone();
+                            }
+                        }
+                        if let Some(args) = &f.arguments {
+                            builder.arguments.push_str(args);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Consume the accumulator and produce the final [`ProviderChatResponse`].
+    ///
+    /// `text` is `Some(...)` only when at least one non-empty content delta
+    /// was observed (and survives `strip_think_tags`). `reasoning_content`
+    /// is `Some(...)` when any reasoning_content delta was observed.
+    /// Tool calls with empty `name` are dropped (defensive — the OpenAI
+    /// streaming spec requires `function.name` to arrive at least once
+    /// per tool call, but some providers may emit empty placeholder deltas).
+    fn finalize(self) -> ProviderChatResponse {
+        let text_stripped = strip_think_tags(&self.accumulated_text);
+        let text = if text_stripped.is_empty() {
+            None
+        } else {
+            Some(text_stripped)
+        };
+        let reasoning_content = if self.accumulated_reasoning.is_empty() {
+            None
+        } else {
+            Some(self.accumulated_reasoning)
+        };
+        let tool_calls = self
+            .tool_call_builders
+            .into_values()
+            .filter(|b| !b.name.is_empty())
+            .map(|b| ProviderToolCall {
+                id: b.id,
+                name: b.name,
+                arguments: b.arguments,
+            })
+            .collect();
+        ProviderChatResponse {
+            text,
+            tool_calls,
+            usage: self.usage,
+            reasoning_content,
+        }
+    }
 }
 
 fn first_nonempty(text: Option<&str>) -> Option<String> {
@@ -2114,7 +2309,6 @@ impl Provider for OpenAiCompatibleProvider {
 
         let url = self.chat_completions_url();
 
-
         let response = match self
             .apply_auth_header(
                 self.http_client().post(&url).json(&native_request),
@@ -2203,6 +2397,98 @@ impl Provider for OpenAiCompatibleProvider {
         let mut result = Self::parse_native_response(message);
         result.usage = usage;
         Ok(result)
+    }
+
+    /// Streaming chat over the standard OpenAI Chat Completions SSE protocol.
+    ///
+    /// Mirrors [`Self::chat`]'s request construction (full message history +
+    /// tools + `tool_choice`), but sets `stream: true`, reads the response as
+    /// an SSE byte stream, and folds the `data: {...}` chunks into a single
+    /// [`ProviderChatResponse`] via [`SseAccumulator`].
+    ///
+    /// Text deltas are forwarded to `on_token` as they arrive (`try_send`,
+    /// drop-on-full); `reasoning_content`, tool-call deltas, and `usage`
+    /// are accumulated internally and surfaced only in the returned response.
+    ///
+    /// Fallbacks: providers gated to the OpenAI Responses API
+    /// (`should_use_responses_mode()` true — typically `o1-*`) delegate to
+    /// blocking [`Self::chat`], since Responses streaming uses a different
+    /// event protocol.
+    async fn chat_streaming(
+        &self,
+        request: ProviderChatRequest<'_>,
+        model: &str,
+        temperature: f64,
+        on_token: Option<&tokio::sync::mpsc::Sender<String>>,
+    ) -> anyhow::Result<ProviderChatResponse> {
+        let credential = self.credential.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} API key not set. Run `plaw onboard` or set the appropriate env var.",
+                self.name
+            )
+        })?;
+
+        if self.should_use_responses_mode() {
+            return self.chat(request, model, temperature).await;
+        }
+
+        let tools = Self::convert_tool_specs(request.tools);
+        let effective_messages = if self.merge_system_into_user {
+            Self::flatten_system_messages(request.messages)
+        } else {
+            request.messages.to_vec()
+        };
+        let native_request = NativeChatRequest {
+            model: model.to_string(),
+            messages: Self::convert_messages_for_native(
+                &effective_messages,
+                !self.merge_system_into_user,
+            ),
+            temperature,
+            max_tokens: self.effective_max_tokens(),
+            stream: Some(true),
+            tool_choice: tools.as_ref().map(|_| "auto".to_string()),
+            tools,
+        };
+
+        let url = self.chat_completions_url();
+        let response = self
+            .apply_auth_header(
+                self.http_client()
+                    .post(&url)
+                    .header("Accept", "text/event-stream")
+                    .json(&native_request),
+                credential,
+            )
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error = response.text().await.unwrap_or_default();
+            let sanitized = super::sanitize_api_error(&error);
+            anyhow::bail!("{} streaming API error ({status}): {sanitized}", self.name);
+        }
+
+        let mut acc = SseAccumulator::new();
+        let mut bytes_stream = response.bytes_stream();
+        while let Some(item) = bytes_stream.next().await {
+            let bytes = item?;
+            // Lossy UTF-8 decode: SSE bodies are text, but a partial multibyte
+            // sequence at a TCP chunk boundary should be tolerated rather than
+            // aborting the whole stream. Replacement chars in stray bytes are
+            // less harmful than dropping a real `data: {...}` line.
+            let text = String::from_utf8_lossy(&bytes);
+            acc.process_chunk(&text, on_token);
+        }
+        // Flush any trailing line that lacks a terminating newline (some
+        // servers omit `\n` after the final `data: [DONE]`).
+        if !acc.buffer.trim().is_empty() {
+            let line = std::mem::take(&mut acc.buffer);
+            acc.process_line(&line, on_token);
+        }
+
+        Ok(acc.finalize())
     }
 
     fn supports_native_tools(&self) -> bool {
@@ -3719,5 +4005,266 @@ mod tests {
             "reasoning_content should be present when Some"
         );
         assert!(json.contains("thinking..."));
+    }
+
+    // ---------------------------------------------------------------
+    // SseAccumulator unit tests
+    // ---------------------------------------------------------------
+
+    fn sse_data_line(payload: &str) -> String {
+        format!("data: {payload}\n\n")
+    }
+
+    #[test]
+    fn accumulator_collects_text_content_across_multiple_deltas() {
+        let mut acc = SseAccumulator::new();
+        for piece in ["Hello", ", ", "world", "!"] {
+            let line = sse_data_line(&format!(
+                r#"{{"choices":[{{"delta":{{"content":"{piece}"}}}}]}}"#
+            ));
+            acc.process_chunk(&line, None);
+        }
+        acc.process_chunk(&sse_data_line("[DONE]"), None);
+
+        let resp = acc.finalize();
+        assert_eq!(resp.text.as_deref(), Some("Hello, world!"));
+        assert!(resp.tool_calls.is_empty());
+        assert!(resp.usage.is_none());
+        assert!(resp.reasoning_content.is_none());
+    }
+
+    #[tokio::test]
+    async fn accumulator_forwards_text_to_on_token_in_order() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(32);
+        let mut acc = SseAccumulator::new();
+        for piece in ["alpha", "-beta", "-gamma"] {
+            let line = sse_data_line(&format!(
+                r#"{{"choices":[{{"delta":{{"content":"{piece}"}}}}]}}"#
+            ));
+            acc.process_chunk(&line, Some(&tx));
+        }
+        drop(tx);
+
+        let mut received = Vec::new();
+        while let Some(t) = rx.recv().await {
+            received.push(t);
+        }
+        assert_eq!(received, vec!["alpha", "-beta", "-gamma"]);
+
+        let resp = acc.finalize();
+        assert_eq!(resp.text.as_deref(), Some("alpha-beta-gamma"));
+    }
+
+    #[test]
+    fn accumulator_assembles_tool_call_from_id_name_and_argument_deltas() {
+        let mut acc = SseAccumulator::new();
+        // id + name arrive in the first delta.
+        let chunk = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_abc",
+                        "function": { "name": "shell" }
+                    }]
+                }
+            }]
+        });
+        acc.process_chunk(&sse_data_line(&chunk.to_string()), None);
+
+        // arguments arrive in three partial fragments (typical OpenAI
+        // streaming behavior).
+        for arg_piece in [r#"{"co"#, r#"mmand":""#, r#"ls"}"#] {
+            let chunk = serde_json::json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": { "arguments": arg_piece }
+                        }]
+                    }
+                }]
+            });
+            acc.process_chunk(&sse_data_line(&chunk.to_string()), None);
+        }
+        acc.process_chunk(&sse_data_line("[DONE]"), None);
+
+        let resp = acc.finalize();
+        assert!(resp.text.is_none());
+        assert_eq!(resp.tool_calls.len(), 1);
+        let tc = &resp.tool_calls[0];
+        assert_eq!(tc.id, "call_abc");
+        assert_eq!(tc.name, "shell");
+        assert_eq!(tc.arguments, r#"{"command":"ls"}"#);
+    }
+
+    #[test]
+    fn accumulator_keeps_multiple_tool_calls_distinct_by_index() {
+        let mut acc = SseAccumulator::new();
+        acc.process_chunk(
+            &sse_data_line(
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c0","function":{"name":"a","arguments":"{}"}},{"index":1,"id":"c1","function":{"name":"b","arguments":"{}"}}]}}]}"#,
+            ),
+            None,
+        );
+
+        let resp = acc.finalize();
+        assert_eq!(resp.tool_calls.len(), 2);
+        assert_eq!(resp.tool_calls[0].name, "a");
+        assert_eq!(resp.tool_calls[1].name, "b");
+    }
+
+    #[test]
+    fn accumulator_captures_reasoning_content_without_forwarding_to_on_token() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
+        let mut acc = SseAccumulator::new();
+        acc.process_chunk(
+            &sse_data_line(r#"{"choices":[{"delta":{"reasoning_content":"step 1: parse"}}]}"#),
+            Some(&tx),
+        );
+        acc.process_chunk(
+            &sse_data_line(r#"{"choices":[{"delta":{"reasoning_content":" step 2: act"}}]}"#),
+            Some(&tx),
+        );
+
+        // on_token must NOT have received reasoning_content (parity with
+        // Anthropic's chat_streaming: only user-visible text is forwarded).
+        assert!(rx.try_recv().is_err());
+
+        let resp = acc.finalize();
+        assert_eq!(
+            resp.reasoning_content.as_deref(),
+            Some("step 1: parse step 2: act")
+        );
+    }
+
+    #[test]
+    fn accumulator_captures_usage_from_terminal_chunk() {
+        let mut acc = SseAccumulator::new();
+        acc.process_chunk(
+            &sse_data_line(r#"{"choices":[{"delta":{"content":"hi"}}]}"#),
+            None,
+        );
+        acc.process_chunk(
+            &sse_data_line(r#"{"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":3}}"#),
+            None,
+        );
+        acc.process_chunk(&sse_data_line("[DONE]"), None);
+
+        let resp = acc.finalize();
+        let usage = resp.usage.expect("usage should be captured");
+        assert_eq!(usage.input_tokens, Some(12));
+        assert_eq!(usage.output_tokens, Some(3));
+    }
+
+    #[test]
+    fn accumulator_buffers_partial_lines_across_chunks() {
+        let mut acc = SseAccumulator::new();
+        // Split a single SSE line across two `process_chunk` calls.
+        acc.process_chunk(r#"data: {"choices":[{"delta":{"con"#, None);
+        acc.process_chunk("tent\":\"split-line\"}}]}\n\n", None);
+        acc.process_chunk(&sse_data_line("[DONE]"), None);
+
+        let resp = acc.finalize();
+        assert_eq!(resp.text.as_deref(), Some("split-line"));
+    }
+
+    #[test]
+    fn accumulator_ignores_data_lines_after_done_sentinel() {
+        let mut acc = SseAccumulator::new();
+        acc.process_chunk(
+            &sse_data_line(r#"{"choices":[{"delta":{"content":"before"}}]}"#),
+            None,
+        );
+        acc.process_chunk(&sse_data_line("[DONE]"), None);
+        // Anything after [DONE] must be ignored.
+        acc.process_chunk(
+            &sse_data_line(r#"{"choices":[{"delta":{"content":"after"}}]}"#),
+            None,
+        );
+
+        let resp = acc.finalize();
+        assert_eq!(resp.text.as_deref(), Some("before"));
+    }
+
+    #[test]
+    fn accumulator_skips_comments_and_empty_lines() {
+        let mut acc = SseAccumulator::new();
+        acc.process_chunk(": keep-alive heartbeat\n\n", None);
+        acc.process_chunk("\n", None);
+        acc.process_chunk(
+            &sse_data_line(r#"{"choices":[{"delta":{"content":"x"}}]}"#),
+            None,
+        );
+
+        let resp = acc.finalize();
+        assert_eq!(resp.text.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn accumulator_skips_malformed_json_lines_gracefully() {
+        let mut acc = SseAccumulator::new();
+        acc.process_chunk("data: {not-json}\n\n", None);
+        acc.process_chunk(
+            &sse_data_line(r#"{"choices":[{"delta":{"content":"survives"}}]}"#),
+            None,
+        );
+
+        let resp = acc.finalize();
+        assert_eq!(resp.text.as_deref(), Some("survives"));
+    }
+
+    #[test]
+    fn accumulator_strips_think_tags_from_text() {
+        let mut acc = SseAccumulator::new();
+        for piece in ["Hello ", "<think>", "internal", "</think>", " world"] {
+            let line = sse_data_line(&format!(
+                r#"{{"choices":[{{"delta":{{"content":"{piece}"}}}}]}}"#
+            ));
+            acc.process_chunk(&line, None);
+        }
+
+        let resp = acc.finalize();
+        // `<think>...</think>` stripped; surrounding text preserved.
+        // "Hello " + "" (think block) + " world" → two spaces between.
+        assert_eq!(resp.text.as_deref(), Some("Hello  world"));
+    }
+
+    #[test]
+    fn accumulator_drops_tool_calls_with_empty_name() {
+        // Some providers emit a placeholder delta with index but no name;
+        // these should not produce a tool call entry.
+        let mut acc = SseAccumulator::new();
+        acc.process_chunk(
+            &sse_data_line(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c0"}]}}]}"#),
+            None,
+        );
+        acc.process_chunk(
+            &sse_data_line(
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}}]}"#,
+            ),
+            None,
+        );
+        let resp = acc.finalize();
+        assert!(resp.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn accumulator_flushes_trailing_line_without_newline() {
+        // Mirrors the chat_streaming() trailing-line flush: providers
+        // occasionally omit the final newline after `data: [DONE]`.
+        let mut acc = SseAccumulator::new();
+        acc.process_chunk(
+            &sse_data_line(r#"{"choices":[{"delta":{"content":"a"}}]}"#),
+            None,
+        );
+        // No trailing newline on this fragment.
+        acc.process_chunk(r#"data: {"choices":[{"delta":{"content":"b"}}]}"#, None);
+        // Simulate the explicit flush done by chat_streaming.
+        let line = std::mem::take(&mut acc.buffer);
+        acc.process_line(&line, None);
+
+        let resp = acc.finalize();
+        assert_eq!(resp.text.as_deref(), Some("ab"));
     }
 }
