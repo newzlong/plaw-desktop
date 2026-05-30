@@ -247,6 +247,14 @@ pub struct Config {
     #[serde(default)]
     pub agents: HashMap<String, DelegateAgentConfig>,
 
+    /// Pre-defined deterministic multi-stage workflows (planner →
+    /// researcher → coder → reporter style) that the main LLM can
+    /// invoke as a single `run_pipeline` tool call. Each entry is keyed
+    /// by pipeline name and references the same `[agents.*]` registry.
+    /// See [`crate::agent::pipeline`] for runtime semantics.
+    #[serde(default)]
+    pub pipelines: HashMap<String, PipelineConfig>,
+
     /// Delegate coordination runtime configuration (`[coordination]`).
     #[serde(default)]
     pub coordination: CoordinationConfig,
@@ -358,6 +366,71 @@ impl std::fmt::Debug for DelegateAgentConfig {
             .field("max_iterations", &self.max_iterations)
             .finish()
     }
+}
+
+// ── Pipelines ────────────────────────────────────────────────────
+
+/// Deterministic multi-stage workflow over the `[agents.*]` registry.
+///
+/// Each stage dispatches to a named delegate agent with a prompt
+/// template that may reference `{user_message}` (the initial input
+/// passed to the pipeline) and `{prior.<output_key>}` (outputs of
+/// earlier stages in the same pipeline). Stage outputs accumulate in
+/// a `HashMap<String, String>` blackboard; the final stage's output is
+/// returned as the pipeline's result.
+///
+/// Design DNA borrowed from DeerFlow v1's Plan-then-execute pattern
+/// (per workflow `deerflow-pattern-discovery` lens B): structured
+/// inter-stage handoff via accumulated observations, role-specialized
+/// prompts, anti-hallucination through compressed context. Diverges
+/// from DeerFlow by being **config-driven freeform** (no fixed
+/// Planner/Researcher/Coder/Reporter enum) so users define their own
+/// taxonomies — matching plaw's model-agnostic + provider-agnostic
+/// invariants. See [[framework-adoption-decision-2026-05-30]].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct PipelineConfig {
+    /// Ordered list of stages. Each stage runs once, in declaration
+    /// order, with template substitution against the blackboard.
+    #[serde(default)]
+    pub stages: Vec<PipelineStage>,
+    /// What to do when a stage fails. Default: `abort` — first
+    /// failure short-circuits the pipeline and surfaces the error.
+    #[serde(default)]
+    pub on_error: PipelineErrorPolicy,
+}
+
+/// One stage in a [`PipelineConfig`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct PipelineStage {
+    /// Name of a delegate agent registered under `[agents.<name>]`.
+    /// Errors at execution time if the name is not in the registry.
+    pub agent: String,
+    /// Prompt template. Supports two placeholder forms:
+    /// - `{user_message}` — the initial input to the pipeline.
+    /// - `{prior.<output_key>}` — output of an earlier stage; the
+    ///   key must match a previous stage's `output_key`.
+    pub prompt: String,
+    /// Key under which this stage's output is stored on the blackboard.
+    /// Later stages reference it via `{prior.<output_key>}`. Must be
+    /// unique within the pipeline; collisions are detected at runtime.
+    pub output_key: String,
+    /// Optional `context` field passed to the delegate tool. Same
+    /// template-substitution rules as `prompt`.
+    #[serde(default)]
+    pub context: Option<String>,
+}
+
+/// Failure policy for [`PipelineConfig`].
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelineErrorPolicy {
+    /// First stage failure aborts the pipeline (default — safe).
+    #[default]
+    Abort,
+    /// Failed stages contribute an error message under their
+    /// `output_key` but the pipeline continues. Useful for
+    /// best-effort gather-and-synthesize workflows.
+    Continue,
 }
 
 impl std::fmt::Debug for Config {
@@ -3999,6 +4072,7 @@ impl Default for Config {
             cost: CostConfig::default(),
             peripherals: PeripheralsConfig::default(),
             agents: HashMap::new(),
+            pipelines: HashMap::new(),
             coordination: CoordinationConfig::default(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
@@ -6068,6 +6142,7 @@ default_temperature = 0.7
             cost: CostConfig::default(),
             peripherals: PeripheralsConfig::default(),
             agents: HashMap::new(),
+            pipelines: HashMap::new(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             transcription: TranscriptionConfig::default(),
@@ -6440,6 +6515,7 @@ tool_dispatcher = "xml"
             cost: CostConfig::default(),
             peripherals: PeripheralsConfig::default(),
             agents: HashMap::new(),
+            pipelines: HashMap::new(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             transcription: TranscriptionConfig::default(),
