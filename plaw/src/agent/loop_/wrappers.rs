@@ -70,6 +70,24 @@ tokio::task_local! {
     static TOOL_LOOP_CHECKPOINT_WRITER: Option<Arc<dyn CheckpointWriter>>;
 }
 
+tokio::task_local! {
+    /// Cross-turn lineage marker set by `plaw resume <turn_id>`.
+    /// `(parent_turn_id, branched_from_iteration)`. Read by the
+    /// checkpoint writer on `iteration == 0` of the resumed turn —
+    /// the marker is recorded only on the first snapshot, so later
+    /// iterations within the same resumed turn carry only the
+    /// intra-turn `parent_iteration`. Empty outside a resume scope.
+    static TOOL_LOOP_RESUME_LINEAGE: Option<ResumeLineage>;
+}
+
+/// Cross-turn lineage captured at `plaw resume` entry and threaded
+/// to the agent loop's first snapshot write.
+#[derive(Debug, Clone)]
+pub(crate) struct ResumeLineage {
+    pub parent_turn_id: String,
+    pub branched_from_iteration: usize,
+}
+
 /// Read the current task's reply-target if a scope has been set.
 /// Returns `None` outside any scope (e.g. CLI / direct invocations).
 pub(super) fn current_reply_target() -> Option<String> {
@@ -99,6 +117,29 @@ pub(crate) fn current_checkpoint_writer() -> Option<Arc<dyn CheckpointWriter>> {
         .flatten()
 }
 
+/// Read the current task's resume lineage if `plaw resume` set one.
+/// `None` for fresh turns. Consumed by the checkpoint writer on
+/// `iteration == 0` of resumed turns to stamp cross-turn lineage on
+/// the first snapshot.
+pub(crate) fn current_resume_lineage() -> Option<ResumeLineage> {
+    TOOL_LOOP_RESUME_LINEAGE
+        .try_with(Clone::clone)
+        .ok()
+        .flatten()
+}
+
+/// Run `fut` with `TOOL_LOOP_RESUME_LINEAGE` set to `lineage`. Used by
+/// `agent::run`'s resume branch to thread cross-turn lineage to the
+/// inner agent loop's checkpoint writer when it calls
+/// [`run_tool_call_loop`] directly (without going through the larger
+/// non-CLI approval wrapper).
+pub(crate) async fn with_resume_lineage<F, T>(lineage: Option<ResumeLineage>, fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    TOOL_LOOP_RESUME_LINEAGE.scope(lineage, fut).await
+}
+
 /// Run the tool loop with optional non-CLI approval context and
 /// per-iteration checkpoint writer scoped to this task. The
 /// reply_target scope is automatically derived from the approval
@@ -124,12 +165,15 @@ pub(crate) async fn run_tool_call_loop_with_non_cli_approval_context(
     hooks: Option<&crate::hooks::HookRunner>,
     excluded_tools: &[String],
     checkpoint_writer: Option<Arc<dyn CheckpointWriter>>,
+    resume_lineage: Option<ResumeLineage>,
 ) -> Result<String> {
     let reply_target = non_cli_approval_context
         .as_ref()
         .map(|ctx| ctx.reply_target.clone());
 
-    TOOL_LOOP_CHECKPOINT_WRITER
+    TOOL_LOOP_RESUME_LINEAGE.scope(
+        resume_lineage,
+        TOOL_LOOP_CHECKPOINT_WRITER
         .scope(
             checkpoint_writer,
             TOOL_LOOP_NON_CLI_APPROVAL_CONTEXT.scope(
@@ -157,6 +201,7 @@ pub(crate) async fn run_tool_call_loop_with_non_cli_approval_context(
                 ),
             ),
         )
+    )
         .await
 }
 

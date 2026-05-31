@@ -265,6 +265,17 @@ Examples:
         /// Temperature override.
         #[arg(short, long, default_value = "0.7", value_parser = parse_temperature)]
         temperature: f64,
+
+        /// Resume from a specific iteration index instead of the latest snapshot.
+        /// Without this flag, resume picks the latest iteration of `turn_id`
+        /// (crash-recovery semantic). With this flag, the resumed loop forks
+        /// from iteration `N` and writes its own snapshots under a fresh
+        /// turn id — the original turn's snapshots stay untouched, so users
+        /// can re-branch from any point in the conversation history.
+        ///
+        /// Use `plaw checkpoint show <turn-id>` to list available iterations.
+        #[arg(long)]
+        from_iteration: Option<usize>,
     },
 
     /// Start the gateway server (webhooks, websockets)
@@ -930,6 +941,7 @@ async fn main() -> Result<()> {
                 peripheral,
                 true,
                 None, // fresh agent invocation — no resume
+                None, // no resume iteration
             )
             .await
             .map(|_| ())
@@ -941,6 +953,7 @@ async fn main() -> Result<()> {
             provider,
             model,
             temperature,
+            from_iteration,
         } => agent::run(
             config,
             message,
@@ -950,6 +963,7 @@ async fn main() -> Result<()> {
             vec![],
             true,
             Some(turn_id),
+            from_iteration,
         )
         .await
         .map(|_| ()),
