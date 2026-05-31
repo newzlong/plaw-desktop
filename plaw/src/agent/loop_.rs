@@ -51,7 +51,9 @@ use execution::{
 };
 #[cfg(test)]
 use history::{apply_compaction_summary, build_compaction_transcript};
-use history::{auto_compact_history, mid_loop_trim_if_needed, trim_history};
+use history::{
+    auto_compact_history, mid_loop_compact_if_needed, mid_loop_trim_if_needed, trim_history,
+};
 #[allow(unused_imports)]
 use parsing::{
     default_param_for_tool, detect_tool_call_parse_issue, extract_json_values, map_tool_name_alias,
@@ -965,12 +967,21 @@ pub(crate) async fn run_tool_call_loop(
             }
         }
 
-        // ── Mid-loop trim: prevent context overflow during long tool chains ──
-        if mid_loop_trim_if_needed(history) {
+        // ── Mid-loop compaction: prevent context overflow during long tool chains ──
+        // Tries LLM-based summarization first (preserves long-context
+        // signal via [Compaction summary]); falls back to deterministic
+        // drain on transient LLM error. Audit item #3 (2026-05-30 OSS
+        // framework audit): plaw previously only ran the dumb drain
+        // mid-loop, losing context on long agentic tasks.
+        //
+        // `last_input_tokens` left as None inside the loop — we don't
+        // thread per-iteration token counts here yet; the
+        // char-estimate fallback handles the trigger fine.
+        if mid_loop_compact_if_needed(history, provider, model, None, 0).await {
             if let Some(ref tx) = on_delta {
                 let _ = tx
                     .send(format!(
-                        "{DRAFT_PROGRESS_SENTINEL}\u{2702}\u{fe0f} Context trimmed (keeping recent messages)\n"
+                        "{DRAFT_PROGRESS_SENTINEL}\u{2702}\u{fe0f} Context compacted (keeping recent messages)\n"
                     ))
                     .await;
             }

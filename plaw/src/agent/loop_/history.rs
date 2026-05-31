@@ -172,6 +172,92 @@ pub(crate) fn mid_loop_trim_if_needed(history: &mut Vec<ChatMessage>) -> bool {
     true
 }
 
+/// Mid-loop **LLM-based compaction** with dumb-trim fallback.
+///
+/// Called inside `run_tool_call_loop` after each tool result batch
+/// (replacing the bare [`mid_loop_trim_if_needed`] call). When the
+/// estimated context exceeds [`MID_LOOP_TRIM_TOKEN_THRESHOLD_RATIO`],
+/// this:
+///
+/// 1. Tries [`auto_compact_history`] with `force = true` — summarizes
+///    older messages via a cheap-model call to `provider.chat_with_system`
+///    and replaces them with a structured `[Compaction summary]` so the
+///    long-context signal is preserved (audit item #3, the headline gap
+///    from the 2026-05-30 OSS framework audit). Returns `Ok(true)` on
+///    successful summary.
+/// 2. Falls back to [`mid_loop_trim_if_needed`] (deterministic drain,
+///    drops old messages with no summary) when summarization fails or
+///    no provider is available — keeps the loop running on transient
+///    LLM errors rather than crashing the turn.
+///
+/// Returns `true` if EITHER path mutated the history. Caller logs a
+/// short user-visible notice; the specifics of "compacted" vs "trimmed"
+/// are observable via the structured trace events that
+/// `auto_compact_history` emits.
+///
+/// `last_input_tokens` should be the input_tokens count from the most
+/// recent LLM response (when available — `None` falls back to
+/// char-based estimation). `max_context_tokens` from `[agent]` config;
+/// pass `0` to use the [`MID_LOOP_DEFAULT_MAX_CONTEXT_TOKENS`] default.
+pub(crate) async fn mid_loop_compact_if_needed(
+    history: &mut Vec<ChatMessage>,
+    provider: &dyn Provider,
+    model: &str,
+    last_input_tokens: Option<u64>,
+    max_context_tokens: usize,
+) -> bool {
+    // Fast-path bailout: if char-estimate is well under threshold,
+    // skip both the LLM call AND the deterministic check. Avoids
+    // paying summarization overhead every iteration.
+    let estimated = estimate_history_tokens(history) as u64;
+    let effective_max = if max_context_tokens == 0 {
+        MID_LOOP_DEFAULT_MAX_CONTEXT_TOKENS
+    } else {
+        max_context_tokens
+    };
+    let trim_threshold =
+        (effective_max as f64 * MID_LOOP_TRIM_TOKEN_THRESHOLD_RATIO) as u64;
+    if estimated < trim_threshold && last_input_tokens.unwrap_or(0) == 0 {
+        return false;
+    }
+
+    // Try LLM-based compaction first. force=true so auto_compact's
+    // internal trigger checks don't block us when we've already
+    // decided the loop needs relief.
+    match auto_compact_history(
+        history,
+        provider,
+        model,
+        // max_history doesn't apply here — we're triggering by token
+        // pressure, not message count. Pass a high cap so the
+        // count-trigger is never the reason for compaction.
+        usize::MAX,
+        last_input_tokens,
+        effective_max,
+        None, // No capsule store at this layer (turn-end path archives)
+        None, // No session_id at this layer
+        None, // No embedding provider at this layer
+        true, // force — we already decided we need relief
+    )
+    .await
+    {
+        Ok(true) => {
+            tracing::info!(
+                estimated_tokens = estimated,
+                last_input_tokens = ?last_input_tokens,
+                threshold = trim_threshold,
+                "mid-loop compaction: summarized older messages via LLM"
+            );
+            true
+        }
+        Ok(false) | Err(_) => {
+            // Summary path declined or failed. Drop to deterministic
+            // drain so the loop doesn't crash on transient LLM error.
+            mid_loop_trim_if_needed(history)
+        }
+    }
+}
+
 /// Trim conversation history to prevent unbounded growth.
 /// Preserves the system prompt (first message if role=system) and the most recent messages.
 pub(crate) fn trim_history(history: &mut Vec<ChatMessage>, max_history: usize) {
@@ -469,4 +555,189 @@ fn serialize_messages_for_capsule(messages: &[ChatMessage]) -> String {
 /// Simple token estimate: ~4 chars per token (rough approximation).
 fn estimate_tokens_simple(text: &str) -> u64 {
     (text.len() as u64) / 4
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::traits::ProviderCapabilities;
+    use crate::providers::{ChatMessage, ChatRequest, ChatResponse, Provider};
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    /// Mock provider that records calls to chat_with_system and returns
+    /// a fixed summary string. Lets us assert mid_loop_compact_if_needed
+    /// actually invokes the LLM-summary path when triggered.
+    struct RecordingProvider {
+        chat_with_system_calls: Mutex<u32>,
+        summary: String,
+    }
+
+    impl RecordingProvider {
+        fn new(summary: &str) -> Self {
+            Self {
+                chat_with_system_calls: Mutex::new(0),
+                summary: summary.to_string(),
+            }
+        }
+        fn call_count(&self) -> u32 {
+            *self.chat_with_system_calls.lock().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl Provider for RecordingProvider {
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::default()
+        }
+        async fn chat_with_system(
+            &self,
+            _system_prompt: Option<&str>,
+            _message: &str,
+            _model: &str,
+            _temperature: f64,
+        ) -> anyhow::Result<String> {
+            *self.chat_with_system_calls.lock().unwrap() += 1;
+            Ok(self.summary.clone())
+        }
+        async fn chat(
+            &self,
+            _request: ChatRequest<'_>,
+            _model: &str,
+            _temperature: f64,
+        ) -> anyhow::Result<ChatResponse> {
+            anyhow::bail!("chat not used in compaction tests")
+        }
+    }
+
+    fn small_history() -> Vec<ChatMessage> {
+        vec![
+            ChatMessage::system("you are helpful"),
+            ChatMessage::user("hi"),
+            ChatMessage::assistant("hello"),
+        ]
+    }
+
+    fn long_history() -> Vec<ChatMessage> {
+        // Build a history that BLOWS PAST 80% of MID_LOOP_DEFAULT_MAX_CONTEXT_TOKENS
+        // by char-estimate. 200_000 tokens × 0.80 ≈ 160_000 tokens ≈ 640_000 chars
+        // (~4 chars per token). Pad with 800_000 chars to be safely over.
+        let mut h = vec![ChatMessage::system("sys")];
+        for i in 0..50 {
+            h.push(ChatMessage::user(format!("u-{i} {}", "x".repeat(8000))));
+            h.push(ChatMessage::assistant(format!("a-{i} {}", "y".repeat(8000))));
+        }
+        h
+    }
+
+    #[tokio::test]
+    async fn mid_loop_compact_returns_false_for_small_history_without_calling_provider() {
+        let provider = RecordingProvider::new("[summary]");
+        let mut history = small_history();
+        let did_compact =
+            mid_loop_compact_if_needed(&mut history, &provider, "model", None, 0).await;
+        assert!(!did_compact, "small history should not trigger compaction");
+        assert_eq!(
+            provider.call_count(),
+            0,
+            "provider must not be called when threshold not hit"
+        );
+    }
+
+    #[tokio::test]
+    async fn mid_loop_compact_calls_provider_when_threshold_exceeded() {
+        let provider = RecordingProvider::new(
+            "[Compaction summary]\n- earlier work covered modules A and B\n- ready to continue",
+        );
+        let mut history = long_history();
+        let original_len = history.len();
+        let did_compact =
+            mid_loop_compact_if_needed(&mut history, &provider, "model", None, 0).await;
+        assert!(
+            did_compact,
+            "long history should trigger compaction (LLM-summary path)"
+        );
+        assert!(
+            provider.call_count() >= 1,
+            "expected ≥1 provider call for summarization"
+        );
+        // History should be SHORTER after compaction (most older messages
+        // replaced by the single [Compaction summary] message).
+        assert!(
+            history.len() < original_len,
+            "compacted history ({}) should be shorter than original ({})",
+            history.len(),
+            original_len
+        );
+    }
+
+    #[tokio::test]
+    async fn mid_loop_compact_falls_back_to_dumb_trim_on_provider_failure() {
+        // Provider that always fails — compaction should fall through
+        // to the deterministic trim instead of crashing the turn.
+        struct FailingProvider;
+        #[async_trait]
+        impl Provider for FailingProvider {
+            fn capabilities(&self) -> ProviderCapabilities {
+                ProviderCapabilities::default()
+            }
+            async fn chat_with_system(
+                &self,
+                _: Option<&str>,
+                _: &str,
+                _: &str,
+                _: f64,
+            ) -> anyhow::Result<String> {
+                anyhow::bail!("simulated upstream failure")
+            }
+            async fn chat(
+                &self,
+                _: ChatRequest<'_>,
+                _: &str,
+                _: f64,
+            ) -> anyhow::Result<ChatResponse> {
+                anyhow::bail!("simulated upstream failure")
+            }
+        }
+        let provider = FailingProvider;
+        let mut history = long_history();
+        let original_len = history.len();
+        let did_act =
+            mid_loop_compact_if_needed(&mut history, &provider, "model", None, 0).await;
+        // Auto-compact fallback uses truncated transcript as the summary
+        // string (per existing fallback at line ~390 in auto_compact_history),
+        // so it still mutates history. Either way: did_act should be true.
+        assert!(
+            did_act,
+            "should have either compacted or trimmed when threshold exceeded"
+        );
+        assert!(history.len() < original_len);
+    }
+
+    #[tokio::test]
+    async fn mid_loop_compact_respects_custom_max_context_tokens() {
+        // With a small custom limit, even a "small" history should trigger.
+        let provider = RecordingProvider::new("[summary]");
+        let mut history = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("x".repeat(5_000)),
+            ChatMessage::assistant("y".repeat(5_000)),
+            ChatMessage::user("z".repeat(5_000)),
+            ChatMessage::assistant("w".repeat(5_000)),
+            ChatMessage::user("more recent".to_string()),
+        ];
+        // 20_000 chars ≈ 5_000 tokens. Set max=10_000 → 80% threshold = 8_000.
+        // We're at 5_000 tokens estimated; should NOT trigger.
+        let did_act =
+            mid_loop_compact_if_needed(&mut history, &provider, "model", None, 10_000).await;
+        assert!(
+            !did_act,
+            "5k-token history under 80%×10k=8k threshold should not trigger"
+        );
+
+        // Now max=5_000 → 80% threshold = 4_000. 5k > 4k → should trigger.
+        let did_act =
+            mid_loop_compact_if_needed(&mut history, &provider, "model", None, 5_000).await;
+        assert!(did_act, "5k-token history over 80%×5k=4k threshold should trigger");
+    }
 }
