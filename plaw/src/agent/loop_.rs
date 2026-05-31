@@ -75,7 +75,7 @@ pub(crate) use wrappers::{
 };
 use tool_io::{
     append_calibration_reminder, maybe_inject_cron_add_delivery, tag_injected_content,
-    truncate_tool_args_for_progress,
+    truncate_tool_args_for_progress, wrap_as_untrusted_data,
 };
 use tool_taxonomy::{ANTI_LOOP_EXEMPT_TOOLS, MAX_SAME_TOOL_PER_TURN, TIGHT_LOOP_TOOLS};
 
@@ -913,9 +913,16 @@ pub(crate) async fn run_tool_call_loop(
         for (tool_name, tool_call_id, outcome) in ordered_results.into_iter().flatten() {
             // Scan external tool results for prompt injection and tag if detected
             let tagged_output = tag_injected_content(&tool_name, outcome.output);
+            // Wrap external content in <untrusted_data source="..."> delimiters
+            // so the model is structurally aware of which content is external
+            // (web/HTTP/search/browser/pdf) vs. trusted plaw-side instructions.
+            // Paired with the system-prompt rule injected by
+            // `build_untrusted_data_rule_block` so the LLM has both
+            // structural and policy signals.
+            let wrapped_output = wrap_as_untrusted_data(&tool_name, tagged_output);
             // Append calibration reminder to fight post-tool-call confabulation
             // on external content (see T-2 in phase-2-targets.md).
-            let calibrated_output = append_calibration_reminder(&tool_name, tagged_output);
+            let calibrated_output = append_calibration_reminder(&tool_name, wrapped_output);
             individual_results.push((tool_call_id, calibrated_output.clone()));
             let _ = writeln!(
                 tool_results,
