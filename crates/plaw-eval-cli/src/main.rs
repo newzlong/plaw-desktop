@@ -194,6 +194,30 @@ enum Command {
         review_status: String,
     },
 
+    /// Append a new eval case derived from a plaw runtime trace.
+    /// Skips the flywheel review queue — direct trace → suite.
+    /// `turn-id` accepts either a `turn_id` (per agent-loop invocation)
+    /// or `trace_id` (cross-loop correlation for sub-agents / cron).
+    AddFromTrace {
+        /// Turn id or trace id from `state/runtime-trace.jsonl`.
+        turn_id: String,
+
+        /// Target suite directory or its `cases.toml` path.
+        #[arg(long)]
+        suite: PathBuf,
+
+        /// Free-text task description for the new case's `[cases.input]`.
+        /// When omitted, a `TODO:` placeholder is written that the
+        /// operator MUST edit before running the case.
+        #[arg(long)]
+        task: Option<String>,
+
+        /// Path to the runtime trace JSONL. Defaults to
+        /// `plaw-data/state/runtime-trace.jsonl`.
+        #[arg(long)]
+        trace_path: Option<PathBuf>,
+    },
+
     /// Manage the judge response cache.
     Cache {
         #[command(subcommand)]
@@ -385,6 +409,12 @@ async fn main() -> Result<()> {
             judge_score,
             review_status,
         } => cmd_promote(&db_path, &trace, judge_score, &review_status),
+        Command::AddFromTrace {
+            turn_id,
+            suite,
+            task,
+            trace_path,
+        } => cmd_add_from_trace(&turn_id, &suite, task.as_deref(), trace_path.as_deref()),
         Command::Cache { action } => cmd_cache(&db_path, action),
         Command::Flywheel { action } => cmd_flywheel(&db_path, &suites_dir, action),
         Command::Doctor => cmd_doctor(&db_path, &suites_dir, cli.ws_url.as_deref()),
@@ -801,6 +831,63 @@ fn cmd_power(effect: f64, sigma: f64, alpha: f64, power: f64) -> Result<()> {
 }
 
 // ---------- promote ----------
+
+/// `add-from-trace`: direct trace → suite case (skips flywheel queue).
+/// Closes audit item #9. See [`plaw_eval::flywheel::ingest_trace_from_jsonl`].
+fn cmd_add_from_trace(
+    turn_id: &str,
+    suite_arg: &Path,
+    task: Option<&str>,
+    trace_path: Option<&Path>,
+) -> Result<()> {
+    let suite_path = resolve_suite_cases_path(suite_arg)?;
+    let trace_path = trace_path.map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from("plaw-data/state/runtime-trace.jsonl")
+    });
+
+    let result = plaw_eval::flywheel::ingest_trace_from_jsonl(
+        turn_id,
+        &suite_path,
+        &trace_path,
+        task,
+    )?;
+
+    println!("added case {} to {}", result.new_case_id, result.target_suite_path);
+    println!(
+        "  iterations: {} | matched events: {} | appended bytes: {}",
+        result.iterations, result.events_matched, result.appended_bytes
+    );
+    if result.tool_sequence.is_empty() {
+        println!("  tool_sequence: (none — chat-only turn)");
+    } else {
+        println!("  tool_sequence: {}", result.tool_sequence.join(" → "));
+    }
+    if task.is_none() {
+        println!(
+            "\n⚠ task field contains a TODO placeholder. Edit {} \
+             before running the case.",
+            result.target_suite_path
+        );
+    }
+    Ok(())
+}
+
+/// Accept either a suite directory (containing `cases.toml`) or the
+/// `cases.toml` path directly. Existing `Run`/`Compare` flows take the
+/// directory; `add-from-trace` mirrors that ergonomics.
+fn resolve_suite_cases_path(suite_arg: &Path) -> Result<PathBuf> {
+    if suite_arg.is_file() {
+        return Ok(suite_arg.to_path_buf());
+    }
+    let candidate = suite_arg.join("cases.toml");
+    if candidate.is_file() {
+        return Ok(candidate);
+    }
+    Err(anyhow!(
+        "suite path {} is neither a file nor a directory containing cases.toml",
+        suite_arg.display()
+    ))
+}
 
 fn cmd_promote(
     db_path: &Path,

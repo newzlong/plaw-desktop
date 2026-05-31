@@ -109,7 +109,7 @@ pub fn promote(
 
 /// Build a deterministic new case id of the form
 /// `<source>-flywheel-<NNN>`, finding the smallest unused suffix.
-fn synthesise_case_id(suite: &Suite, source_case_id: &str) -> String {
+pub(crate) fn synthesise_case_id(suite: &Suite, source_case_id: &str) -> String {
     let mut n = 1usize;
     loop {
         let candidate = format!("{source_case_id}-flywheel-{n:03}");
@@ -169,8 +169,10 @@ fn build_promoted_case(
 
 /// Append a single Case as TOML to the suite file. Returns bytes
 /// written. The file is opened in append mode so existing cases are
-/// preserved untouched.
-fn append_case_to_suite(target_suite_path: &Path, case: &Case) -> Result<usize> {
+/// preserved untouched. Shared with [`super::trace_ingest`] — both
+/// the flywheel promoter and the direct `add-from-trace` path produce
+/// new cases through the same renderer.
+pub(crate) fn append_case_to_suite(target_suite_path: &Path, case: &Case) -> Result<usize> {
     let rendered = render_case_toml(case)?;
     let mut existing = fs::read_to_string(target_suite_path)
         .with_context(|| format!("reading {}", target_suite_path.display()))?;
