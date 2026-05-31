@@ -231,6 +231,7 @@ async fn run_agent_job(
                         vec![],
                         false,
                         None, // cron jobs always start fresh; no resume
+                        None, // no resume iteration
                     ),
                 )
                 .await

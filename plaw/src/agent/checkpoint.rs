@@ -86,6 +86,41 @@ pub fn load_resume_snapshot(config: &Config, turn_id: &str) -> Result<Snapshot> 
     })
 }
 
+/// Load a specific iteration's snapshot for `turn_id` — the time-travel
+/// entry point. Used by `plaw resume <turn_id> --from-iteration N` to
+/// fork from any point in a turn's history, not just the latest.
+///
+/// Errors when the turn directory or the specific iteration is missing.
+/// The error message includes the iterations actually available, so the
+/// user can correct a typo without re-running `plaw checkpoint show`.
+pub fn load_snapshot_at_iteration(
+    config: &Config,
+    turn_id: &str,
+    iteration: usize,
+) -> Result<Snapshot> {
+    let root = resolve_checkpoint_root(config);
+    let reader = FsCheckpointReader::new(&root);
+    let snapshots = reader.list_for_turn(turn_id)?;
+    if snapshots.is_empty() {
+        anyhow::bail!(
+            "no snapshots found for turn {turn_id} under {}. \
+             Run `plaw checkpoint list` to see available turns.",
+            root.display()
+        );
+    }
+    snapshots
+        .into_iter()
+        .find(|s| s.iteration == iteration)
+        .ok_or_else(|| {
+            let path = reader.path_for(turn_id, iteration);
+            anyhow::anyhow!(
+                "iteration {iteration} not found for turn {turn_id} (expected at \
+                 {}). Run `plaw checkpoint show {turn_id}` to list available iterations.",
+                path.display()
+            )
+        })
+}
+
 /// Schema version of the on-disk [`Snapshot`] format. Bumped only when an
 /// incompatible field change ships; the resume PR that lands later will
 /// branch on this when reading older files. Readers should reject snapshots
@@ -129,12 +164,25 @@ pub struct Snapshot {
     /// for ordering snapshots independently of `iteration` when comparing
     /// across forks (a future capability).
     pub created_at: String,
+    /// **Cross-turn lineage**: the `turn_id` this turn was branched from
+    /// (via `plaw resume`). `None` on fresh turns; set on `iteration == 0`
+    /// of resumed turns. Future tree-view UIs render the turn forest
+    /// using this pointer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_turn_id: Option<String>,
+    /// **Cross-turn lineage**: the `iteration` of `parent_turn_id` this
+    /// turn forked from. Always paired with `parent_turn_id`. Set on
+    /// `iteration == 0` of resumed turns only — later iterations within
+    /// the same resumed turn use `parent_iteration` (intra-turn).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branched_from_iteration: Option<usize>,
 }
 
 impl Snapshot {
     /// Build a snapshot for an iteration just completed. `parent_iteration`
     /// is derived automatically (`iteration - 1` when nonzero, `None`
-    /// otherwise).
+    /// otherwise). Cross-turn lineage fields default to `None` — call
+    /// [`Self::with_lineage`] to populate them for resumed turns.
     pub fn new(turn_id: impl Into<String>, iteration: usize, history: Vec<ChatMessage>) -> Self {
         Self {
             schema_version: SNAPSHOT_SCHEMA_VERSION,
@@ -143,7 +191,22 @@ impl Snapshot {
             parent_iteration: iteration.checked_sub(1),
             history,
             created_at: chrono::Utc::now().to_rfc3339(),
+            parent_turn_id: None,
+            branched_from_iteration: None,
         }
+    }
+
+    /// Attach cross-turn lineage. Used by the resume path on
+    /// `iteration == 0` to record which (turn_id, iteration) this
+    /// turn forked from. Returns `self` for builder-style chaining.
+    pub fn with_lineage(
+        mut self,
+        parent_turn_id: impl Into<String>,
+        branched_from_iteration: usize,
+    ) -> Self {
+        self.parent_turn_id = Some(parent_turn_id.into());
+        self.branched_from_iteration = Some(branched_from_iteration);
+        self
     }
 }
 
@@ -850,5 +913,106 @@ mod tests {
             msg.contains("plaw checkpoint list"),
             "error should hint at the discovery command, got: {msg}"
         );
+    }
+
+    // ── Cross-turn lineage + load_snapshot_at_iteration ─────────────
+
+    #[test]
+    fn with_lineage_populates_cross_turn_fields() {
+        let snap = Snapshot::new("child-turn", 0, sample_history())
+            .with_lineage("parent-turn", 5);
+        assert_eq!(snap.parent_turn_id.as_deref(), Some("parent-turn"));
+        assert_eq!(snap.branched_from_iteration, Some(5));
+    }
+
+    #[test]
+    fn lineage_fields_default_to_none_for_fresh_snapshots() {
+        let snap = Snapshot::new("fresh-turn", 0, sample_history());
+        assert!(snap.parent_turn_id.is_none());
+        assert!(snap.branched_from_iteration.is_none());
+    }
+
+    #[test]
+    fn snapshot_with_lineage_round_trips_through_serde() {
+        let original = Snapshot::new("child", 0, sample_history())
+            .with_lineage("parent-abc", 7);
+        let json = serde_json::to_string(&original).unwrap();
+        // Lineage fields are present in the JSON.
+        assert!(json.contains("\"parent_turn_id\""));
+        assert!(json.contains("\"branched_from_iteration\""));
+        assert!(json.contains("parent-abc"));
+
+        let parsed: Snapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn snapshot_without_lineage_omits_fields_on_serialize() {
+        // Backward compat: old readers should see the same shape they
+        // saw before the lineage fields existed.
+        let snap = Snapshot::new("fresh", 0, sample_history());
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(!json.contains("\"parent_turn_id\""));
+        assert!(!json.contains("\"branched_from_iteration\""));
+    }
+
+    #[test]
+    fn legacy_snapshot_without_lineage_fields_deserializes_via_default() {
+        // Pre-PR JSON files lack the new fields. Reader must default
+        // to None, not fail.
+        let body = r#"{
+            "schema_version": 1,
+            "turn_id": "legacy",
+            "iteration": 3,
+            "parent_iteration": 2,
+            "history": [{"role": "user", "content": "hi"}],
+            "created_at": "2026-01-01T00:00:00+00:00"
+        }"#;
+        let parsed: Snapshot = serde_json::from_str(body).unwrap();
+        assert!(parsed.parent_turn_id.is_none());
+        assert!(parsed.branched_from_iteration.is_none());
+        assert_eq!(parsed.iteration, 3);
+    }
+
+    #[test]
+    fn load_snapshot_at_iteration_returns_exact_match() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = config_for(tmp.path());
+        let writer = FsCheckpointWriter::new(resolve_checkpoint_root(&cfg));
+        for i in 0..5 {
+            writer
+                .put(&Snapshot::new("turn-x", i, sample_history()))
+                .unwrap();
+        }
+
+        let snap = load_snapshot_at_iteration(&cfg, "turn-x", 2).unwrap();
+        assert_eq!(snap.iteration, 2);
+        assert_eq!(snap.turn_id, "turn-x");
+    }
+
+    #[test]
+    fn load_snapshot_at_iteration_errors_on_missing_iteration() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = config_for(tmp.path());
+        let writer = FsCheckpointWriter::new(resolve_checkpoint_root(&cfg));
+        writer
+            .put(&Snapshot::new("turn-y", 0, sample_history()))
+            .unwrap();
+        writer
+            .put(&Snapshot::new("turn-y", 1, sample_history()))
+            .unwrap();
+
+        let err = load_snapshot_at_iteration(&cfg, "turn-y", 99).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("iteration 99 not found"));
+        assert!(msg.contains("plaw checkpoint show turn-y"));
+    }
+
+    #[test]
+    fn load_snapshot_at_iteration_errors_on_missing_turn() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = config_for(tmp.path());
+        let err = load_snapshot_at_iteration(&cfg, "ghost", 0).unwrap_err();
+        assert!(err.to_string().contains("no snapshots found for turn ghost"));
     }
 }

@@ -216,6 +216,7 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
                 vec![],
                 false,
                 None, // daemon heartbeat tasks always start fresh
+                None, // no resume iteration
             )
             .await
             {

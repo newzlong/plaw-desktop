@@ -713,6 +713,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 state.hooks.as_deref(), // hooks — fires PreCompact / before_tool_call / on_after_tool_call etc.
                 &[],               // excluded tools
                 checkpoint_writer,
+                // Webchat turns are always fresh — no `plaw resume`
+                // bridging through this path (resume is CLI-only in
+                // Phase 0; future Tauri command will plumb lineage here).
+                None,
             );
             tokio::pin!(loop_fut);
 

@@ -70,7 +70,9 @@ use non_cli_approval::await_non_cli_approval_decision;
 pub(crate) use shell_policy::build_shell_policy_instructions;
 pub(crate) use streaming::{DRAFT_CLEAR_SENTINEL, DRAFT_PROGRESS_SENTINEL};
 pub(crate) use tool_instructions::{build_tool_instructions, build_tool_instructions_from_specs};
-pub(crate) use wrappers::run_tool_call_loop_with_non_cli_approval_context;
+pub(crate) use wrappers::{
+    run_tool_call_loop_with_non_cli_approval_context, with_resume_lineage, ResumeLineage,
+};
 use tool_io::{
     append_calibration_reminder, maybe_inject_cron_add_delivery, tag_injected_content,
     truncate_tool_args_for_progress,
@@ -973,11 +975,24 @@ pub(crate) async fn run_tool_call_loop(
         // the turn over a transient filesystem error. See
         // [`crate::agent::checkpoint`].
         if let Some(writer) = wrappers::current_checkpoint_writer() {
-            let snapshot = crate::agent::checkpoint::Snapshot::new(
+            let mut snapshot = crate::agent::checkpoint::Snapshot::new(
                 turn_id.clone(),
                 iteration,
                 history.clone(),
             );
+            // Cross-turn lineage: `plaw resume <parent> --from-iteration N`
+            // sets TOOL_LOOP_RESUME_LINEAGE; stamp it on iteration 0 so
+            // a future tree-view UI can render the turn forest. Only
+            // iteration 0 carries this — later iterations use
+            // intra-turn `parent_iteration`.
+            if iteration == 0 {
+                if let Some(lineage) = wrappers::current_resume_lineage() {
+                    snapshot = snapshot.with_lineage(
+                        lineage.parent_turn_id,
+                        lineage.branched_from_iteration,
+                    );
+                }
+            }
             if let Err(err) = writer.put(&snapshot) {
                 tracing::warn!(
                     %turn_id,
@@ -1018,10 +1033,24 @@ pub(crate) async fn run_tool_call_loop(
 /// Single-turn agent entry point with optional snapshot resume.
 ///
 /// When `resume_from_turn_id` is `Some(turn_id)`, the agent loop's
-/// `history` is seeded from the latest snapshot for that turn instead
-/// of starting fresh — used by the `plaw resume` CLI subcommand for
-/// crash-recovery / mid-task continuation. Interactive mode does not
-/// yet support resume; pass `None` from the REPL path.
+/// `history` is seeded from a snapshot of that turn instead of starting
+/// fresh — used by the `plaw resume` CLI for crash-recovery / mid-task
+/// continuation / time-travel branching.
+///
+/// `resume_from_iteration`:
+/// - `None` → resume from the LATEST snapshot (default crash-recovery
+///   semantic; same as PR #61 behaviour).
+/// - `Some(N)` → resume from iteration `N` exactly (time-travel branch).
+///   Errors if iteration `N` was never persisted for that turn.
+///
+/// The resumed loop generates its OWN fresh turn_id; new snapshots land
+/// under that new directory, preserving the original turn's history
+/// untouched. Cross-turn lineage is recorded on the first snapshot
+/// (`parent_turn_id` + `branched_from_iteration`) so debug UIs can
+/// render the turn forest.
+///
+/// Interactive REPL mode does not yet support resume; pass `None` from
+/// the REPL path.
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -1033,6 +1062,7 @@ pub async fn run(
     peripheral_overrides: Vec<String>,
     interactive: bool,
     resume_from_turn_id: Option<String>,
+    resume_from_iteration: Option<usize>,
 ) -> Result<String> {
     // ── Wire up agnostic subsystems ──────────────────────────────
     let base_observer = observability::create_observer(&config.observability);
@@ -1298,46 +1328,67 @@ pub async fn run(
     let mut final_output = String::new();
 
     if let Some(turn_id) = resume_from_turn_id.as_deref() {
-        // ── Resume path: seed history from the latest snapshot for
-        // this turn and continue the loop. The system prompt is
-        // already in the snapshot; do not re-prepend it.
+        // ── Resume path: seed history from a snapshot for this turn
+        // and continue the loop. The system prompt is already in the
+        // snapshot; do not re-prepend it.
         //
-        // For v1, resume is a one-shot continuation. `message` is
-        // accepted as an additional user turn appended after the
-        // snapshot's history when present (allows the user to nudge
-        // the resumed agent with new instructions). Interactive
-        // resume / new-message-with-resume in the REPL is deferred.
-        let snapshot =
-            crate::agent::checkpoint::load_resume_snapshot(&config, turn_id)?;
+        // `resume_from_iteration`:
+        // - None → latest snapshot (crash-recovery)
+        // - Some(N) → iteration N exactly (time-travel branch)
+        //
+        // `message` (when present) appends as a new user turn after
+        // the loaded history so users can nudge the resumed agent.
+        // Interactive resume in the REPL is still deferred.
+        let snapshot = match resume_from_iteration {
+            Some(iter) => crate::agent::checkpoint::load_snapshot_at_iteration(
+                &config, turn_id, iter,
+            )?,
+            None => crate::agent::checkpoint::load_resume_snapshot(&config, turn_id)?,
+        };
         let resumed_iter = snapshot.iteration;
         let mut history = snapshot.history;
         if let Some(msg) = &message {
             let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
             history.push(ChatMessage::user(format!("[{now}] {msg}")));
         }
+        let branch_label = if resume_from_iteration.is_some() {
+            " (branch)"
+        } else {
+            ""
+        };
         eprintln!(
-            "▶ Resuming turn {turn_id} from iteration {resumed_iter} \
+            "▶ Resuming turn {turn_id} from iteration {resumed_iter}{branch_label} \
              ({} messages in history)",
             history.len()
         );
 
-        let response = run_tool_call_loop(
-            provider.as_ref(),
-            &mut history,
-            &tools_registry,
-            observer.as_ref(),
-            provider_name,
-            model_name,
-            temperature,
-            false,
-            approval_manager.as_ref(),
-            channel_name,
-            &config.multimodal,
-            config.agent.max_tool_iterations,
-            None,
-            None,
-            None,
-            &[],
+        // Scope cross-turn lineage so the loop's iteration-0 snapshot
+        // can stamp parent_turn_id + branched_from_iteration. No-op for
+        // non-checkpoint runs (writer returns None → lineage never read).
+        let lineage = ResumeLineage {
+            parent_turn_id: turn_id.to_string(),
+            branched_from_iteration: resumed_iter,
+        };
+        let response = with_resume_lineage(
+            Some(lineage),
+            run_tool_call_loop(
+                provider.as_ref(),
+                &mut history,
+                &tools_registry,
+                observer.as_ref(),
+                provider_name,
+                model_name,
+                temperature,
+                false,
+                approval_manager.as_ref(),
+                channel_name,
+                &config.multimodal,
+                config.agent.max_tool_iterations,
+                None,
+                None,
+                None,
+                &[],
+            ),
         )
         .await?;
         final_output = response.clone();
@@ -2626,6 +2677,7 @@ mod tests {
             None,
             &[],
             None, // no checkpoint writer
+            None, // no resume lineage
         )
         .await
         .expect("tool loop should continue after non-cli approval");
@@ -4521,6 +4573,7 @@ Let me check the result."#;
             None,
             &[],
             Some(writer),
+            None, // no resume lineage for this test
         )
         .await
         .expect("tool loop should complete");
@@ -4610,9 +4663,94 @@ Let me check the result."#;
             None,
             &[],
             None, // no checkpoint writer
+            None, // no resume lineage
         )
         .await
         .expect("tool loop should complete");
         assert_eq!(result, "done");
+    }
+
+    #[tokio::test]
+    async fn run_tool_call_loop_stamps_resume_lineage_on_iteration_zero_snapshot() {
+        use crate::agent::checkpoint::{FsCheckpointWriter, Snapshot};
+        use std::sync::Arc as StdArc;
+        use tempfile::TempDir;
+
+        // 1st response: tool call → iteration 0 snapshot.
+        // 2nd response: text-only → loop exits.
+        let provider = ScriptedProvider::from_text_responses(vec![
+            r#"<tool_call>
+{"name":"shell","arguments":{"command":"echo hi"}}
+</tool_call>"#,
+            "done",
+        ]);
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let tools_registry: Vec<Box<dyn Tool>> = vec![Box::new(DelayTool::new(
+            "shell",
+            10,
+            Arc::clone(&active),
+            Arc::clone(&max_active),
+        ))];
+        let approval_cfg = crate::config::AutonomyConfig {
+            level: crate::security::AutonomyLevel::Full,
+            auto_approve: vec!["*".into()],
+            always_ask: vec![],
+            ..crate::config::AutonomyConfig::default()
+        };
+        let approval_mgr = ApprovalManager::from_config(&approval_cfg);
+        let mut history = vec![
+            ChatMessage::system("test-system"),
+            ChatMessage::user("run shell"),
+        ];
+        let observer = NoopObserver;
+
+        let tmp = TempDir::new().unwrap();
+        let writer: StdArc<dyn crate::agent::checkpoint::CheckpointWriter> =
+            StdArc::new(FsCheckpointWriter::new(tmp.path()));
+
+        let lineage = ResumeLineage {
+            parent_turn_id: "parent-abc".into(),
+            branched_from_iteration: 5,
+        };
+
+        let result = run_tool_call_loop_with_non_cli_approval_context(
+            &provider,
+            &mut history,
+            &tools_registry,
+            &observer,
+            "mock-provider",
+            "mock-model",
+            0.0,
+            true,
+            Some(&approval_mgr),
+            "telegram",
+            None,
+            &crate::config::MultimodalConfig::default(),
+            4,
+            None,
+            None,
+            None,
+            &[],
+            Some(writer),
+            Some(lineage),
+        )
+        .await
+        .expect("tool loop should complete");
+        assert_eq!(result, "done");
+
+        // Inspect the snapshot — should carry the lineage on iteration 0.
+        let turn_dirs: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.path().is_dir())
+            .collect();
+        assert_eq!(turn_dirs.len(), 1);
+        let snap_file = turn_dirs[0].path().join("000000.json");
+        let body = std::fs::read_to_string(&snap_file).unwrap();
+        let snap: Snapshot = serde_json::from_str(&body).unwrap();
+        assert_eq!(snap.iteration, 0);
+        assert_eq!(snap.parent_turn_id.as_deref(), Some("parent-abc"));
+        assert_eq!(snap.branched_from_iteration, Some(5));
     }
 }

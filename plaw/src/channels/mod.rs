@@ -2977,6 +2977,9 @@ async fn process_channel_message(
                 // (gateway/ws.rs) does. Follow-up PR adds the same
                 // `agent.checkpoint.enabled` plumbing here.
                 None,
+                // Channels never resume (no checkpoint writer means no
+                // snapshots to fork from).
+                None,
             ),
         ) => LlmExecutionResult::Completed(result),
     };
