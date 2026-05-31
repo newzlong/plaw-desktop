@@ -53,6 +53,8 @@ const EXTERNAL_CONTENT_TOOLS: &[&str] = &[
     "browser",
     "http_request",
     "content_search", // search results from user files could also be adversarial
+    "pdf_read",       // PDFs can ship from arbitrary URLs / email / chat — untrusted by default
+    "mcp_call",       // MCP servers (PR #63) are by-definition external processes — every response is untrusted
 ];
 
 /// Check if a tool produces external/untrusted content. Match is by
