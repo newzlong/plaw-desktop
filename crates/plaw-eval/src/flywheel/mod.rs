@@ -9,7 +9,11 @@
 pub mod promoter;
 pub mod reviewer;
 pub mod sampler;
+pub mod trace_ingest;
 
 pub use promoter::{promote, read_promoted_case, PromotionResult};
 pub use reviewer::{list_pending, review, ReviewVerdict};
 pub use sampler::{sample_run, SampleStrategy, SampleSummary};
+pub use trace_ingest::{
+    extract_trace, ingest_trace_from_jsonl, ExtractedTrace, TraceIngestResult,
+};

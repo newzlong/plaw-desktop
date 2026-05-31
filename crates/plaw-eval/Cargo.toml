@@ -33,3 +33,4 @@ tokio = { workspace = true, features = ["test-util"] }
 # because the workspace currently has no other proptest consumer; promote
 # to workspace deps when a second crate needs it.
 proptest = "1.6"
+tempfile = "3"
