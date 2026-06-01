@@ -657,7 +657,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         // `HybridRouter`, `scaffold_for`), only the gateway entry point
         // was missing.
         let intent_routing_enabled = state.config.lock().agent.intent_routing_enabled;
-        if intent_routing_enabled {
+        let classified_intent: Option<crate::agent::intent::Intent> = if intent_routing_enabled {
             let router = crate::agent::intent::HybridRouter::with_llm_fallback(
                 state.provider.clone(),
                 state.model.clone(),
@@ -681,7 +681,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             } else {
                 tracing::debug!(?intent, "intent classified; no scaffold needed");
             }
-        }
+            Some(intent)
+        } else {
+            None
+        };
 
         // Broadcast agent_start event
         let _ = state.event_tx.send(serde_json::json!({
@@ -729,29 +732,39 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
             };
 
-            let loop_fut = run_tool_call_loop_with_non_cli_approval_context(
-                state.provider.as_ref(),
-                &mut history,
-                state.tools_registry_exec.as_ref(),
-                &usage_observer,
-                &provider_label,
-                &state.model,
-                state.temperature,
-                true, // silent - no console output
-                Some(&approval_manager),
-                "webchat",
-                Some(non_cli_approval_context),
-                &state.multimodal,
-                state.max_tool_iterations,
-                Some(cancel_token.clone()),
-                Some(delta_tx),    // delta streaming — enables real-time progress
-                state.hooks.as_deref(), // hooks — fires PreCompact / before_tool_call / on_after_tool_call etc.
-                &[],               // excluded tools
-                checkpoint_writer,
-                // Webchat turns are always fresh — no `plaw resume`
-                // bridging through this path (resume is CLI-only in
-                // Phase 0; future Tauri command will plumb lineage here).
-                None,
+            // Wrap the agent-loop future in `with_turn_intent` so the
+            // Chain-of-Verification post-response hook (and any future
+            // intent-gated subsystem) can read the classified intent via
+            // `crate::agent::loop_::current_turn_intent()` without
+            // changing `run_tool_call_loop`'s 16-argument signature.
+            // `classified_intent = None` outside intent_routing — the
+            // hook sees None and short-circuits to no-op.
+            let loop_fut = crate::agent::loop_::with_turn_intent(
+                classified_intent,
+                run_tool_call_loop_with_non_cli_approval_context(
+                    state.provider.as_ref(),
+                    &mut history,
+                    state.tools_registry_exec.as_ref(),
+                    &usage_observer,
+                    &provider_label,
+                    &state.model,
+                    state.temperature,
+                    true, // silent - no console output
+                    Some(&approval_manager),
+                    "webchat",
+                    Some(non_cli_approval_context),
+                    &state.multimodal,
+                    state.max_tool_iterations,
+                    Some(cancel_token.clone()),
+                    Some(delta_tx),    // delta streaming — enables real-time progress
+                    state.hooks.as_deref(), // hooks — fires PreCompact / before_tool_call / on_after_tool_call etc.
+                    &[],               // excluded tools
+                    checkpoint_writer,
+                    // Webchat turns are always fresh — no `plaw resume`
+                    // bridging through this path (resume is CLI-only in
+                    // Phase 0; future Tauri command will plumb lineage here).
+                    None,
+                ),
             );
             tokio::pin!(loop_fut);
 

@@ -80,6 +80,15 @@ tokio::task_local! {
     static TOOL_LOOP_RESUME_LINEAGE: Option<ResumeLineage>;
 }
 
+tokio::task_local! {
+    /// Classified intent for the current turn, set by callers that
+    /// enable `[agent.intent_routing]`. Read by the Chain-of-Verification
+    /// post-response hook to gate the verifier LLM call on
+    /// `Intent::FactualLookup`. `None` when intent_routing is disabled
+    /// or no scope was set (CLI / direct invocations).
+    static TOOL_LOOP_TURN_INTENT: Option<crate::agent::intent::Intent>;
+}
+
 /// Cross-turn lineage captured at `plaw resume` entry and threaded
 /// to the agent loop's first snapshot write.
 #[derive(Debug, Clone)]
@@ -138,6 +147,29 @@ where
     F: std::future::Future<Output = T>,
 {
     TOOL_LOOP_RESUME_LINEAGE.scope(lineage, fut).await
+}
+
+/// Read the current task's classified intent if a scope has been set.
+/// `None` outside any scope (CLI / direct invocations / intent_routing
+/// disabled). Used by `hooks::builtin::ChainOfVerificationHook` to
+/// gate the post-response verifier on `Intent::FactualLookup`.
+pub fn current_turn_intent() -> Option<crate::agent::intent::Intent> {
+    TOOL_LOOP_TURN_INTENT
+        .try_with(|i| *i)
+        .ok()
+        .flatten()
+}
+
+/// Run `fut` with [`TOOL_LOOP_TURN_INTENT`] set. Caller sites wrap the
+/// agent-loop call (or its `run_tool_call_loop_with_*` wrapper) in this
+/// scope after classifying the user message via `HybridRouter`. Pass
+/// `None` to disable downstream intent-gated behaviour (mirrors the
+/// "no scope" semantics).
+pub async fn with_turn_intent<F, T>(intent: Option<crate::agent::intent::Intent>, fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    TOOL_LOOP_TURN_INTENT.scope(intent, fut).await
 }
 
 /// Run the tool loop with optional non-CLI approval context and

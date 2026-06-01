@@ -198,6 +198,7 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
         agents_ipc: crate::config::AgentsIpcConfig::default(),
         repo_map: crate::config::RepoMapConfig::default(),
         edit_linter: crate::config::EditLinterConfig::default(),
+        chain_of_verification: crate::config::ChainOfVerificationConfig::default(),
         model_support_vision: None,
     };
 
@@ -560,6 +561,7 @@ async fn run_quick_setup_with_home(
         agents_ipc: crate::config::AgentsIpcConfig::default(),
         repo_map: crate::config::RepoMapConfig::default(),
         edit_linter: crate::config::EditLinterConfig::default(),
+        chain_of_verification: crate::config::ChainOfVerificationConfig::default(),
         model_support_vision: None,
     };
 
