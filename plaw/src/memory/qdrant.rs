@@ -363,6 +363,7 @@ impl Memory for QdrantMemory {
                     timestamp: payload.timestamp,
                     session_id: payload.session_id,
                     score: Some(point.score),
+                    ..MemoryEntry::default()
                 })
             })
             .collect();
@@ -419,6 +420,7 @@ impl Memory for QdrantMemory {
                 timestamp: payload.timestamp,
                 session_id: payload.session_id,
                 score: None,
+                ..MemoryEntry::default()
             })
         });
 
@@ -496,6 +498,7 @@ impl Memory for QdrantMemory {
                     timestamp: payload.timestamp,
                     session_id: payload.session_id,
                     score: None,
+                    ..MemoryEntry::default()
                 })
             })
             .collect();
