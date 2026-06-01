@@ -390,6 +390,7 @@ impl EvalRepo {
         Ok(AggregateReport {
             run_id: run_id.to_string(),
             metrics,
+            suite_name: None,
         })
     }
 }

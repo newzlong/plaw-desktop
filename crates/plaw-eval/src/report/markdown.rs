@@ -125,6 +125,73 @@ fn metric_badge(v: MetricVerdict) -> &'static str {
     }
 }
 
+/// One-line grep-friendly summary of a [`ComparisonReport`].
+///
+/// Designed for CI logs: prefix is one of `PASS:` / `FAIL:` / `INCONCLUSIVE:`
+/// for easy regex matching. Used by `plaw-eval check` after the markdown
+/// table — written to stderr so stdout markdown stays pipeable.
+pub fn render_check_summary_line(report: &ComparisonReport) -> String {
+    let prefix = match report.verdict {
+        GateVerdict::Pass => "PASS",
+        GateVerdict::Fail => "FAIL",
+        GateVerdict::Inconclusive => "INCONCLUSIVE",
+    };
+    let metric_count = report.metrics.len();
+    let failed = report
+        .metrics
+        .iter()
+        .filter(|m| matches!(m.verdict, MetricVerdict::Fail))
+        .count();
+    let inconclusive = report
+        .metrics
+        .iter()
+        .filter(|m| matches!(m.verdict, MetricVerdict::Inconclusive))
+        .count();
+
+    let coverage = if report.baseline_case_count == 0 {
+        // File-baseline mode has no per-case data.
+        format!("{} candidate cases", report.candidate_case_count)
+    } else {
+        format!(
+            "{}/{} cases paired",
+            report.paired_case_count, report.baseline_case_count
+        )
+    };
+
+    match report.verdict {
+        GateVerdict::Pass => format!(
+            "{prefix}: {metric_count} metrics, {coverage}, ε={:.4}",
+            report.epsilon
+        ),
+        GateVerdict::Fail => {
+            let first_fail = report
+                .metrics
+                .iter()
+                .find(|m| matches!(m.verdict, MetricVerdict::Fail));
+            match first_fail {
+                Some(m) => {
+                    let delta = match (&m.baseline, &m.candidate) {
+                        (Some(b), Some(c)) => format!(" Δ={:+.4}", c.mean - b.mean),
+                        _ => String::new(),
+                    };
+                    format!(
+                        "{prefix}: {} ({} regressed, {} inconclusive){delta}, ε={:.4}",
+                        m.metric, failed, inconclusive, report.epsilon
+                    )
+                }
+                None => format!(
+                    "{prefix}: {failed} metrics regressed, ε={:.4}",
+                    report.epsilon
+                ),
+            }
+        }
+        GateVerdict::Inconclusive => format!(
+            "{prefix}: {inconclusive}/{metric_count} metrics inconclusive, {coverage}, ε={:.4}",
+            report.epsilon
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,6 +256,7 @@ mod tests {
         let report = AggregateReport {
             run_id: "r1".into(),
             metrics,
+            suite_name: None,
         };
         let md = render_aggregate(&report);
         let a_pos = md.find("a_metric").unwrap();
@@ -221,5 +289,25 @@ mod tests {
         assert_eq!(metric_badge(MetricVerdict::Pass), "✅");
         assert_eq!(metric_badge(MetricVerdict::Fail), "❌");
         assert_eq!(metric_badge(MetricVerdict::Inconclusive), "⚠️");
+    }
+
+    #[test]
+    fn summary_line_pass_format_is_grep_friendly() {
+        let baseline: Vec<_> = (0..30).map(|i| case(&format!("c{i}"), 0.80)).collect();
+        let candidate = baseline.clone();
+        let report = compare_in_memory("base", &baseline, "cand", &candidate, 0.02, 0.05);
+        let line = render_check_summary_line(&report);
+        assert!(line.starts_with("PASS: "), "got {line}");
+        assert!(line.contains("ε=0.0200"));
+    }
+
+    #[test]
+    fn summary_line_fail_format_names_failing_metric() {
+        let baseline: Vec<_> = (0..30).map(|i| case(&format!("c{i}"), 0.80)).collect();
+        let candidate: Vec<_> = (0..30).map(|i| case(&format!("c{i}"), 0.40)).collect();
+        let report = compare_in_memory("base", &baseline, "cand", &candidate, 0.02, 0.05);
+        let line = render_check_summary_line(&report);
+        assert!(line.starts_with("FAIL: "), "got {line}");
+        assert!(line.contains("g_eval"));
     }
 }

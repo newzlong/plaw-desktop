@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::runner::aggregate::{aggregate, DEFAULT_AGGREGATE_ALPHA};
 use crate::stats::paired_difference;
-use crate::storage::{CaseResult, EvalRepo, MetricAggregate};
+use crate::storage::{AggregateReport, CaseResult, EvalRepo, MetricAggregate};
 
 /// Default epsilon — 1 percentage-point tolerance on regressions.
 pub const DEFAULT_EPSILON: f64 = 0.01;
@@ -205,6 +205,98 @@ fn compute_paired(
     })
 }
 
+/// Compare a fresh candidate run against a baseline loaded from a JSON
+/// aggregate file (no per-case data on the baseline side).
+///
+/// Used by `plaw-eval check --baseline <PATH>` for the CI happy path where
+/// the baseline is a small JSON artifact stored next to the code rather
+/// than a row in the local SQLite DB. Paired-diff CI cannot be computed
+/// because the baseline has no per-case data — every `MetricComparison`
+/// row will have `paired_diff: None`. The per-metric verdict still uses
+/// the `decide()` lower-CI rule, which only needs `MetricAggregate`.
+///
+/// Coverage downgrade: if candidate's metric `n` is < 50% of baseline's
+/// `n` for any metric, the overall verdict is downgraded to Inconclusive
+/// (catches "judge silently died and dropped most rows" failure mode).
+pub fn compare_against_aggregate(
+    baseline_agg: &AggregateReport,
+    candidate_run_id: &str,
+    candidate_cases: &[CaseResult],
+    epsilon: f64,
+    alpha: f64,
+) -> ComparisonReport {
+    let candidate =
+        crate::runner::aggregate::aggregate_in_memory(candidate_run_id, candidate_cases, alpha);
+
+    let mut metric_names: std::collections::BTreeSet<String> =
+        baseline_agg.metrics.keys().cloned().collect();
+    metric_names.extend(candidate.metrics.keys().cloned());
+
+    let mut comparisons = Vec::with_capacity(metric_names.len());
+    let mut overall = GateVerdict::Pass;
+    let mut coverage_downgrade_reason: Option<String> = None;
+
+    for name in metric_names {
+        let baseline_m = baseline_agg.metrics.get(&name).cloned();
+        let candidate_m = candidate.metrics.get(&name).cloned();
+        let (verdict, reason) = decide(&baseline_m, &candidate_m, epsilon);
+
+        // Coverage check per metric: if candidate has < 50% of baseline n,
+        // record a downgrade reason. Only meaningful when BOTH sides have
+        // the metric — otherwise `decide` already returned Inconclusive.
+        if let (Some(b), Some(c)) = (&baseline_m, &candidate_m) {
+            if b.n > 0 && c.n * 2 < b.n {
+                coverage_downgrade_reason.get_or_insert_with(|| {
+                    format!(
+                        "metric {name}: candidate n={} < 50% of baseline n={}",
+                        c.n, b.n
+                    )
+                });
+            }
+        }
+
+        if matches!(verdict, MetricVerdict::Fail) {
+            overall = GateVerdict::Fail;
+        } else if matches!(verdict, MetricVerdict::Inconclusive)
+            && matches!(overall, GateVerdict::Pass)
+        {
+            overall = GateVerdict::Inconclusive;
+        }
+
+        comparisons.push(MetricComparison {
+            metric: name,
+            baseline: baseline_m,
+            candidate: candidate_m,
+            paired_diff: None,
+            verdict,
+            reason,
+        });
+    }
+
+    if let Some(reason) = coverage_downgrade_reason {
+        if matches!(overall, GateVerdict::Pass) {
+            overall = GateVerdict::Inconclusive;
+        }
+        if let Some(first) = comparisons.first_mut() {
+            first.reason = format!("{}; coverage warning — {}", first.reason, reason);
+        }
+    }
+
+    let candidate_case_count = candidate_cases.iter().filter(|c| c.error.is_none()).count();
+
+    ComparisonReport {
+        baseline_run_id: baseline_agg.run_id.clone(),
+        candidate_run_id: candidate_run_id.to_string(),
+        epsilon,
+        alpha,
+        metrics: comparisons,
+        verdict: overall,
+        paired_case_count: 0,
+        baseline_case_count: 0,
+        candidate_case_count,
+    }
+}
+
 fn decide(
     baseline: &Option<MetricAggregate>,
     candidate: &Option<MetricAggregate>,
@@ -379,5 +471,76 @@ mod tests {
         let m = &report.metrics[0];
         assert!(m.paired_diff.is_none());
         assert_eq!(m.verdict, MetricVerdict::Pass); // independent diff still works
+    }
+
+    fn agg_with(metric: &str, mean: f64, n: usize) -> AggregateReport {
+        let mut metrics = HashMap::new();
+        metrics.insert(
+            metric.into(),
+            MetricAggregate {
+                mean,
+                stderr: 0.0,
+                stderr_clustered: None,
+                ci_lower: mean,
+                ci_upper: mean,
+                n,
+                n_clusters: None,
+            },
+        );
+        AggregateReport {
+            run_id: "baseline-r1".into(),
+            metrics,
+            suite_name: Some("fixture".into()),
+        }
+    }
+
+    #[test]
+    fn compare_against_aggregate_pass_when_candidate_clean() {
+        let baseline = agg_with("g_eval", 0.80, 30);
+        let candidate: Vec<_> = (0..30)
+            .map(|i| case(&format!("c{i}"), "g_eval", 0.80))
+            .collect();
+        let report = compare_against_aggregate(&baseline, "cand", &candidate, 0.02, 0.05);
+        assert_eq!(report.verdict, GateVerdict::Pass);
+        assert_eq!(report.paired_case_count, 0);
+        for m in &report.metrics {
+            assert!(
+                m.paired_diff.is_none(),
+                "paired diff must be None for file baseline"
+            );
+        }
+    }
+
+    #[test]
+    fn compare_against_aggregate_fail_when_candidate_regresses() {
+        let baseline = agg_with("g_eval", 0.80, 30);
+        let candidate: Vec<_> = (0..30)
+            .map(|i| case(&format!("c{i}"), "g_eval", 0.40))
+            .collect();
+        let report = compare_against_aggregate(&baseline, "cand", &candidate, 0.02, 0.05);
+        assert_eq!(report.verdict, GateVerdict::Fail);
+    }
+
+    #[test]
+    fn compare_against_aggregate_inconclusive_when_metric_missing() {
+        let baseline = agg_with("g_eval", 0.80, 30);
+        let candidate: Vec<_> = (0..30)
+            .map(|i| case(&format!("c{i}"), "tool_selection_f1", 0.80))
+            .collect();
+        let report = compare_against_aggregate(&baseline, "cand", &candidate, 0.02, 0.05);
+        assert_eq!(report.verdict, GateVerdict::Inconclusive);
+    }
+
+    #[test]
+    fn compare_against_aggregate_downgrades_on_low_coverage() {
+        let baseline = agg_with("g_eval", 0.80, 100);
+        // Only 30 candidate cases — well under 50% coverage.
+        let candidate: Vec<_> = (0..30)
+            .map(|i| case(&format!("c{i}"), "g_eval", 0.80))
+            .collect();
+        let report = compare_against_aggregate(&baseline, "cand", &candidate, 0.02, 0.05);
+        assert_eq!(report.verdict, GateVerdict::Inconclusive);
+        let m = &report.metrics[0];
+        assert!(m.reason.contains("coverage warning"));
     }
 }
