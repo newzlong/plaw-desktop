@@ -65,6 +65,12 @@ pub struct MetricScore {
 pub struct AggregateReport {
     pub run_id: String,
     pub metrics: HashMap<String, MetricAggregate>,
+    /// Suite name this aggregate covers. Stamped at write time so
+    /// file-baseline mode can refuse cross-suite comparisons. `None` on
+    /// JSON written by older plaw-eval versions — callers fall back to
+    /// "unknown" with a stderr warning.
+    #[serde(default)]
+    pub suite_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

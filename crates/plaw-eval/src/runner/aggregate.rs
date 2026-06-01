@@ -62,6 +62,7 @@ pub fn aggregate_in_memory(run_id: &str, cases: &[CaseResult], alpha: f64) -> Ag
     AggregateReport {
         run_id: run_id.to_string(),
         metrics,
+        suite_name: None,
     }
 }
 

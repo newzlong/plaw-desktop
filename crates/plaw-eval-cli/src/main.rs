@@ -12,9 +12,10 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use plaw_eval::judges::{api_key_env_var, build_from_spec};
 use plaw_eval::report::{
-    compare_runs, extract_failing_rows, render_aggregate_md, render_comparison_md,
-    render_pr_comment, write_aggregate_json, write_comparison_json, write_comparison_sarif,
-    GateVerdict, DEFAULT_EPSILON,
+    compare_against_aggregate, compare_runs, extract_failing_rows, read_aggregate_json,
+    render_aggregate_md, render_check_summary_line, render_comparison_md, render_pr_comment,
+    write_aggregate_json, write_comparison_json, write_comparison_sarif, GateVerdict,
+    DEFAULT_EPSILON,
 };
 use plaw_eval::runner::{
     aggregate, execute, PlawClient, RunnerConfig, DEFAULT_AGGREGATE_ALPHA, DEFAULT_TIMEOUT,
@@ -158,6 +159,75 @@ enum Command {
         /// Write a SARIF 2.1.0 report to this path (for GitHub Code Scanning).
         #[arg(long)]
         sarif: Option<PathBuf>,
+    },
+
+    /// Run a suite fresh and gate the result against a baseline. Exits 0
+    /// on Pass, 1 on Fail, 2 on Inconclusive (CI-friendly variant of
+    /// `compare`). Baseline accepts a run_id, `latest`, `previous`, or a
+    /// path to a JSON aggregate file previously emitted via `run --output`.
+    Check {
+        /// Suite to run (single suite only; multi-suite deferred).
+        #[arg(long)]
+        suite: String,
+
+        /// Baseline reference: a run_id UUID, `latest`, `previous`, or a
+        /// path to a `.json` aggregate file. Required — no default.
+        #[arg(long)]
+        baseline: String,
+
+        /// Sample size (number of cases). Defaults to the full suite.
+        #[arg(long)]
+        n: Option<usize>,
+
+        /// Repetitions per case (each case scored N times to estimate
+        /// per-case variance).
+        #[arg(long, default_value_t = 1)]
+        repetitions: usize,
+
+        /// `provider:model` override for the judge (env: PLAW_EVAL_JUDGE).
+        #[arg(long, env = "PLAW_EVAL_JUDGE")]
+        judge: Option<String>,
+
+        /// Deterministic case sampling seed.
+        #[arg(long)]
+        seed: Option<u64>,
+
+        /// Gate epsilon — tolerance on the normalised [0,1] metric scale.
+        /// Default 0.02 (2 percentage points). At n≈5 reps × 50 cases
+        /// per-metric SE is ~0.01-0.02, so the legacy `compare` default
+        /// of 0.01 false-fails on noise. For G-Eval raw 1-5, 1 raw point
+        /// ≈ 0.20 normalised.
+        #[arg(long, default_value_t = 0.02)]
+        epsilon: f64,
+
+        /// Significance level for confidence intervals.
+        #[arg(long, default_value_t = DEFAULT_AGGREGATE_ALPHA)]
+        alpha: f64,
+
+        /// Treat Inconclusive as Fail in the process exit code. CI uses
+        /// this to refuse a merge when a metric only appears on one side
+        /// or coverage drops below 50%.
+        #[arg(long)]
+        strict: bool,
+
+        /// Write the candidate's `AggregateReport` JSON here so this run
+        /// can become a future baseline file.
+        #[arg(long)]
+        output: Option<PathBuf>,
+
+        /// Write a Markdown PR-comment body to this path.
+        #[arg(long)]
+        pr_comment: Option<PathBuf>,
+
+        /// Write a SARIF 2.1.0 report to this path (GitHub Code Scanning).
+        #[arg(long)]
+        sarif: Option<PathBuf>,
+
+        /// Escape hatch: allow file-baseline comparison even when the
+        /// stamped `suite_name` does not match `--suite`. Default is to
+        /// refuse (exit 64) to catch accidental cross-suite gating.
+        #[arg(long)]
+        allow_cross_suite: bool,
     },
 
     /// Compute the sample size needed to detect an effect.
@@ -398,6 +468,42 @@ async fn main() -> Result<()> {
             output.as_deref(),
             sarif.as_deref(),
         ),
+        Command::Check {
+            suite,
+            baseline,
+            n,
+            repetitions,
+            judge,
+            seed,
+            epsilon,
+            alpha,
+            strict,
+            output,
+            pr_comment,
+            sarif,
+            allow_cross_suite,
+        } => {
+            cmd_check(
+                &db_path,
+                &suites_dir,
+                cli.ws_url.as_deref(),
+                cli.ws_bearer.as_deref(),
+                &suite,
+                &baseline,
+                n,
+                repetitions,
+                judge.as_deref(),
+                seed,
+                epsilon,
+                alpha,
+                strict,
+                output.as_deref(),
+                pr_comment.as_deref(),
+                sarif.as_deref(),
+                allow_cross_suite,
+            )
+            .await
+        }
         Command::Power {
             effect,
             sigma,
@@ -519,6 +625,20 @@ fn resolve_run_id(repo: &EvalRepo, raw: &str, suite: Option<&str>) -> Result<Str
         return baseline
             .map(|r| r.id)
             .ok_or_else(|| anyhow!("no finished runs available for `latest`"));
+    }
+    if raw == "previous" {
+        // Penultimate finished run for the given suite. Used by
+        // `plaw-eval check --baseline previous` to compare against the
+        // last finished run BEFORE the current candidate.
+        let runs = repo.list_runs(suite, 2)?;
+        let prev = runs
+            .into_iter()
+            .filter(|r| r.finished_at.is_some())
+            .nth(1)
+            .ok_or_else(|| {
+                anyhow!("no penultimate finished run available for `previous` (need ≥2)")
+            })?;
+        return Ok(prev.id);
     }
     Ok(raw.to_string())
 }
@@ -817,6 +937,238 @@ fn cmd_compare(
     if matches!(report.verdict, GateVerdict::Fail) {
         // CI gate: surface a non-zero exit so callers can block merges.
         std::process::exit(1);
+    }
+    Ok(())
+}
+
+// ---------- check ----------
+
+/// Exit codes mirror SWE-bench CI conventions:
+///   0 = Pass / no regression
+///   1 = Fail (regression detected per gate rule, or --strict Inconclusive)
+///   2 = Inconclusive (without --strict)
+///   64 = bad args (suite not found, baseline unparseable, cross-suite mismatch)
+///   65 = IO / infra error (DB locked, judge API down, etc.)
+const CHECK_EXIT_PASS: i32 = 0;
+const CHECK_EXIT_FAIL: i32 = 1;
+const CHECK_EXIT_INCONCLUSIVE: i32 = 2;
+const CHECK_EXIT_BAD_ARGS: i32 = 64;
+
+enum BaselineSource {
+    DbRun(String),
+    JsonFile {
+        path: PathBuf,
+        report: plaw_eval::storage::AggregateReport,
+    },
+}
+
+fn resolve_baseline_ref(
+    repo: &EvalRepo,
+    raw: &str,
+    suite: Option<&str>,
+) -> Result<BaselineSource> {
+    let as_path = Path::new(raw);
+    let is_json_file = as_path.is_file()
+        && as_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("json"));
+    if is_json_file {
+        let report = read_aggregate_json(as_path)
+            .with_context(|| format!("loading baseline file {}", as_path.display()))?;
+        return Ok(BaselineSource::JsonFile {
+            path: as_path.to_path_buf(),
+            report,
+        });
+    }
+    let id = resolve_run_id(repo, raw, suite)?;
+    Ok(BaselineSource::DbRun(id))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn cmd_check(
+    db_path: &Path,
+    suites_dir: &Path,
+    ws_url: Option<&str>,
+    ws_bearer: Option<&str>,
+    suite_name: &str,
+    baseline_raw: &str,
+    n: Option<usize>,
+    repetitions: usize,
+    judge_override: Option<&str>,
+    seed: Option<u64>,
+    epsilon: f64,
+    alpha: f64,
+    strict: bool,
+    output: Option<&Path>,
+    pr_comment_path: Option<&Path>,
+    sarif_path: Option<&Path>,
+    allow_cross_suite: bool,
+) -> Result<()> {
+    let repo = Arc::new(open_repo(db_path)?);
+
+    // 1. Resolve the baseline: DB run-id (UUID / latest / previous) OR file.
+    let baseline = match resolve_baseline_ref(&repo, baseline_raw, Some(suite_name)) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error resolving --baseline: {e:#}");
+            std::process::exit(CHECK_EXIT_BAD_ARGS);
+        }
+    };
+
+    // 2. Cross-suite refusal for file baselines.
+    if let BaselineSource::JsonFile { ref report, ref path } = baseline {
+        match report.suite_name.as_deref() {
+            Some(stamped) if stamped != suite_name && !allow_cross_suite => {
+                eprintln!(
+                    "error: baseline file {} stamps suite '{stamped}' but --suite is '{suite_name}'. \
+                     Pass --allow-cross-suite to override.",
+                    path.display()
+                );
+                std::process::exit(CHECK_EXIT_BAD_ARGS);
+            }
+            None => {
+                eprintln!(
+                    "warning: baseline file {} has no `suite_name` (older plaw-eval format) — proceeding without cross-suite check.",
+                    path.display()
+                );
+            }
+            _ => {}
+        }
+    }
+
+    // 3. Run the suite fresh — mirrors cmd_run's per-suite block.
+    let suite_path = suites_dir.join(suite_name).join("cases.toml");
+    let suite = load_suite(&suite_path)?;
+    println!(
+        "check: running suite '{}' ({} cases)",
+        suite.name,
+        suite.cases.len()
+    );
+
+    let judge_spec_override = judge_override
+        .map(parse_judge_override)
+        .transpose()
+        .context("parsing --judge override")?;
+    let ws = resolve_ws_url(ws_url);
+    let plaw = PlawClient::new(&ws);
+    let plaw = if let Some(b) = ws_bearer {
+        plaw.with_bearer(b)
+    } else {
+        plaw
+    }
+    .with_timeout(DEFAULT_TIMEOUT);
+    let effective_judge_spec = judge_spec_override
+        .clone()
+        .unwrap_or_else(|| suite.default_judge.clone());
+    let raw_judge = build_from_spec(&effective_judge_spec).with_context(|| {
+        format!(
+            "building judge for suite '{}' (provider={}, model={})",
+            suite.name, effective_judge_spec.provider, effective_judge_spec.model
+        )
+    })?;
+    let retried: std::sync::Arc<dyn plaw_eval::judges::JudgeClient> =
+        std::sync::Arc::new(plaw_eval::judges::RetryingJudgeClient::new(raw_judge, 3));
+    let cache = std::sync::Arc::new(plaw_eval::runner::cache::JudgeCache::new(repo.clone()));
+    let judge: std::sync::Arc<dyn plaw_eval::judges::JudgeClient> =
+        std::sync::Arc::new(plaw_eval::judges::CachedJudgeClient::new(retried, cache));
+
+    let cancel = CancellationToken::new();
+    {
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                tracing::warn!("Ctrl-C received, cancelling run");
+                cancel.cancel();
+            }
+        });
+    }
+    let mut cfg = RunnerConfig::new(suite.clone(), plaw, repo.clone());
+    cfg.cancel = cancel.clone();
+    cfg.show_progress = true;
+    cfg.sample_n = n;
+    cfg.sample_seed = seed;
+    cfg.repetitions = repetitions.max(1);
+    cfg.model_version = effective_judge_spec.model.clone();
+    let summary = execute(cfg).await?;
+    if !summary.cancelled {
+        let _ = plaw_eval::metrics::runner::score_run_with_concurrency_and_progress(
+            &repo,
+            &summary.run_id,
+            &suite,
+            &*judge,
+            plaw_eval::metrics::runner::DEFAULT_SCORING_CONCURRENCY,
+            true,
+        )
+        .await
+        .with_context(|| format!("scoring run {}", summary.run_id))?;
+    }
+
+    let mut candidate_agg = aggregate(&repo, &summary.run_id, alpha)?;
+    candidate_agg.suite_name = Some(suite.name.clone());
+    let candidate_cases = repo.load_case_results(&summary.run_id)?;
+
+    // 4. Build the ComparisonReport — paired analysis for DB baseline,
+    // independent analysis for file baseline.
+    let report = match &baseline {
+        BaselineSource::DbRun(baseline_id) => {
+            compare_runs(&repo, baseline_id, &summary.run_id, epsilon, alpha)?
+        }
+        BaselineSource::JsonFile { report: agg, .. } => {
+            compare_against_aggregate(agg, &summary.run_id, &candidate_cases, epsilon, alpha)
+        }
+    };
+
+    println!("{}", render_comparison_md(&report));
+    eprintln!("{}", render_check_summary_line(&report));
+
+    if let Some(path) = output {
+        write_aggregate_json(&candidate_agg, path)?;
+        println!("wrote candidate aggregate JSON to {}", path.display());
+    }
+    if let Some(path) = pr_comment_path {
+        let baseline_cases = if let BaselineSource::DbRun(ref id) = baseline {
+            repo.load_case_results(id).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let rows = extract_failing_rows(&report, &baseline_cases, &candidate_cases, 10);
+        let body = render_pr_comment(&report, &rows);
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating parent dir for {}", path.display()))?;
+            }
+        }
+        std::fs::write(path, body)
+            .with_context(|| format!("writing PR comment to {}", path.display()))?;
+        println!("wrote PR comment to {}", path.display());
+    }
+    if let Some(path) = sarif_path {
+        write_comparison_sarif(&report, path)?;
+        println!("wrote SARIF report to {}", path.display());
+    }
+    // Also persist a comparison JSON when -o was used so CI can archive
+    // both candidate aggregate AND comparison verdict.
+    if let Some(path) = output {
+        let cmp_path = path.with_extension("comparison.json");
+        write_comparison_json(&report, &cmp_path)?;
+        println!("wrote comparison JSON to {}", cmp_path.display());
+    }
+
+    let code = match report.verdict {
+        GateVerdict::Pass => CHECK_EXIT_PASS,
+        GateVerdict::Fail => CHECK_EXIT_FAIL,
+        GateVerdict::Inconclusive => {
+            if strict {
+                CHECK_EXIT_FAIL
+            } else {
+                CHECK_EXIT_INCONCLUSIVE
+            }
+        }
+    };
+    if code != CHECK_EXIT_PASS {
+        std::process::exit(code);
     }
     Ok(())
 }
