@@ -282,6 +282,11 @@ pub struct Config {
     #[serde(default)]
     pub agents_ipc: AgentsIpcConfig,
 
+    /// Repository map configuration (`[repo_map]`). Aider-style code context
+    /// injected once per WS session when enabled.
+    #[serde(default)]
+    pub repo_map: RepoMapConfig,
+
     /// Vision support override for the active provider/model.
     /// - `None` (default): use provider's built-in default
     /// - `Some(true)`: force vision support on (e.g. Ollama running llava)
@@ -865,6 +870,49 @@ impl Default for CheckpointConfig {
         Self {
             enabled: false,
             dir: default_checkpoint_dir(),
+        }
+    }
+}
+
+/// Repository map configuration (`[repo_map]`).
+///
+/// When `enabled = true`, the WebSocket gateway builds an Aider-style
+/// repo-map (tree-sitter + weighted PageRank + token-budget render) once per
+/// session and injects the rendered text as a `[Repository map]` system
+/// message above the user turns. Phase 0 (PR #70): build-once per WS session,
+/// no mtime polling, no sqlite persistence. Refresh strategies and library/CLI
+/// parity defer to follow-up PRs. Default `enabled = false`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RepoMapConfig {
+    /// When `true`, build + inject a repository map at the start of each WS
+    /// session. The build runs once on the first user message (via
+    /// `tokio::task::spawn_blocking`) and the rendered text is cached for the
+    /// rest of the session.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Token budget for the rendered map. Aider's empirical default is 1024.
+    /// `0` effectively disables injection while leaving the feature enabled
+    /// (useful for staged rollout).
+    #[serde(default = "default_repo_map_max_tokens")]
+    pub max_tokens: usize,
+    /// Optional override for the repo root walked by the parser. When `None`,
+    /// the session uses `Config::workspace_dir`. For the desktop product,
+    /// `workspace_dir` points at `plaw-data/` which is rarely the right repo;
+    /// set this to the user's project directory.
+    #[serde(default)]
+    pub root: Option<PathBuf>,
+}
+
+fn default_repo_map_max_tokens() -> usize {
+    1024
+}
+
+impl Default for RepoMapConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_tokens: default_repo_map_max_tokens(),
+            root: None,
         }
     }
 }
@@ -4169,6 +4217,7 @@ impl Default for Config {
             query_classification: QueryClassificationConfig::default(),
             transcription: TranscriptionConfig::default(),
             agents_ipc: AgentsIpcConfig::default(),
+            repo_map: RepoMapConfig::default(),
             model_support_vision: None,
         }
     }
@@ -6238,6 +6287,7 @@ default_temperature = 0.7
             hardware: HardwareConfig::default(),
             transcription: TranscriptionConfig::default(),
             agents_ipc: AgentsIpcConfig::default(),
+            repo_map: RepoMapConfig::default(),
             model_support_vision: None,
         };
 
@@ -6612,6 +6662,7 @@ tool_dispatcher = "xml"
             hardware: HardwareConfig::default(),
             transcription: TranscriptionConfig::default(),
             agents_ipc: AgentsIpcConfig::default(),
+            repo_map: RepoMapConfig::default(),
             model_support_vision: None,
         };
 
@@ -9516,5 +9567,38 @@ baseline_syscalls = ["read", "write", "openat", "close"]
         config
             .validate()
             .expect("disabled coordination should allow empty lead agent");
+    }
+
+    #[test]
+    async fn repo_map_config_defaults_to_disabled() {
+        let cfg = Config::default();
+        assert!(!cfg.repo_map.enabled, "repo_map must default to disabled");
+        assert_eq!(cfg.repo_map.max_tokens, 1024);
+        assert!(cfg.repo_map.root.is_none());
+    }
+
+    #[test]
+    async fn repo_map_config_round_trips_through_toml() {
+        let toml_src = r#"
+enabled = true
+max_tokens = 2048
+root = "/tmp/my-project"
+"#;
+        let parsed: RepoMapConfig = toml::from_str(toml_src).expect("toml parse");
+        assert!(parsed.enabled);
+        assert_eq!(parsed.max_tokens, 2048);
+        assert_eq!(
+            parsed.root.as_deref(),
+            Some(std::path::Path::new("/tmp/my-project"))
+        );
+    }
+
+    #[test]
+    async fn repo_map_config_partial_toml_fills_defaults() {
+        // Only `enabled` set — the other two fields fall back to their defaults.
+        let parsed: RepoMapConfig = toml::from_str("enabled = true\n").expect("toml parse");
+        assert!(parsed.enabled);
+        assert_eq!(parsed.max_tokens, 1024);
+        assert!(parsed.root.is_none());
     }
 }

@@ -4819,6 +4819,7 @@ dependencies = [
  "opentelemetry_sdk",
  "parking_lot",
  "pdf-extract",
+ "plaw-repo-map",
  "postgres",
  "probe-rs",
  "prometheus",
