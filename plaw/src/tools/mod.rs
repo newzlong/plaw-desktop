@@ -31,6 +31,7 @@ pub mod cron_runs;
 pub mod cron_update;
 pub mod delegate;
 pub mod delegate_coordination_status;
+pub mod edit_linter;
 pub mod file_edit;
 pub mod file_read;
 pub mod file_write;
@@ -368,9 +369,14 @@ fn all_tools_impl(
     }
 
     if has_filesystem_access {
+        let edit_linter_cfg = Arc::new(root_config.edit_linter.clone());
         tool_arcs.push(Arc::new(FileReadTool::new(security.clone())));
-        tool_arcs.push(Arc::new(FileWriteTool::new(security.clone())));
-        tool_arcs.push(Arc::new(FileEditTool::new(security.clone())));
+        tool_arcs.push(Arc::new(
+            FileWriteTool::new(security.clone()).with_edit_linter(edit_linter_cfg.clone()),
+        ));
+        tool_arcs.push(Arc::new(
+            FileEditTool::new(security.clone()).with_edit_linter(edit_linter_cfg.clone()),
+        ));
         tool_arcs.push(Arc::new(ApplyPatchTool::new()));
         tool_arcs.push(Arc::new(GlobSearchTool::new(security.clone())));
         tool_arcs.push(Arc::new(ContentSearchTool::new(security.clone())));

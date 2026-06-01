@@ -1,5 +1,7 @@
+use super::edit_linter::{self, Decision};
 use super::file_write::is_protected_config_path;
 use super::traits::{Tool, ToolResult};
+use crate::config::EditLinterConfig;
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use serde_json::json;
@@ -13,11 +15,24 @@ use std::sync::Arc;
 /// the matched text. Security checks mirror [`super::file_write::FileWriteTool`].
 pub struct FileEditTool {
     security: Arc<SecurityPolicy>,
+    edit_linter: Arc<EditLinterConfig>,
 }
 
 impl FileEditTool {
     pub fn new(security: Arc<SecurityPolicy>) -> Self {
-        Self { security }
+        Self {
+            security,
+            edit_linter: Arc::new(EditLinterConfig::default()),
+        }
+    }
+
+    /// Override the edit-linter config (e.g. from `[edit_linter]` in
+    /// `config.toml`). When not called, the tool uses
+    /// [`EditLinterConfig::default`] which has `mode = warn` enabled.
+    #[must_use]
+    pub fn with_edit_linter(mut self, cfg: Arc<EditLinterConfig>) -> Self {
+        self.edit_linter = cfg;
+        self
     }
 }
 
@@ -46,6 +61,10 @@ impl Tool for FileEditTool {
                 "new_string": {
                     "type": "string",
                     "description": "The replacement text (empty string to delete the matched text)"
+                },
+                "skip_lint": {
+                    "type": "boolean",
+                    "description": "When true, bypass the [edit_linter] tree-sitter parse check for this one edit."
                 }
             },
             "required": ["path", "old_string", "new_string"]
@@ -68,6 +87,11 @@ impl Tool for FileEditTool {
             .get("new_string")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'new_string' parameter"))?;
+
+        let skip_lint = args
+            .get("skip_lint")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         if old_string.is_empty() {
             return Ok(ToolResult {
@@ -219,15 +243,43 @@ impl Tool for FileEditTool {
 
         let new_content = content.replacen(old_string, new_string, 1);
 
+        // Edit-linter gate. Pass the PRE-edit content so block-mode applies
+        // the same-or-fewer-errors exception — refactor steps that don't
+        // worsen parse still proceed even when the file already had errors.
+        let lint_note = match edit_linter::evaluate(
+            &self.edit_linter,
+            path,
+            &new_content,
+            Some(&content),
+            skip_lint,
+        ) {
+            Decision::Allow => None,
+            Decision::Warn(note) => Some(note),
+            Decision::Block(msg) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(msg),
+                });
+            }
+        };
+
         match tokio::fs::write(&resolved_target, &new_content).await {
-            Ok(()) => Ok(ToolResult {
-                success: true,
-                output: format!(
+            Ok(()) => {
+                let mut output = format!(
                     "Edited {path}: replaced 1 occurrence ({} bytes)",
                     new_content.len()
-                ),
-                error: None,
-            }),
+                );
+                if let Some(note) = lint_note {
+                    output.push_str("\n[lint] ");
+                    output.push_str(&note);
+                }
+                Ok(ToolResult {
+                    success: true,
+                    output,
+                    error: None,
+                })
+            }
             Err(e) => Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -698,6 +750,140 @@ mod tests {
             .unwrap();
         assert!(!result.success);
         assert!(result.error.as_ref().unwrap().contains("not allowed"));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    fn linter_cfg(mode: crate::config::EditLinterMode) -> Arc<EditLinterConfig> {
+        Arc::new(EditLinterConfig {
+            enabled: true,
+            mode,
+            ..EditLinterConfig::default()
+        })
+    }
+
+    #[tokio::test]
+    async fn file_edit_block_allows_refactor_step_when_pre_already_broken() {
+        let dir = std::env::temp_dir().join(format!(
+            "plaw_test_edit_lint_refactor_{}",
+            std::process::id()
+        ));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        // Pre-existing file has parse errors.
+        let path = dir.join("wip.rs");
+        tokio::fs::write(&path, "fn alpha( {\nfn beta() {}\n")
+            .await
+            .unwrap();
+
+        // Edit just renames `beta` → `gamma`. Errors unchanged.
+        let tool = FileEditTool::new(test_security(dir.clone()))
+            .with_edit_linter(linter_cfg(crate::config::EditLinterMode::Block));
+        let result = tool
+            .execute(json!({
+                "path": "wip.rs",
+                "old_string": "fn beta() {}",
+                "new_string": "fn gamma() {}"
+            }))
+            .await
+            .unwrap();
+        assert!(
+            result.success,
+            "refactor step that does not worsen parse must proceed under block mode: {:?}",
+            result.error
+        );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn file_edit_block_rejects_worsening_edit() {
+        let dir = std::env::temp_dir().join(format!(
+            "plaw_test_edit_lint_worsen_{}",
+            std::process::id()
+        ));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        // Clean file.
+        let path = dir.join("clean.rs");
+        tokio::fs::write(&path, "pub fn foo() {}\n").await.unwrap();
+
+        // Edit deletes the closing brace, making parse worse.
+        let tool = FileEditTool::new(test_security(dir.clone()))
+            .with_edit_linter(linter_cfg(crate::config::EditLinterMode::Block));
+        let result = tool
+            .execute(json!({
+                "path": "clean.rs",
+                "old_string": "pub fn foo() {}",
+                "new_string": "pub fn foo() {"
+            }))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("edit_linter blocked"));
+
+        // File NOT modified
+        let after = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(after, "pub fn foo() {}\n");
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn file_edit_warn_appends_lint_note() {
+        let dir = std::env::temp_dir().join(format!(
+            "plaw_test_edit_lint_warn_{}",
+            std::process::id()
+        ));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("clean.rs");
+        tokio::fs::write(&path, "pub fn foo() {}\n").await.unwrap();
+
+        let tool = FileEditTool::new(test_security(dir.clone()))
+            .with_edit_linter(linter_cfg(crate::config::EditLinterMode::Warn));
+        let result = tool
+            .execute(json!({
+                "path": "clean.rs",
+                "old_string": "pub fn foo() {}",
+                "new_string": "pub fn foo() {"
+            }))
+            .await
+            .unwrap();
+        assert!(result.success, "warn mode still writes");
+        assert!(result.output.contains("[lint]"));
+
+        let after = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(after, "pub fn foo() {\n");
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn file_edit_passes_through_non_source_extension() {
+        let dir = std::env::temp_dir().join(format!(
+            "plaw_test_edit_lint_md_{}",
+            std::process::id()
+        ));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("notes.md");
+        tokio::fs::write(&path, "# heading\nold\n").await.unwrap();
+
+        let tool = FileEditTool::new(test_security(dir.clone()))
+            .with_edit_linter(linter_cfg(crate::config::EditLinterMode::Block));
+        let result = tool
+            .execute(json!({
+                "path": "notes.md",
+                "old_string": "old",
+                "new_string": "new"
+            }))
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert!(!result.output.contains("[lint]"));
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

@@ -67,6 +67,81 @@ pub fn extract_tags_from_file(rel_path: &Path, abs_path: &Path) -> Result<Vec<Ta
     extract_tags(rel_path, abs_path, &source)
 }
 
+/// Lightweight syntactic-soundness summary of a single source file. Counts
+/// tree-sitter ERROR + MISSING nodes and records the first few error-line
+/// numbers (1-indexed) so callers can surface human-readable diagnostics
+/// without re-parsing.
+///
+/// Used by the edit-linter wrapping `file_write` / `file_edit` to decide
+/// whether to warn-or-block on a proposed file content. Pure: no I/O.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ParseReport {
+    pub error_nodes: usize,
+    pub missing_nodes: usize,
+    pub first_error_lines: Vec<usize>,
+}
+
+impl ParseReport {
+    pub fn is_clean(&self) -> bool {
+        self.error_nodes == 0 && self.missing_nodes == 0
+    }
+
+    pub fn problem_count(&self) -> usize {
+        self.error_nodes + self.missing_nodes
+    }
+}
+
+/// Parse `source` according to the language inferred from `rel_path` and
+/// return a [`ParseReport`]. Returns `Ok(None)` when the extension is not
+/// a supported source language — callers should treat that as a pass.
+///
+/// Walks the tree iteratively (no recursion, no allocation per node) and
+/// caps `first_error_lines` at 3 entries so the diagnostic stays short.
+pub fn parse_diagnostics(rel_path: &Path, source: &str) -> Result<Option<ParseReport>> {
+    let Some(lang) = Lang::from_path(rel_path) else {
+        return Ok(None);
+    };
+
+    let language = lang.tree_sitter_language();
+    let mut parser = Parser::new();
+    parser
+        .set_language(&language)
+        .with_context(|| format!("set_language failed for {:?}", rel_path))?;
+
+    let tree = parser
+        .parse(source, None)
+        .with_context(|| format!("parse returned None for {:?}", rel_path))?;
+
+    let mut report = ParseReport::default();
+    let mut stack: Vec<tree_sitter::Node> = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if node.is_error() {
+            report.error_nodes += 1;
+            if report.first_error_lines.len() < 3 {
+                let line = node.start_position().row + 1;
+                if !report.first_error_lines.contains(&line) {
+                    report.first_error_lines.push(line);
+                }
+            }
+        }
+        if node.is_missing() {
+            report.missing_nodes += 1;
+            if report.first_error_lines.len() < 3 {
+                let line = node.start_position().row + 1;
+                if !report.first_error_lines.contains(&line) {
+                    report.first_error_lines.push(line);
+                }
+            }
+        }
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i as u32) {
+                stack.push(child);
+            }
+        }
+    }
+    Ok(Some(report))
+}
+
 #[allow(dead_code)]
 pub(crate) fn parse_paths_pair(rel: &str, abs: &str) -> (PathBuf, PathBuf) {
     (PathBuf::from(rel), PathBuf::from(abs))
@@ -198,5 +273,56 @@ function use(): Foo { return new Impl(); }
         assert!(defs.contains(&"Foo"));
         assert!(defs.contains(&"Impl"));
         assert!(defs.contains(&"use"));
+    }
+
+    #[test]
+    fn parse_diagnostics_returns_none_for_unsupported_extension() {
+        let r = parse_diagnostics(Path::new("readme.md"), "# anything").unwrap();
+        assert!(r.is_none());
+        let r = parse_diagnostics(Path::new("config.toml"), "a = 1").unwrap();
+        assert!(r.is_none());
+        let r = parse_diagnostics(Path::new("data.json"), "{}").unwrap();
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn parse_diagnostics_clean_on_valid_rust() {
+        let src = "pub fn foo() -> u32 { 42 }\n";
+        let r = parse_diagnostics(Path::new("a.rs"), src).unwrap().unwrap();
+        assert!(r.is_clean(), "expected clean, got {:?}", r);
+        assert_eq!(r.problem_count(), 0);
+        assert!(r.first_error_lines.is_empty());
+    }
+
+    #[test]
+    fn parse_diagnostics_flags_broken_rust() {
+        let src = "pub fn foo() -> u32 {\n    let x = ;\n}\n";
+        let r = parse_diagnostics(Path::new("a.rs"), src).unwrap().unwrap();
+        assert!(!r.is_clean(), "expected dirty, got {:?}", r);
+        assert!(r.problem_count() >= 1);
+        assert!(!r.first_error_lines.is_empty());
+        assert!(r.first_error_lines.len() <= 3);
+    }
+
+    #[test]
+    fn parse_diagnostics_clean_on_valid_python() {
+        let src = "def foo():\n    return 42\n";
+        let r = parse_diagnostics(Path::new("a.py"), src).unwrap().unwrap();
+        assert!(r.is_clean(), "expected clean, got {:?}", r);
+    }
+
+    #[test]
+    fn parse_diagnostics_flags_broken_python() {
+        let src = "def foo(:\n    return 42\n";
+        let r = parse_diagnostics(Path::new("a.py"), src).unwrap().unwrap();
+        assert!(!r.is_clean(), "expected dirty, got {:?}", r);
+    }
+
+    #[test]
+    fn parse_diagnostics_caps_first_error_lines_at_three() {
+        // Many distinct error lines — cap at 3.
+        let src = "fn a(\nfn b(\nfn c(\nfn d(\nfn e(\n";
+        let r = parse_diagnostics(Path::new("a.rs"), src).unwrap().unwrap();
+        assert!(r.first_error_lines.len() <= 3);
     }
 }

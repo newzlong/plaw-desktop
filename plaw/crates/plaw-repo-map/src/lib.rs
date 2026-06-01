@@ -26,6 +26,7 @@ pub use budget::{approx_token_count, BudgetParams};
 pub use cache::TagsCache;
 pub use graph::GraphParams;
 pub use lang::Lang;
+pub use parser::{parse_diagnostics, ParseReport};
 pub use ranking::{rank, RankInput, RankedTag};
 pub use renderer::{render, DiskSourceLoader, InMemorySourceLoader, RenderParams, SourceLoader};
 pub use tag::{Tag, TagKind};

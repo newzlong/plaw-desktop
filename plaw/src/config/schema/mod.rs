@@ -287,6 +287,11 @@ pub struct Config {
     #[serde(default)]
     pub repo_map: RepoMapConfig,
 
+    /// Edit-with-linter configuration (`[edit_linter]`). Tree-sitter parse
+    /// check around `file_write` / `file_edit`. Default mode `warn`.
+    #[serde(default)]
+    pub edit_linter: EditLinterConfig,
+
     /// Vision support override for the active provider/model.
     /// - `None` (default): use provider's built-in default
     /// - `Some(true)`: force vision support on (e.g. Ollama running llava)
@@ -913,6 +918,92 @@ impl Default for RepoMapConfig {
             enabled: false,
             max_tokens: default_repo_map_max_tokens(),
             root: None,
+        }
+    }
+}
+
+/// Edit-with-linter configuration (`[edit_linter]`).
+///
+/// Wraps `file_write` / `file_edit` with a tree-sitter parse pass over the
+/// proposed file content. In `warn` mode (the default) the write always
+/// proceeds and a `[lint]` note is appended to the tool's `output` so the
+/// LLM sees the diagnostic in its next turn. In `block` mode the write is
+/// rejected when the proposed content has STRICTLY MORE parse errors than
+/// the pre-edit content — so refactors that don't make parse worse still
+/// proceed. Mode `off` disables the linter entirely.
+///
+/// Default mode is `warn` because plaw routinely edits non-source files
+/// (Markdown, TOML, JSON, templates), partial-file refactors, and
+/// proc-macro DSLs that current tree-sitter grammars cannot always parse
+/// cleanly. `block` is one config line away for disciplined Rust/Go-only
+/// repos that want SWE-agent-style strictness.
+///
+/// Per-call escape: a tool call may pass `"skip_lint": true` in its
+/// arguments to bypass the linter for that single write.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct EditLinterConfig {
+    /// Master switch. `false` disables the linter regardless of `mode`.
+    #[serde(default = "default_edit_linter_enabled")]
+    pub enabled: bool,
+    /// Behaviour when parse errors are detected.
+    #[serde(default)]
+    pub mode: EditLinterMode,
+    /// Glob patterns of paths to skip (matched against the raw `path` arg).
+    /// Example: `["target/**", "**/*_pb.rs", "**/*.generated.rs"]`.
+    #[serde(default)]
+    pub skip_paths: Vec<String>,
+    /// File extensions (with leading dot) to skip regardless of language
+    /// detection. Useful for templates: `.tpl`, `.tmpl`, `.j2`, `.hbs`, etc.
+    #[serde(default = "default_edit_linter_skip_extensions")]
+    pub skip_extensions: Vec<String>,
+    /// Skip parse when proposed content exceeds this byte size. Default
+    /// 512 KiB.
+    #[serde(default = "default_edit_linter_max_file_bytes")]
+    pub max_file_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum EditLinterMode {
+    /// Linter skipped — write proceeds with no parse.
+    Off,
+    /// Linter runs; on parse errors the write proceeds and a `[lint]` note
+    /// is appended to the tool output. Default.
+    #[default]
+    Warn,
+    /// Linter runs; on parse errors that strictly worsen the file (new
+    /// error count > pre-edit error count), the write is rejected.
+    Block,
+}
+
+fn default_edit_linter_enabled() -> bool {
+    true
+}
+
+fn default_edit_linter_skip_extensions() -> Vec<String> {
+    vec![
+        ".tpl".into(),
+        ".tmpl".into(),
+        ".j2".into(),
+        ".hbs".into(),
+        ".mustache".into(),
+        ".in".into(),
+        ".erb".into(),
+    ]
+}
+
+fn default_edit_linter_max_file_bytes() -> usize {
+    524_288
+}
+
+impl Default for EditLinterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_edit_linter_enabled(),
+            mode: EditLinterMode::default(),
+            skip_paths: Vec::new(),
+            skip_extensions: default_edit_linter_skip_extensions(),
+            max_file_bytes: default_edit_linter_max_file_bytes(),
         }
     }
 }
@@ -4218,6 +4309,7 @@ impl Default for Config {
             transcription: TranscriptionConfig::default(),
             agents_ipc: AgentsIpcConfig::default(),
             repo_map: RepoMapConfig::default(),
+            edit_linter: EditLinterConfig::default(),
             model_support_vision: None,
         }
     }
@@ -6288,6 +6380,7 @@ default_temperature = 0.7
             transcription: TranscriptionConfig::default(),
             agents_ipc: AgentsIpcConfig::default(),
             repo_map: RepoMapConfig::default(),
+            edit_linter: EditLinterConfig::default(),
             model_support_vision: None,
         };
 
@@ -6663,6 +6756,7 @@ tool_dispatcher = "xml"
             transcription: TranscriptionConfig::default(),
             agents_ipc: AgentsIpcConfig::default(),
             repo_map: RepoMapConfig::default(),
+            edit_linter: EditLinterConfig::default(),
             model_support_vision: None,
         };
 

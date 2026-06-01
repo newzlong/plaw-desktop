@@ -1,4 +1,6 @@
+use super::edit_linter::{self, Decision};
 use super::traits::{Tool, ToolResult};
+use crate::config::EditLinterConfig;
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use serde_json::json;
@@ -36,11 +38,24 @@ pub(crate) fn is_protected_config_path(path: &str) -> bool {
 /// Write file contents with path sandboxing
 pub struct FileWriteTool {
     security: Arc<SecurityPolicy>,
+    edit_linter: Arc<EditLinterConfig>,
 }
 
 impl FileWriteTool {
     pub fn new(security: Arc<SecurityPolicy>) -> Self {
-        Self { security }
+        Self {
+            security,
+            edit_linter: Arc::new(EditLinterConfig::default()),
+        }
+    }
+
+    /// Override the edit-linter config (e.g. from `[edit_linter]` in
+    /// `config.toml`). When not called, the tool uses
+    /// [`EditLinterConfig::default`] which has `mode = warn` enabled.
+    #[must_use]
+    pub fn with_edit_linter(mut self, cfg: Arc<EditLinterConfig>) -> Self {
+        self.edit_linter = cfg;
+        self
     }
 }
 
@@ -65,6 +80,10 @@ impl Tool for FileWriteTool {
                 "content": {
                     "type": "string",
                     "description": "Content to write to the file"
+                },
+                "skip_lint": {
+                    "type": "boolean",
+                    "description": "When true, bypass the [edit_linter] tree-sitter parse check for this one write. Useful for deliberate WIP stubs."
                 }
             },
             "required": ["path", "content"]
@@ -93,6 +112,11 @@ impl Tool for FileWriteTool {
             .get("content")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'content' parameter"))?;
+
+        let skip_lint = args
+            .get("skip_lint")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         // Protect config files from AI modification
         if is_protected_config_path(path) {
@@ -201,12 +225,42 @@ impl Tool for FileWriteTool {
             });
         }
 
+        // Edit-linter gate: parse content via tree-sitter, decide whether to
+        // proceed / warn / block. Runs AFTER all security + rate-limit checks
+        // so a rejected lint doesn't change those side-effects' meaning. The
+        // record_action above has already debited the budget — intentional:
+        // forces the LLM to think twice before spamming malformed writes.
+        let lint_note = match edit_linter::evaluate(
+            &self.edit_linter,
+            path,
+            content,
+            None,
+            skip_lint,
+        ) {
+            Decision::Allow => None,
+            Decision::Warn(note) => Some(note),
+            Decision::Block(msg) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(msg),
+                });
+            }
+        };
+
         match tokio::fs::write(&resolved_target, content).await {
-            Ok(()) => Ok(ToolResult {
-                success: true,
-                output: format!("Written {} bytes to {path}", content.len()),
-                error: None,
-            }),
+            Ok(()) => {
+                let mut output = format!("Written {} bytes to {path}", content.len());
+                if let Some(note) = lint_note {
+                    output.push_str("\n[lint] ");
+                    output.push_str(&note);
+                }
+                Ok(ToolResult {
+                    success: true,
+                    output,
+                    error: None,
+                })
+            }
             Err(e) => Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -517,6 +571,140 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.success, "paths with null bytes must be blocked");
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    fn linter_cfg(mode: crate::config::EditLinterMode) -> Arc<EditLinterConfig> {
+        Arc::new(EditLinterConfig {
+            enabled: true,
+            mode,
+            ..EditLinterConfig::default()
+        })
+    }
+
+    #[tokio::test]
+    async fn file_write_warn_appends_lint_note_on_broken_rust() {
+        let dir = std::env::temp_dir().join(format!(
+            "plaw_test_lint_warn_{}",
+            std::process::id()
+        ));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        let tool = FileWriteTool::new(test_security(dir.clone()))
+            .with_edit_linter(linter_cfg(crate::config::EditLinterMode::Warn));
+        let result = tool
+            .execute(json!({"path": "broken.rs", "content": "pub fn ( {"}))
+            .await
+            .unwrap();
+        assert!(result.success, "warn mode must still write");
+        assert!(
+            result.output.contains("[lint]"),
+            "warn mode must surface diagnostic: {}",
+            result.output
+        );
+        assert!(result.output.contains("tree-sitter"));
+
+        // File IS written
+        let written = tokio::fs::read_to_string(dir.join("broken.rs"))
+            .await
+            .unwrap();
+        assert_eq!(written, "pub fn ( {");
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn file_write_block_rejects_broken_rust() {
+        let dir = std::env::temp_dir().join(format!(
+            "plaw_test_lint_block_{}",
+            std::process::id()
+        ));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        let tool = FileWriteTool::new(test_security(dir.clone()))
+            .with_edit_linter(linter_cfg(crate::config::EditLinterMode::Block));
+        let result = tool
+            .execute(json!({"path": "broken.rs", "content": "pub fn ( {"}))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(
+            result.error.as_deref().unwrap_or("").contains("edit_linter blocked"),
+            "block mode must surface block reason: {:?}",
+            result.error
+        );
+
+        // File NOT written
+        assert!(!dir.join("broken.rs").exists());
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn file_write_skip_lint_per_call_bypasses_block_mode() {
+        let dir = std::env::temp_dir().join(format!(
+            "plaw_test_lint_skip_{}",
+            std::process::id()
+        ));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        let tool = FileWriteTool::new(test_security(dir.clone()))
+            .with_edit_linter(linter_cfg(crate::config::EditLinterMode::Block));
+        let result = tool
+            .execute(json!({
+                "path": "broken.rs",
+                "content": "pub fn ( {",
+                "skip_lint": true
+            }))
+            .await
+            .unwrap();
+        assert!(result.success, "skip_lint:true must bypass block");
+        assert!(!result.output.contains("[lint]"));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn file_write_block_mode_passes_through_markdown() {
+        let dir = std::env::temp_dir().join(format!(
+            "plaw_test_lint_md_{}",
+            std::process::id()
+        ));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        let tool = FileWriteTool::new(test_security(dir.clone()))
+            .with_edit_linter(linter_cfg(crate::config::EditLinterMode::Block));
+        let result = tool
+            .execute(json!({"path": "notes.md", "content": "# heading\n\nsome *broken markdown"}))
+            .await
+            .unwrap();
+        assert!(result.success, "markdown must pass through (no Lang)");
+        assert!(!result.output.contains("[lint]"));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn file_write_protected_config_still_blocked_before_linter() {
+        let dir = std::env::temp_dir().join(format!(
+            "plaw_test_lint_protected_{}",
+            std::process::id()
+        ));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        let tool = FileWriteTool::new(test_security(dir.clone()))
+            .with_edit_linter(linter_cfg(crate::config::EditLinterMode::Warn));
+        let result = tool
+            .execute(json!({"path": "config.toml", "content": "pub fn ( {"}))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        let err = result.error.as_deref().unwrap_or("");
+        assert!(
+            err.contains("Cannot modify Plaw configuration files"),
+            "protected-path check must precede linter: {err}"
+        );
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

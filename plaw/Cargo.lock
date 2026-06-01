@@ -4799,6 +4799,7 @@ dependencies = [
  "fast_html2md",
  "futures-util",
  "glob",
+ "globset",
  "hex",
  "hmac",
  "hostname",
