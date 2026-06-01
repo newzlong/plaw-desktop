@@ -97,6 +97,10 @@ rand = "0.10"
 # crate's tree-sitter grammars can be reused by future tools (e.g. edit-linter).
 plaw-repo-map = { path = "crates/plaw-repo-map" }
 
+# Glob matching for edit-linter `[edit_linter].skip_paths` and future
+# glob-based filters. Already in the dep tree transitively via `ignore`.
+globset = { version = "0.4", default-features = false }
+
 # serde-big-array for wa-rs storage (large array serialization)
 serde-big-array = { version = "0.5", optional = true }
 
