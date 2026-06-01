@@ -106,6 +106,7 @@ mod tests {
                 timestamp: "now".into(),
                 session_id: None,
                 score: None,
+                ..MemoryEntry::default()
             }])
         }
 
@@ -209,6 +210,7 @@ mod tests {
                     timestamp: "now".into(),
                     session_id: None,
                     score: Some(0.95),
+                    ..MemoryEntry::default()
                 },
                 MemoryEntry {
                     id: "2".into(),
@@ -218,6 +220,7 @@ mod tests {
                     timestamp: "now".into(),
                     session_id: None,
                     score: Some(0.9),
+                    ..MemoryEntry::default()
                 },
             ]),
         };
