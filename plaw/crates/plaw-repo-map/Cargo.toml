@@ -1,0 +1,35 @@
+[package]
+name = "plaw-repo-map"
+version = "0.1.0"
+edition = "2021"
+authors = ["theonlyhennygod"]
+license = "MIT OR Apache-2.0"
+description = "Aider-style repository map for plaw: tree-sitter + personalized PageRank + token-budget renderer"
+repository = "https://github.com/plaw-labs/plaw"
+keywords = ["ai", "agent", "code-search", "tree-sitter", "pagerank"]
+categories = ["development-tools", "parser-implementations"]
+
+[dependencies]
+# Tree-sitter core + grammars (static linking, no Python dep)
+tree-sitter = "0.26"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-go = "0.25"
+
+# Path/gitignore traversal
+ignore = { version = "0.4", default-features = false }
+
+# Serialization (cache keys, optional emit)
+serde = { version = "1", features = ["derive"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = { version = "0.1", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"
