@@ -364,11 +364,10 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     let config_state = Arc::new(Mutex::new(config.clone()));
 
     // ── Hooks ──────────────────────────────────────────────────────
-    let hooks: Option<std::sync::Arc<crate::hooks::HookRunner>> = if config.hooks.enabled {
-        Some(std::sync::Arc::new(crate::hooks::HookRunner::new()))
-    } else {
-        None
-    };
+    // Registration happens lower down (after `provider` is built) so the
+    // Chain-of-Verification hook can be constructed with a real provider
+    // handle. Placeholder `hooks` is filled in after that.
+    let hooks: Option<std::sync::Arc<crate::hooks::HookRunner>>;
 
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -410,6 +409,37 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .clone()
         .unwrap_or_else(|| "anthropic/claude-sonnet-4".into());
     let temperature = config.default_temperature;
+
+    // Build the hooks runner now that `provider` is constructed. The
+    // Chain-of-Verification hook needs a Provider handle for its
+    // post-response verifier call.
+    hooks = if config.hooks.enabled {
+        let mut runner = crate::hooks::HookRunner::new();
+        if config.chain_of_verification.enabled && config.agent.intent_routing_enabled {
+            let verifier_model = config
+                .chain_of_verification
+                .verifier_model
+                .clone()
+                .unwrap_or_else(|| model.clone());
+            let timeout =
+                std::time::Duration::from_secs(config.chain_of_verification.timeout_secs);
+            runner.register(Box::new(
+                crate::hooks::builtin::ChainOfVerificationHook::new(
+                    provider.clone(),
+                    verifier_model,
+                    config.chain_of_verification.max_claims,
+                    timeout,
+                ),
+            ));
+            tracing::info!(
+                max_claims = config.chain_of_verification.max_claims,
+                "chain_of_verification hook registered"
+            );
+        }
+        Some(std::sync::Arc::new(runner))
+    } else {
+        None
+    };
     let mem: Arc<dyn Memory> = Arc::from(memory::create_memory_with_storage(
         &config.memory,
         Some(&config.storage.provider.config),

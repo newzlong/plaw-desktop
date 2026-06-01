@@ -75,6 +75,7 @@ pub(crate) use tool_instructions::{build_tool_instructions, build_tool_instructi
 pub(crate) use wrappers::{
     run_tool_call_loop_with_non_cli_approval_context, with_resume_lineage, ResumeLineage,
 };
+pub use wrappers::{current_turn_intent, with_turn_intent};
 use tool_io::{
     append_calibration_reminder, maybe_inject_cron_add_delivery, tag_injected_content,
     truncate_tool_args_for_progress, wrap_as_untrusted_data,
@@ -475,6 +476,37 @@ pub(crate) async fn run_tool_call_loop(
                     "text": scrub_credentials(&display_text),
                 }),
             );
+            // Chain-of-Verification + any future modifying after_final_response
+            // hooks. Runs AFTER runtime_trace records the raw final response
+            // (so telemetry sees the model's own output) and BEFORE the chunk
+            // streaming loop (so the user sees the footer streamed inline, no
+            // draft-then-replace flicker). History KEEPS the raw response_text
+            // — the footer is user-facing only, not part of the LLM's own
+            // turn-history record.
+            let mut display_text = display_text;
+            if let Some(hooks_ref) = hooks {
+                let hook_fut = hooks_ref.run_after_final_response(display_text.clone(), history);
+                let hook_result = if let Some(token) = cancellation_token.as_ref() {
+                    tokio::select! {
+                        biased;
+                        () = token.cancelled() => {
+                            return Err(ToolLoopCancelled.into());
+                        }
+                        r = hook_fut => r,
+                    }
+                } else {
+                    hook_fut.await
+                };
+                match hook_result {
+                    crate::hooks::HookResult::Continue(updated) => {
+                        display_text = updated;
+                    }
+                    crate::hooks::HookResult::Cancel(reason) => {
+                        tracing::warn!(reason, "after_final_response hook cancelled the turn");
+                        return Err(ToolLoopCancelled.into());
+                    }
+                }
+            }
             // No tool calls — this is the final response.
             // If a streaming sender is provided, relay the text in small chunks
             // so the channel can progressively update the draft message.

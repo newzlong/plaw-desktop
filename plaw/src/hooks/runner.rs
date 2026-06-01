@@ -89,6 +89,41 @@ impl HookRunner {
         join_all(futs).await;
     }
 
+    /// Dispatcher for the modifying [`HookHandler::after_final_response`]
+    /// hook. Mirrors [`Self::run_before_llm_call`] — handlers run
+    /// sequentially in registration order (priority-sorted), each
+    /// rewrite composes, panics are caught and the previous value is
+    /// preserved, Cancel short-circuits.
+    pub async fn run_after_final_response(
+        &self,
+        mut text: String,
+        history: &[ChatMessage],
+    ) -> HookResult<String> {
+        for h in &self.handlers {
+            let hook_name = h.name();
+            match AssertUnwindSafe(h.after_final_response(text.clone(), history))
+                .catch_unwind()
+                .await
+            {
+                Ok(HookResult::Continue(t)) => text = t,
+                Ok(HookResult::Cancel(reason)) => {
+                    info!(
+                        hook = hook_name,
+                        reason, "after_final_response cancelled by hook"
+                    );
+                    return HookResult::Cancel(reason);
+                }
+                Err(_) => {
+                    tracing::error!(
+                        hook = hook_name,
+                        "after_final_response hook panicked; continuing with previous value"
+                    );
+                }
+            }
+        }
+        HookResult::Continue(text)
+    }
+
     pub async fn fire_after_tool_call(&self, tool: &str, result: &ToolResult, duration: Duration) {
         let futs: Vec<_> = self
             .handlers

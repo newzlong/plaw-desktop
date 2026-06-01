@@ -76,6 +76,27 @@ pub trait HookHandler: Send + Sync {
     ) -> HookResult<(String, String, String)> {
         HookResult::Continue((channel, recipient, content))
     }
+
+    /// Fired by the agent loop after the model has produced its final
+    /// response (no more tool calls) but BEFORE the text is streamed to
+    /// the user or pushed into history. Modifying cousin of the void
+    /// [`Self::on_llm_output`] — handlers can rewrite the response
+    /// (e.g. append a verification footer) or cancel the turn.
+    ///
+    /// `history` is the conversation history at the point of final
+    /// response — the assistant message has NOT yet been pushed (so it
+    /// excludes the final response itself but includes all prior turns
+    /// + the user message + any system context this turn).
+    ///
+    /// Default impl returns the text unchanged so existing handlers
+    /// remain source-compatible.
+    async fn after_final_response(
+        &self,
+        text: String,
+        _history: &[ChatMessage],
+    ) -> HookResult<String> {
+        HookResult::Continue(text)
+    }
 }
 
 #[cfg(test)]

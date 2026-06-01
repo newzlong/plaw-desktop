@@ -3,6 +3,7 @@ pub mod agent;
 pub mod checkpoint;
 pub mod classifier;
 pub mod dispatcher;
+pub mod grounding_verifier;
 pub mod intent;
 pub mod loop_;
 pub mod memory_loader;

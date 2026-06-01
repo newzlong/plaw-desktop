@@ -10,7 +10,9 @@ pub use proxy::{
     apply_runtime_proxy_to_builder, build_runtime_proxy_client,
     build_runtime_proxy_client_with_timeouts, runtime_proxy_config, set_runtime_proxy_config,
 };
+mod chain_of_verification;
 mod research;
+pub use chain_of_verification::ChainOfVerificationConfig;
 pub use research::{ResearchPhaseConfig, ResearchTrigger};
 mod runtime;
 pub use runtime::{
@@ -291,6 +293,11 @@ pub struct Config {
     /// check around `file_write` / `file_edit`. Default mode `warn`.
     #[serde(default)]
     pub edit_linter: EditLinterConfig,
+
+    /// Chain-of-Verification configuration (`[chain_of_verification]`).
+    /// Post-response verifier for factual-lookup turns. Default off.
+    #[serde(default)]
+    pub chain_of_verification: ChainOfVerificationConfig,
 
     /// Vision support override for the active provider/model.
     /// - `None` (default): use provider's built-in default
@@ -4310,6 +4317,7 @@ impl Default for Config {
             agents_ipc: AgentsIpcConfig::default(),
             repo_map: RepoMapConfig::default(),
             edit_linter: EditLinterConfig::default(),
+            chain_of_verification: ChainOfVerificationConfig::default(),
             model_support_vision: None,
         }
     }
@@ -6381,6 +6389,7 @@ default_temperature = 0.7
             agents_ipc: AgentsIpcConfig::default(),
             repo_map: RepoMapConfig::default(),
             edit_linter: EditLinterConfig::default(),
+            chain_of_verification: ChainOfVerificationConfig::default(),
             model_support_vision: None,
         };
 
@@ -6757,6 +6766,7 @@ tool_dispatcher = "xml"
             agents_ipc: AgentsIpcConfig::default(),
             repo_map: RepoMapConfig::default(),
             edit_linter: EditLinterConfig::default(),
+            chain_of_verification: ChainOfVerificationConfig::default(),
             model_support_vision: None,
         };
 
