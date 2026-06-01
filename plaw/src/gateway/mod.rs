@@ -9,6 +9,7 @@
 
 pub mod api;
 mod openai_compat;
+mod repo_map_session;
 pub mod sse;
 pub mod static_files;
 pub mod ws;

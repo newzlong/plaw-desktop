@@ -16,7 +16,7 @@ pub use schema::{
     NonCliNaturalLanguageApprovalMode, ObservabilityConfig, OtpConfig, OtpMethod,
     PeripheralBoardConfig, PeripheralsConfig, PipelineConfig, PipelineErrorPolicy,
     PipelineStage, ProviderConfig, ProxyConfig, ProxyScope,
-    QdrantConfig, QueryClassificationConfig, ReliabilityConfig, ResearchPhaseConfig,
+    QdrantConfig, QueryClassificationConfig, ReliabilityConfig, RepoMapConfig, ResearchPhaseConfig,
     ResearchTrigger, ResourceLimitsConfig, RuntimeConfig, SandboxBackend, SandboxConfig,
     SchedulerConfig, SecretsConfig, SecurityConfig, SkillsConfig, SkillsPromptInjectionMode,
     SlackConfig, StorageConfig, StorageProviderConfig, StorageProviderSection, StreamMode,

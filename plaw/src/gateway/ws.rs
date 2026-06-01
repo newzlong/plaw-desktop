@@ -303,6 +303,29 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     // Add system message to history
     history.push(ChatMessage::system(&system_prompt));
 
+    // Aider-style repo map (`[repo_map] enabled = true`). Build is deferred to
+    // the first user message so a quick connect-then-disconnect never pays the
+    // tree-sitter parse cost. When the build completes we splice the rendered
+    // text at history index 1, right after the system prompt — keeping the
+    // cacheable prefix stable across every subsequent turn.
+    let mut repo_map_session: Option<crate::gateway::repo_map_session::RepoMapSession> = {
+        let cfg = state.config.lock();
+        if cfg.repo_map.enabled {
+            let root = cfg
+                .repo_map
+                .root
+                .clone()
+                .unwrap_or_else(|| cfg.workspace_dir.clone());
+            let max_tokens = cfg.repo_map.max_tokens;
+            drop(cfg);
+            Some(crate::gateway::repo_map_session::RepoMapSession::new(
+                root, max_tokens,
+            ))
+        } else {
+            None
+        }
+    };
+
     let mut cron_rx = state.event_tx.subscribe();
     // When a user sends a follow-up message while the agent loop is running,
     // we cancel the current loop and stash the new message here so the outer
@@ -539,6 +562,18 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
         // Add user message to history
         history.push(ChatMessage::user(&content));
+
+        // Repo-map injection (gated by `[repo_map] enabled`). The build runs
+        // on the first user message via `tokio::task::spawn_blocking` and the
+        // rendered text is spliced once at history index 1 — kept stable
+        // across all subsequent turns. Failures are silent (warn-log only) so
+        // a broken parse never breaks the chat session. Runs BEFORE the
+        // research and intent-routing blocks so those still target the user
+        // message at `history.len() - 1` without further index gymnastics.
+        if let Some(session) = repo_map_session.as_mut() {
+            session.ensure_built().await;
+            session.inject_once(&mut history);
+        }
 
         // Get provider info
         let provider_label = state
