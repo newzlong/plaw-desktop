@@ -184,6 +184,119 @@ log_path = "syscall-anomalies.log"
 baseline_syscalls = ["read", "write", "openat", "close", "execve", "futex"]
 ```
 
+## `[security.sandbox]`
+
+OS-level isolation for tool-spawned subprocesses. **Auto-selects** the best backend
+available on the current platform; defaults match plaw's [secure-by-default discipline][sec-by-def]
+(§3.6) — start with the bundled backend, harden the limits when isolating untrusted code.
+
+[sec-by-def]: ../docs/sandboxing.md
+
+| Key | Default | Purpose |
+|---|---|---|
+| `enabled` | `None` (auto-detect) | Set `true` / `false` to force the backend on or off; `None` lets the platform-detect logic pick |
+| `backend` | `"auto"` | One of `"auto"` / `"noop"` / `"firejail"` / `"bubblewrap"` / `"docker"` / `"landlock"` / `"windows-job-object"`; `"auto"` picks the best available |
+| `firejail_args` | `[]` | Extra `firejail` CLI args (only honored when `backend = "firejail"`) |
+| `windows_max_processes` | `256` | **Windows Job Object** — caps active processes inside the job (`JOB_OBJECT_LIMIT_ACTIVE_PROCESS`). Further `CreateProcess` calls inside the job fail with `ERROR_NOT_ENOUGH_QUOTA`. Lower (e.g. `16`) to harden against fork-bomb–style misbehaving tools. |
+| `windows_process_memory_mb` | `2048` (2 GiB) | **Windows Job Object** — per-process commit-charge cap in MiB (`JOB_OBJECT_LIMIT_PROCESS_MEMORY`). Kernel-enforced; over-allocating children terminate with `JOB_OBJECT_LIMIT_EXCEEDED`. Per child, NOT total job. |
+| `windows_process_cpu_time_secs` | `600` (10 min) | **Windows Job Object** — per-process **cumulative CPU TIME** in seconds (`JOB_OBJECT_LIMIT_PROCESS_TIME` ⇒ `PerProcessUserTimeLimit`). NOT wall-clock — a 30-minute `sleep` consumes ~0s; a tight `while(true)` trips at exactly the configured duration. |
+| `integrity` | empty | See `[security.sandbox.integrity]` below |
+
+Backend matrix:
+
+| Backend | Platform | What it isolates |
+|---|---|---|
+| `noop` | all | No isolation — application-layer guards only |
+| `firejail` | Linux | Namespace + seccomp via `firejail` wrapper |
+| `bubblewrap` | Linux | Namespace via `bwrap` (rootless-friendly) |
+| `landlock` | Linux 5.13+ | Filesystem access control via Linux LSM |
+| `docker` | Linux/macOS/Windows | Container isolation (heavyweight) |
+| `windows-job-object` | Windows | Kernel Job Object: `KILL_ON_JOB_CLOSE` + 4 PR #77 resource caps + UI restrictions |
+
+Notes:
+
+- The Windows Job Object backend is **enabled by default** on Windows since PR #77; the 4 resource caps + UI restrictions ship at the defaults above and are operator-tunable via the `windows_*` keys.
+- `KILL_ON_JOB_CLOSE` is always on — when plaw exits or the `WindowsJobObjectSandbox` drops, every assigned child terminates. No orphan tool processes survive a plaw crash.
+- Inspect the active backend at runtime: `plaw sandbox status` (PR #82).
+- Resource caps are **per process**, not per job. Total job-wide memory / CPU is unbounded in Phase 0.
+
+Example:
+
+```toml
+[security.sandbox]
+enabled = true                       # explicit on; omit for auto-detect
+backend = "auto"                     # let plaw pick: windows-job-object on Win, firejail on Linux, etc.
+windows_max_processes = 64           # tighter than the 256 default for a hardened deployment
+windows_process_memory_mb = 1024     # 1 GiB per child
+windows_process_cpu_time_secs = 120  # 2 minutes of CPU per child
+```
+
+## `[security.sandbox.integrity]`
+
+> ⚠️ **Default OFF** — opt-in only. **Lens C Gatekeeper failure mode.** A default-on workspace-wide
+> Low IL would break first-run `cargo build` / `npm install` (Low-IL processes can't write to
+> Medium-IL tempdirs — empirically confirmed by PR #89's integration tests), and users would
+> disable sandboxing entirely. Phase 1c (PR #91) leaves `integrity` empty by default; only set
+> per-tool overrides when you have a concrete hardening reason and have tested compatibility.
+
+**Windows-only behavior.** The config keys parse cross-platform so TOML files remain portable,
+but every variant collapses to `Default` (no lowering) on non-Windows targets — Linux / macOS
+have no Token IL concept. The `to_runtime()` bridge enforces this fail-safe.
+
+| Key | Default | Purpose |
+|---|---|---|
+| `default_level` | unset | Fallback IL applied to any tool without a per-tool override |
+| `shell` | unset | Per-tool override for the `shell` tool. Resolves to `default_level` if unset; otherwise `Default` |
+
+Allowed values for both `default_level` and `shell`:
+
+| Value | Wire | Behavior | Usability |
+|---|---|---|---|
+| `"default"` | `S-1-16-8192` (parent's IL) | No lowering — byte-identical to pre-#91 | ✅ works today |
+| `"medium"` | `S-1-16-8192` | Same IL as a typical unelevated plaw — explicit "do not lower" | ✅ works today |
+| `"low"` | `S-1-16-4096` | Kernel-enforces write-deny on user profile + most filesystem | ⚠️ **Phase 1c.2 required** for shell output capture (see deferred-feature note) |
+| `"untrusted"` | `S-1-16-0` | Most restrictive — `STATUS_DLL_INIT_FAILED` on Rust C runtime DLL load | ❌ unusable in practice; reserved for enum completeness |
+
+Resolution order (per-tool > `default_level` > `Default`):
+
+```toml
+[security.sandbox.integrity]
+default_level = "medium"   # most tools stay at parent's IL
+shell = "low"              # shell-specific override wins
+```
+
+Phase 1c.2 deferred-feature note:
+
+`ShellTool` currently returns a clear error when the resolved level is non-`Default`,
+because `spawn_with_lowered_token` (PR #89) doesn't yet support piped stdio capture.
+The error names the feature (Token IL), the phase (1c.2), and this exact config key
+so operators see actionable next steps:
+
+```text
+Token IL lowered shell does not yet support output capture. Remove
+`[security.sandbox.integrity] shell = "..."` (or set it to `"default"`)
+until Phase 1c.2 ships piped stdio for CreateProcessAsUserW.
+```
+
+Until Phase 1c.2 lands, leave `shell` unset (or set it to `"default"`) — the config knob
+is reserved so users can plan their TOML, but flipping the runtime gate is a one-line
+change in Phase 1c.2.
+
+Example — minimal default (no behavior change):
+
+```toml
+# [security.sandbox.integrity] block intentionally omitted —
+# resolves to Default for every tool. Byte-identical to pre-PR #91.
+```
+
+Example — operator-tunable opt-in (functional once Phase 1c.2 ships):
+
+```toml
+[security.sandbox.integrity]
+shell = "low"              # ShellTool runs at S-1-16-4096
+                           # — currently bails with deferred-feature error
+```
+
 ## `[agents.<name>]`
 
 Delegate sub-agent configurations. Each key under `[agents]` defines a named sub-agent that the primary agent can delegate to.
