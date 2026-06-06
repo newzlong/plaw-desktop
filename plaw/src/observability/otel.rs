@@ -197,6 +197,8 @@ impl Observer for OtelObserver {
                 error_message: _,
                 input_tokens: _,
                 output_tokens: _,
+                cache_creation_input_tokens: _,
+                cache_read_input_tokens: _,
             } => {
                 let secs = duration.as_secs_f64();
                 let attrs = [
@@ -417,6 +419,8 @@ mod tests {
             error_message: None,
             input_tokens: Some(100),
             output_tokens: Some(50),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
         });
         obs.record_event(&ObserverEvent::AgentEnd {
             provider: "openrouter".into(),
@@ -497,6 +501,8 @@ mod tests {
             error_message: Some("404 Not Found".into()),
             input_tokens: None,
             output_tokens: None,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
         });
     }
 

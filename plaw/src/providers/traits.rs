@@ -50,10 +50,29 @@ pub struct ToolCall {
 }
 
 /// Raw token counts from a single LLM API response.
+///
+/// `cache_creation_input_tokens` + `cache_read_input_tokens` are populated
+/// by providers that report Anthropic-style prefix-cache breakdown
+/// (Anthropic native, AWS Bedrock when using Claude models). Other
+/// providers leave them `None`.
+///
+/// Note on accounting: when both cache fields are present, the relation
+/// is `input_tokens = cache_creation_input_tokens + cache_read_input_tokens
+/// + uncached_input_tokens` per the Anthropic billing model. `input_tokens`
+/// stays the total so existing callers (cost calculators, Prometheus
+/// counters) keep working without code changes.
 #[derive(Debug, Clone, Default)]
 pub struct TokenUsage {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    /// Tokens billed at the cache-write rate (1.25× input). Present only
+    /// when the request crossed the cache breakpoint for the first time.
+    #[doc(alias = "prompt_cache_miss_tokens")]
+    pub cache_creation_input_tokens: Option<u64>,
+    /// Tokens served from the cache (0.1× input). Higher = better cache
+    /// hit rate; this is the metric users care about for cost savings.
+    #[doc(alias = "prompt_cache_hit_tokens")]
+    pub cache_read_input_tokens: Option<u64>,
 }
 
 /// An LLM response that may contain text, tool calls, or both.
@@ -607,6 +626,7 @@ mod tests {
             usage: Some(TokenUsage {
                 input_tokens: Some(100),
                 output_tokens: Some(50),
+                ..Default::default()
             }),
             reasoning_content: None,
         };

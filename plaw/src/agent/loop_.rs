@@ -3,11 +3,9 @@ use crate::config::Config;
 use crate::memory::{self, Memory, MemoryCategory};
 use crate::multimodal;
 use crate::observability::{self, runtime_trace, Observer, ObserverEvent};
-use crate::providers::{
-    self, ChatMessage, ChatRequest, Provider, ProviderCapabilityError,
-};
 #[cfg(test)]
 use crate::providers::ToolCall;
+use crate::providers::{self, ChatMessage, ChatRequest, Provider, ProviderCapabilityError};
 use crate::runtime;
 use crate::security::SecurityPolicy;
 use crate::tools::{self, Tool};
@@ -40,6 +38,7 @@ mod tool_taxonomy;
 mod wrappers;
 
 use autosave::autosave_memory_key;
+use budgets::{AUTOSAVE_MIN_MESSAGE_CHARS, DEFAULT_MAX_TOOL_ITERATIONS, STREAM_CHUNK_MIN_CHARS};
 use context::{build_context, build_hardware_context};
 pub(crate) use credentials::scrub_credentials;
 pub(crate) use errors::{
@@ -54,6 +53,11 @@ use history::{apply_compaction_summary, build_compaction_transcript};
 use history::{
     auto_compact_history, mid_loop_compact_if_needed, mid_loop_trim_if_needed, trim_history,
 };
+use native_tools::{
+    build_native_assistant_history, build_native_assistant_history_from_parsed_calls,
+};
+use non_cli_approval::await_non_cli_approval_decision;
+pub(crate) use non_cli_approval::{NonCliApprovalContext, NonCliApprovalPrompt};
 #[allow(unused_imports)]
 use parsing::{
     default_param_for_tool, detect_tool_call_parse_issue, extract_json_values, map_tool_name_alias,
@@ -61,26 +65,18 @@ use parsing::{
     parse_perl_style_tool_calls, parse_structured_tool_calls, parse_tool_call_value,
     parse_tool_calls, parse_tool_calls_from_json_value, tool_call_signature, ParsedToolCall,
 };
-use budgets::{
-    AUTOSAVE_MIN_MESSAGE_CHARS, DEFAULT_MAX_TOOL_ITERATIONS, STREAM_CHUNK_MIN_CHARS,
-};
-use native_tools::{
-    build_native_assistant_history, build_native_assistant_history_from_parsed_calls,
-};
-pub(crate) use non_cli_approval::{NonCliApprovalContext, NonCliApprovalPrompt};
-use non_cli_approval::await_non_cli_approval_decision;
 pub(crate) use shell_policy::build_shell_policy_instructions;
 pub(crate) use streaming::{DRAFT_CLEAR_SENTINEL, DRAFT_PROGRESS_SENTINEL};
 pub(crate) use tool_instructions::{build_tool_instructions, build_tool_instructions_from_specs};
-pub(crate) use wrappers::{
-    run_tool_call_loop_with_non_cli_approval_context, with_resume_lineage, ResumeLineage,
-};
-pub use wrappers::{current_turn_intent, with_turn_intent};
 use tool_io::{
     append_calibration_reminder, maybe_inject_cron_add_delivery, tag_injected_content,
     truncate_tool_args_for_progress, wrap_as_untrusted_data,
 };
 use tool_taxonomy::{ANTI_LOOP_EXEMPT_TOOLS, MAX_SAME_TOOL_PER_TURN, TIGHT_LOOP_TOOLS};
+pub use wrappers::{current_turn_intent, with_turn_intent};
+pub(crate) use wrappers::{
+    run_tool_call_loop_with_non_cli_approval_context, with_resume_lineage, ResumeLineage,
+};
 
 /// Execute a single turn of the agent loop: send messages, parse tool calls,
 /// execute tools, and loop until the LLM produces a final text response.
@@ -306,11 +302,18 @@ pub(crate) async fn run_tool_call_loop(
         let (response_text, parsed_text, tool_calls, assistant_history_content, native_tool_calls) =
             match chat_result {
                 Ok(resp) => {
-                    let (resp_input_tokens, resp_output_tokens) = resp
-                        .usage
-                        .as_ref()
-                        .map(|u| (u.input_tokens, u.output_tokens))
-                        .unwrap_or((None, None));
+                    let (resp_input_tokens, resp_output_tokens, resp_cache_create, resp_cache_read) =
+                        resp.usage
+                            .as_ref()
+                            .map(|u| {
+                                (
+                                    u.input_tokens,
+                                    u.output_tokens,
+                                    u.cache_creation_input_tokens,
+                                    u.cache_read_input_tokens,
+                                )
+                            })
+                            .unwrap_or((None, None, None, None));
 
                     observer.record_event(&ObserverEvent::LlmResponse {
                         provider: provider_name.to_string(),
@@ -320,6 +323,8 @@ pub(crate) async fn run_tool_call_loop(
                         error_message: None,
                         input_tokens: resp_input_tokens,
                         output_tokens: resp_output_tokens,
+                        cache_creation_input_tokens: resp_cache_create,
+                        cache_read_input_tokens: resp_cache_read,
                     });
 
                     let response_text = resp.text_or_empty().to_string();
@@ -418,6 +423,8 @@ pub(crate) async fn run_tool_call_loop(
                         error_message: Some(safe_error.clone()),
                         input_tokens: None,
                         output_tokens: None,
+                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens: None,
                     });
                     runtime_trace::record_event(
                         "llm_response",
@@ -1037,10 +1044,8 @@ pub(crate) async fn run_tool_call_loop(
             // intra-turn `parent_iteration`.
             if iteration == 0 {
                 if let Some(lineage) = wrappers::current_resume_lineage() {
-                    snapshot = snapshot.with_lineage(
-                        lineage.parent_turn_id,
-                        lineage.branched_from_iteration,
-                    );
+                    snapshot = snapshot
+                        .with_lineage(lineage.parent_turn_id, lineage.branched_from_iteration);
                 }
             }
             if let Err(err) = writer.put(&snapshot) {
@@ -1390,9 +1395,9 @@ pub async fn run(
         // the loaded history so users can nudge the resumed agent.
         // Interactive resume in the REPL is still deferred.
         let snapshot = match resume_from_iteration {
-            Some(iter) => crate::agent::checkpoint::load_snapshot_at_iteration(
-                &config, turn_id, iter,
-            )?,
+            Some(iter) => {
+                crate::agent::checkpoint::load_snapshot_at_iteration(&config, turn_id, iter)?
+            }
             None => crate::agent::checkpoint::load_resume_snapshot(&config, turn_id)?,
         };
         let resumed_iter = snapshot.iteration;
@@ -1649,9 +1654,9 @@ pub async fn run(
                 config.agent.max_history_messages,
                 None, // CLI loop doesn't track input_tokens per-turn
                 config.agent.max_context_tokens,
-                None, // No capsule store in CLI mode
-                None, // No session_id in CLI mode
-                None, // No embedding provider in CLI mode
+                None,  // No capsule store in CLI mode
+                None,  // No session_id in CLI mode
+                None,  // No embedding provider in CLI mode
                 false, // not forced
             )
             .await
@@ -1869,8 +1874,8 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::budgets::DEFAULT_MAX_HISTORY_MESSAGES;
+    use super::*;
     use async_trait::async_trait;
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use std::collections::VecDeque;
@@ -2393,7 +2398,8 @@ mod tests {
     }
 
     #[test]
-    fn should_execute_tools_in_parallel_returns_true_for_all_readonly_tools_with_approvals_waived() {
+    fn should_execute_tools_in_parallel_returns_true_for_all_readonly_tools_with_approvals_waived()
+    {
         // Two ReadOnly tools (e.g. file_read + glob_search) + every approval
         // waived via the "*" wildcard => the parallel gate opens.
         let calls = vec![
@@ -4643,7 +4649,11 @@ Let me check the result."#;
             .unwrap()
             .filter_map(Result::ok)
             .collect();
-        assert_eq!(snapshot_files.len(), 1, "exactly one snapshot file expected");
+        assert_eq!(
+            snapshot_files.len(),
+            1,
+            "exactly one snapshot file expected"
+        );
         let snap_path = snapshot_files[0].path();
         assert_eq!(snap_path.file_name().unwrap(), "000000.json");
 

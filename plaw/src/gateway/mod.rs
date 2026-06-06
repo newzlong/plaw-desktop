@@ -421,8 +421,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
                 .verifier_model
                 .clone()
                 .unwrap_or_else(|| model.clone());
-            let timeout =
-                std::time::Duration::from_secs(config.chain_of_verification.timeout_secs);
+            let timeout = std::time::Duration::from_secs(config.chain_of_verification.timeout_secs);
             runner.register(Box::new(
                 crate::hooks::builtin::ChainOfVerificationHook::new(
                     provider.clone(),
@@ -485,19 +484,12 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     // the proxy tool's description surfaces availability to the LLM.
     if config.mcp.enabled {
         let mcp_registry = std::sync::Arc::new(
-            crate::tools::mcp::McpRegistry::connect_all(
-                &config.mcp.servers,
-                secret_store.clone(),
-            )
-            .await,
+            crate::tools::mcp::McpRegistry::connect_all(&config.mcp.servers, secret_store.clone())
+                .await,
         );
         let connected = mcp_registry.connected_count();
         let configured = mcp_registry.configured_count();
-        tracing::info!(
-            connected,
-            configured,
-            "MCP registry initialized"
-        );
+        tracing::info!(connected, configured, "MCP registry initialized");
         if configured > 0 {
             exec_tools.push(Box::new(crate::tools::mcp::McpTool::new(mcp_registry)));
         }
@@ -531,8 +523,10 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     // secure-by-default gate).
     let webhook_secret_hash: Option<Arc<str>> =
         config.channels_config.webhook.as_ref().and_then(|webhook| {
-            webhook.secret.as_ref().and_then(|secret| {
-                match secret.reveal(secret_store.as_ref()) {
+            webhook
+                .secret
+                .as_ref()
+                .and_then(|secret| match secret.reveal(secret_store.as_ref()) {
                     Ok(plain) => {
                         let trimmed = plain.trim();
                         (!trimmed.is_empty())
@@ -545,8 +539,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
                         );
                         None
                     }
-                }
-            })
+                })
         });
 
     // WhatsApp channel (if configured). access_token/verify_token are
@@ -671,23 +664,22 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     // WATI channel (if configured). api_token is a `Secret` newtype
     // (PR #21 migration cont'd) — reveal once at channel construction;
     // WatiChannel itself stores the plaintext for outbound API calls.
-    let wati_channel: Option<Arc<WatiChannel>> = config
-        .channels_config
-        .wati
-        .as_ref()
-        .and_then(|wati_cfg| match wati_cfg.api_token.reveal(secret_store.as_ref()) {
-            Ok(api_token) => Some(Arc::new(WatiChannel::new(
-                api_token,
-                wati_cfg.api_url.clone(),
-                wati_cfg.tenant_id.clone(),
-                wati_cfg.allowed_numbers.clone(),
-            ))),
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    "Failed to decrypt channels.wati.api_token — WATI channel disabled"
-                );
-                None
+    let wati_channel: Option<Arc<WatiChannel>> =
+        config.channels_config.wati.as_ref().and_then(|wati_cfg| {
+            match wati_cfg.api_token.reveal(secret_store.as_ref()) {
+                Ok(api_token) => Some(Arc::new(WatiChannel::new(
+                    api_token,
+                    wati_cfg.api_url.clone(),
+                    wati_cfg.tenant_id.clone(),
+                    wati_cfg.allowed_numbers.clone(),
+                ))),
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "Failed to decrypt channels.wati.api_token — WATI channel disabled"
+                    );
+                    None
+                }
             }
         });
     // wati.webhook_secret is the first config field that uses the
@@ -987,7 +979,10 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route("/api/tools", get(api::handle_api_tools))
         .route("/api/cron", get(api::handle_api_cron_list))
         .route("/api/cron", post(api::handle_api_cron_add))
-        .route("/api/cron/{id}", delete(api::handle_api_cron_delete).patch(api::handle_api_cron_patch))
+        .route(
+            "/api/cron/{id}",
+            delete(api::handle_api_cron_delete).patch(api::handle_api_cron_patch),
+        )
         .route("/api/integrations", get(api::handle_api_integrations))
         .route(
             "/api/doctor",
@@ -1026,9 +1021,11 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     if config.cron.enabled {
         let scheduler_config = config.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                crate::cron::scheduler::run_with_notifier(scheduler_config, Some(scheduler_event_tx))
-                    .await
+            if let Err(e) = crate::cron::scheduler::run_with_notifier(
+                scheduler_config,
+                Some(scheduler_event_tx),
+            )
+            .await
             {
                 tracing::error!("Cron scheduler exited: {e}");
             }
@@ -1200,10 +1197,8 @@ async fn run_gateway_chat_simple(state: &AppState, message: &str) -> anyhow::Res
     // workspace-aware system context before model invocation.
     let system_prompt = {
         let config_guard = state.config.lock();
-        let skills = crate::skills::load_skills_with_config(
-            &config_guard.workspace_dir,
-            &config_guard,
-        );
+        let skills =
+            crate::skills::load_skills_with_config(&config_guard.workspace_dir, &config_guard);
         crate::channels::build_system_prompt(
             &config_guard.workspace_dir,
             &state.model,
@@ -1577,6 +1572,8 @@ async fn handle_webhook(
                     error_message: None,
                     input_tokens: None,
                     output_tokens: None,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
                 });
             state.observer.record_metric(
                 &crate::observability::traits::ObserverMetric::RequestLatency(duration),
@@ -1608,6 +1605,8 @@ async fn handle_webhook(
                     error_message: Some(sanitized.clone()),
                     input_tokens: None,
                     output_tokens: None,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
                 });
             state.observer.record_metric(
                 &crate::observability::traits::ObserverMetric::RequestLatency(duration),
@@ -2436,7 +2435,10 @@ mod tests {
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
-            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
+            secret_store: Arc::new(crate::security::SecretStore::new(
+                std::path::Path::new(""),
+                false,
+            )),
             qq: None,
             qq_webhook_enabled: false,
             qq_webhook_secret_hash: None,
@@ -2498,7 +2500,10 @@ mod tests {
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
-            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
+            secret_store: Arc::new(crate::security::SecretStore::new(
+                std::path::Path::new(""),
+                false,
+            )),
             qq: None,
             qq_webhook_enabled: false,
             qq_webhook_secret_hash: None,
@@ -2546,7 +2551,10 @@ mod tests {
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
-            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
+            secret_store: Arc::new(crate::security::SecretStore::new(
+                std::path::Path::new(""),
+                false,
+            )),
             qq: None,
             qq_webhook_enabled: false,
             qq_webhook_secret_hash: None,
@@ -2595,7 +2603,10 @@ mod tests {
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
-            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
+            secret_store: Arc::new(crate::security::SecretStore::new(
+                std::path::Path::new(""),
+                false,
+            )),
             qq: None,
             qq_webhook_enabled: false,
             qq_webhook_secret_hash: None,
@@ -3070,7 +3081,10 @@ Reminder set successfully."#;
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
-            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
+            secret_store: Arc::new(crate::security::SecretStore::new(
+                std::path::Path::new(""),
+                false,
+            )),
             qq: None,
             qq_webhook_enabled: false,
             qq_webhook_secret_hash: None,
@@ -3143,7 +3157,10 @@ Reminder set successfully."#;
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
-            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
+            secret_store: Arc::new(crate::security::SecretStore::new(
+                std::path::Path::new(""),
+                false,
+            )),
             qq: None,
             qq_webhook_enabled: false,
             qq_webhook_secret_hash: None,
@@ -3198,7 +3215,10 @@ Reminder set successfully."#;
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
-            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
+            secret_store: Arc::new(crate::security::SecretStore::new(
+                std::path::Path::new(""),
+                false,
+            )),
             qq: None,
             qq_webhook_enabled: false,
             qq_webhook_secret_hash: None,
@@ -3258,7 +3278,10 @@ Reminder set successfully."#;
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
-            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
+            secret_store: Arc::new(crate::security::SecretStore::new(
+                std::path::Path::new(""),
+                false,
+            )),
             qq: None,
             qq_webhook_enabled: false,
             qq_webhook_secret_hash: None,
@@ -3323,7 +3346,10 @@ Reminder set successfully."#;
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
-            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
+            secret_store: Arc::new(crate::security::SecretStore::new(
+                std::path::Path::new(""),
+                false,
+            )),
             qq: None,
             qq_webhook_enabled: false,
             qq_webhook_secret_hash: None,
@@ -3410,7 +3436,10 @@ Reminder set successfully."#;
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
-            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
+            secret_store: Arc::new(crate::security::SecretStore::new(
+                std::path::Path::new(""),
+                false,
+            )),
             qq: None,
             qq_webhook_enabled: false,
             qq_webhook_secret_hash: None,
@@ -3469,7 +3498,10 @@ Reminder set successfully."#;
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
-            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
+            secret_store: Arc::new(crate::security::SecretStore::new(
+                std::path::Path::new(""),
+                false,
+            )),
             qq: None,
             qq_webhook_enabled: false,
             qq_webhook_secret_hash: None,
@@ -3533,7 +3565,10 @@ Reminder set successfully."#;
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
-            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
+            secret_store: Arc::new(crate::security::SecretStore::new(
+                std::path::Path::new(""),
+                false,
+            )),
             qq: None,
             qq_webhook_enabled: false,
             qq_webhook_secret_hash: None,
@@ -3602,7 +3637,10 @@ Reminder set successfully."#;
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
-            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
+            secret_store: Arc::new(crate::security::SecretStore::new(
+                std::path::Path::new(""),
+                false,
+            )),
             qq: None,
             qq_webhook_enabled: false,
             qq_webhook_secret_hash: None,
@@ -3668,7 +3706,10 @@ Reminder set successfully."#;
             nextcloud_talk_webhook_secret: Some(Arc::from(secret)),
             wati: None,
             wati_webhook_secret_hash: None,
-            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
+            secret_store: Arc::new(crate::security::SecretStore::new(
+                std::path::Path::new(""),
+                false,
+            )),
             qq: None,
             qq_webhook_enabled: false,
             qq_webhook_secret_hash: None,
@@ -3731,7 +3772,10 @@ Reminder set successfully."#;
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
-            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
+            secret_store: Arc::new(crate::security::SecretStore::new(
+                std::path::Path::new(""),
+                false,
+            )),
             qq: None,
             qq_webhook_enabled: false,
             qq_webhook_secret_hash: None,
@@ -3789,7 +3833,10 @@ Reminder set successfully."#;
             nextcloud_talk_webhook_secret: None,
             wati: None,
             wati_webhook_secret_hash: None,
-            secret_store: Arc::new(crate::security::SecretStore::new(std::path::Path::new(""), false)),
+            secret_store: Arc::new(crate::security::SecretStore::new(
+                std::path::Path::new(""),
+                false,
+            )),
             qq: Some(qq),
             qq_webhook_enabled: true,
             qq_webhook_secret_hash: None,
@@ -4336,10 +4383,7 @@ Reminder set successfully."#;
         let secret = generate_test_secret();
         let state = wati_test_state(Some(Arc::from(hash_webhook_secret(&secret))));
         let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Webhook-Secret",
-            HeaderValue::from_str(&secret).unwrap(),
-        );
+        headers.insert("X-Webhook-Secret", HeaderValue::from_str(&secret).unwrap());
         let response = handle_wati_webhook(
             State(state),
             test_public_connect_info(),
@@ -4398,12 +4442,13 @@ Reminder set successfully."#;
 
     fn nextcloud_talk_test_state(webhook_secret: Option<Arc<str>>) -> AppState {
         let mut state = wati_test_state(None);
-        state.nextcloud_talk =
-            Some(Arc::new(crate::channels::nextcloud_talk::NextcloudTalkChannel::new(
+        state.nextcloud_talk = Some(Arc::new(
+            crate::channels::nextcloud_talk::NextcloudTalkChannel::new(
                 "https://example.invalid".into(),
                 "nc-app-token".into(),
                 vec!["*".into()],
-            )));
+            ),
+        ));
         state.nextcloud_talk_webhook_secret = webhook_secret;
         state.wati = None;
         state
@@ -4526,10 +4571,7 @@ Reminder set successfully."#;
         let wrong = generate_test_secret();
         let state = wati_test_state(Some(Arc::from(hash_webhook_secret(&valid))));
         let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Webhook-Secret",
-            HeaderValue::from_str(&wrong).unwrap(),
-        );
+        headers.insert("X-Webhook-Secret", HeaderValue::from_str(&wrong).unwrap());
         let response = handle_wati_webhook(
             State(state),
             test_public_connect_info(),

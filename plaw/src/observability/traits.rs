@@ -20,6 +20,13 @@ pub enum ObserverEvent {
         messages_count: usize,
     },
     /// Result of a single LLM provider call.
+    ///
+    /// `cache_creation_input_tokens` + `cache_read_input_tokens` are
+    /// populated for providers that report Anthropic-style prefix-cache
+    /// breakdown (Anthropic native, AWS Bedrock w/ Claude); `None` for
+    /// every other provider. `input_tokens` stays the TOTAL prompt
+    /// tokens so callers that only sum input/output keep working
+    /// without code change.
     LlmResponse {
         provider: String,
         model: String,
@@ -28,6 +35,8 @@ pub enum ObserverEvent {
         error_message: Option<String>,
         input_tokens: Option<u64>,
         output_tokens: Option<u64>,
+        cache_creation_input_tokens: Option<u64>,
+        cache_read_input_tokens: Option<u64>,
     },
     /// The agent session has finished.
     ///

@@ -946,6 +946,7 @@ impl SseAccumulator {
             self.usage = Some(TokenUsage {
                 input_tokens: u.prompt_tokens,
                 output_tokens: u.completion_tokens,
+                ..Default::default()
             });
         }
 
@@ -2229,6 +2230,7 @@ impl Provider for OpenAiCompatibleProvider {
         let usage = chat_response.usage.map(|u| TokenUsage {
             input_tokens: u.prompt_tokens,
             output_tokens: u.completion_tokens,
+            ..Default::default()
         });
         let choice = chat_response
             .choices
@@ -2386,6 +2388,7 @@ impl Provider for OpenAiCompatibleProvider {
         let usage = native_response.usage.map(|u| TokenUsage {
             input_tokens: u.prompt_tokens,
             output_tokens: u.completion_tokens,
+            ..Default::default()
         });
         let message = native_response
             .choices

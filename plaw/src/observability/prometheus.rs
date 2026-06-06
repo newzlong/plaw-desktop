@@ -12,6 +12,15 @@ pub struct PrometheusObserver {
     llm_requests: IntCounterVec,
     tokens_input_total: IntCounterVec,
     tokens_output_total: IntCounterVec,
+    /// Prefix-cache write tokens billed at 1.25× input (Anthropic + Bedrock).
+    /// `tokens_input_total` already includes these — the breakdown counter
+    /// lets dashboards compute the cache hit ratio as
+    /// `cache_read / (cache_read + cache_creation + uncached)` where
+    /// `uncached = input - cache_read - cache_creation`.
+    tokens_cache_creation_total: IntCounterVec,
+    /// Prefix-cache read tokens billed at 0.1× input. The metric users
+    /// watch for cost savings — high values mean the cache is paying off.
+    tokens_cache_read_total: IntCounterVec,
     tool_calls: IntCounterVec,
     channel_messages: IntCounterVec,
     heartbeat_ticks: prometheus::IntCounter,
@@ -51,9 +60,26 @@ impl PrometheusObserver {
         .expect("valid metric");
 
         let tokens_output_total = IntCounterVec::new(
+            prometheus::Opts::new("plaw_tokens_output_total", "Total output tokens consumed"),
+            &["provider", "model"],
+        )
+        .expect("valid metric");
+
+        let tokens_cache_creation_total = IntCounterVec::new(
             prometheus::Opts::new(
-                "plaw_tokens_output_total",
-                "Total output tokens consumed",
+                "plaw_tokens_cache_creation_total",
+                "Tokens billed at the prefix-cache WRITE rate (1.25x input). \
+                 Populated by Anthropic + Bedrock w/ Claude only.",
+            ),
+            &["provider", "model"],
+        )
+        .expect("valid metric");
+
+        let tokens_cache_read_total = IntCounterVec::new(
+            prometheus::Opts::new(
+                "plaw_tokens_cache_read_total",
+                "Tokens billed at the prefix-cache HIT rate (0.1x input). \
+                 The cost-savings metric — higher is better.",
             ),
             &["provider", "model"],
         )
@@ -102,19 +128,14 @@ impl PrometheusObserver {
         .expect("valid metric");
 
         let request_latency = Histogram::with_opts(
-            HistogramOpts::new(
-                "plaw_request_latency_seconds",
-                "Request latency in seconds",
-            )
-            .buckets(vec![0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]),
+            HistogramOpts::new("plaw_request_latency_seconds", "Request latency in seconds")
+                .buckets(vec![0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]),
         )
         .expect("valid metric");
 
-        let tokens_used = prometheus::IntGauge::new(
-            "plaw_tokens_used_last",
-            "Tokens used in the last request",
-        )
-        .expect("valid metric");
+        let tokens_used =
+            prometheus::IntGauge::new("plaw_tokens_used_last", "Tokens used in the last request")
+                .expect("valid metric");
 
         let active_sessions = GaugeVec::new(
             prometheus::Opts::new("plaw_active_sessions", "Number of active sessions"),
@@ -135,6 +156,12 @@ impl PrometheusObserver {
         registry
             .register(Box::new(tokens_output_total.clone()))
             .ok();
+        registry
+            .register(Box::new(tokens_cache_creation_total.clone()))
+            .ok();
+        registry
+            .register(Box::new(tokens_cache_read_total.clone()))
+            .ok();
         registry.register(Box::new(tool_calls.clone())).ok();
         registry.register(Box::new(channel_messages.clone())).ok();
         registry.register(Box::new(heartbeat_ticks.clone())).ok();
@@ -152,6 +179,8 @@ impl PrometheusObserver {
             llm_requests,
             tokens_input_total,
             tokens_output_total,
+            tokens_cache_creation_total,
+            tokens_cache_read_total,
             tool_calls,
             channel_messages,
             heartbeat_ticks,
@@ -204,6 +233,8 @@ impl Observer for PrometheusObserver {
                 success,
                 input_tokens,
                 output_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
                 ..
             } => {
                 let success_str = if *success { "true" } else { "false" };
@@ -219,6 +250,16 @@ impl Observer for PrometheusObserver {
                     self.tokens_output_total
                         .with_label_values(&[provider.as_str(), model.as_str()])
                         .inc_by(*output);
+                }
+                if let Some(create) = cache_creation_input_tokens {
+                    self.tokens_cache_creation_total
+                        .with_label_values(&[provider.as_str(), model.as_str()])
+                        .inc_by(*create);
+                }
+                if let Some(read) = cache_read_input_tokens {
+                    self.tokens_cache_read_total
+                        .with_label_values(&[provider.as_str(), model.as_str()])
+                        .inc_by(*read);
                 }
             }
             ObserverEvent::ToolCallStart { tool: _ }
@@ -448,6 +489,8 @@ mod tests {
             error_message: None,
             input_tokens: Some(100),
             output_tokens: Some(50),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
         });
         obs.record_event(&ObserverEvent::LlmResponse {
             provider: "openrouter".into(),
@@ -457,6 +500,8 @@ mod tests {
             error_message: None,
             input_tokens: Some(200),
             output_tokens: Some(80),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
         });
 
         let output = obs.encode();
@@ -483,6 +528,8 @@ mod tests {
             error_message: Some("timeout".into()),
             input_tokens: None,
             output_tokens: None,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
         });
 
         let output = obs.encode();
@@ -492,5 +539,83 @@ mod tests {
         // Token counters should not appear (no data recorded)
         assert!(!output.contains("plaw_tokens_input_total{"));
         assert!(!output.contains("plaw_tokens_output_total{"));
+    }
+
+    // ── PR #78 prefix-cache observability ────────────────────────────
+
+    /// Anthropic / Bedrock w/ Claude reports cache breakdown — the new
+    /// `tokens_cache_creation_total` and `tokens_cache_read_total`
+    /// counters must accumulate alongside the existing input/output
+    /// totals.
+    #[test]
+    fn llm_response_with_cache_breakdown_increments_cache_counters() {
+        let obs = PrometheusObserver::new();
+
+        obs.record_event(&ObserverEvent::LlmResponse {
+            provider: "anthropic".into(),
+            model: "claude-opus-4-8".into(),
+            duration: Duration::from_millis(150),
+            success: true,
+            error_message: None,
+            input_tokens: Some(10_000),
+            output_tokens: Some(200),
+            cache_creation_input_tokens: Some(8_000),
+            cache_read_input_tokens: Some(1_500),
+        });
+        obs.record_event(&ObserverEvent::LlmResponse {
+            provider: "anthropic".into(),
+            model: "claude-opus-4-8".into(),
+            duration: Duration::from_millis(120),
+            success: true,
+            error_message: None,
+            input_tokens: Some(9_800),
+            output_tokens: Some(180),
+            cache_creation_input_tokens: Some(0),
+            cache_read_input_tokens: Some(9_500),
+        });
+
+        let output = obs.encode();
+        assert!(output.contains(
+            r#"plaw_tokens_cache_creation_total{model="claude-opus-4-8",provider="anthropic"} 8000"#
+        ));
+        // 1500 + 9500 = 11000 — high cache_read counter means the cache
+        // is paying off.
+        assert!(output.contains(
+            r#"plaw_tokens_cache_read_total{model="claude-opus-4-8",provider="anthropic"} 11000"#
+        ));
+        // Existing input/output totals continue to reflect the TOTAL
+        // prompt tokens (the cache fields are a breakdown, not an
+        // alternative — they sum into input).
+        assert!(output.contains(
+            r#"plaw_tokens_input_total{model="claude-opus-4-8",provider="anthropic"} 19800"#
+        ));
+    }
+
+    /// Providers that do not report cache breakdown (OpenAI, Ollama,
+    /// Gemini, etc.) must NOT create cache counter time-series — empty
+    /// label sets clutter dashboards and grafana would error on
+    /// missing metric subscripts.
+    #[test]
+    fn llm_response_without_cache_breakdown_leaves_cache_counters_empty() {
+        let obs = PrometheusObserver::new();
+
+        obs.record_event(&ObserverEvent::LlmResponse {
+            provider: "ollama".into(),
+            model: "llama3".into(),
+            duration: Duration::from_millis(50),
+            success: true,
+            error_message: None,
+            input_tokens: Some(100),
+            output_tokens: Some(40),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        });
+
+        let output = obs.encode();
+        // Input/output do appear; cache counters do NOT (None inputs
+        // skip the .inc_by branch entirely).
+        assert!(output.contains("plaw_tokens_input_total{"));
+        assert!(!output.contains("plaw_tokens_cache_creation_total{"));
+        assert!(!output.contains("plaw_tokens_cache_read_total{"));
     }
 }

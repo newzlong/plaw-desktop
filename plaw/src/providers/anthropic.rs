@@ -142,6 +142,14 @@ struct AnthropicUsage {
     input_tokens: Option<u64>,
     #[serde(default)]
     output_tokens: Option<u64>,
+    /// Prefix-cache write — tokens billed at 1.25× input. Set when the
+    /// request established a new cache entry.
+    #[serde(default)]
+    cache_creation_input_tokens: Option<u64>,
+    /// Prefix-cache hit — tokens billed at 0.1× input. The metric users
+    /// care about for prefix-cache cost savings.
+    #[serde(default)]
+    cache_read_input_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -361,7 +369,8 @@ impl AnthropicProvider {
                 }
                 "assistant" => {
                     if native_tool_msgs {
-                        if let Some(blocks) = Self::parse_assistant_tool_call_message(&msg.content) {
+                        if let Some(blocks) = Self::parse_assistant_tool_call_message(&msg.content)
+                        {
                             native_messages.push(NativeMessage {
                                 role: "assistant".to_string(),
                                 content: blocks,
@@ -444,6 +453,8 @@ impl AnthropicProvider {
         let usage = response.usage.map(|u| TokenUsage {
             input_tokens: u.input_tokens,
             output_tokens: u.output_tokens,
+            cache_creation_input_tokens: u.cache_creation_input_tokens,
+            cache_read_input_tokens: u.cache_read_input_tokens,
         });
 
         for block in response.content {
@@ -490,8 +501,7 @@ impl AnthropicProvider {
             .pool_max_idle_per_host(0)
             .timeout(std::time::Duration::from_secs(120))
             .connect_timeout(std::time::Duration::from_secs(10));
-        let builder =
-            crate::config::apply_runtime_proxy_to_builder(builder, "provider.anthropic");
+        let builder = crate::config::apply_runtime_proxy_to_builder(builder, "provider.anthropic");
         builder.build().unwrap_or_else(|e| {
             tracing::warn!("[anthropic] http_client build failed: {e}");
             reqwest::Client::new()
@@ -506,8 +516,7 @@ impl AnthropicProvider {
             .pool_max_idle_per_host(0)
             .timeout(std::time::Duration::from_secs(600))
             .connect_timeout(std::time::Duration::from_secs(30));
-        let builder =
-            crate::config::apply_runtime_proxy_to_builder(builder, "provider.anthropic");
+        let builder = crate::config::apply_runtime_proxy_to_builder(builder, "provider.anthropic");
         builder.build().unwrap_or_else(|e| {
             tracing::warn!("[anthropic] streaming_http_client build failed: {e}");
             reqwest::Client::new()
@@ -536,8 +545,14 @@ impl AnthropicProvider {
             // Extract tool calls as readable text
             if let Some(calls) = value.get("tool_calls").and_then(|v| v.as_array()) {
                 for call in calls {
-                    let name = call.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
-                    let args = call.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}");
+                    let name = call
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let args = call
+                        .get("arguments")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("{}");
                     parts.push(format!("[Calling tool: {name}({args})]"));
                 }
             }
@@ -553,7 +568,10 @@ impl AnthropicProvider {
     /// For providers like Kimi that reject tool_result content blocks in requests.
     fn downgrade_tool_result_message(content: &str) -> String {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(content) {
-            let tool_id = value.get("tool_call_id").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let tool_id = value
+                .get("tool_call_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
             let result = value.get("content").and_then(|v| v.as_str()).unwrap_or("");
             return format!("[Tool result for {tool_id}]:\n{result}");
         }
@@ -569,9 +587,7 @@ impl AnthropicProvider {
     /// `chat_with_system`'s non-streaming caller). Use
     /// `consume_sse_stream_with_tokens(response, on_token)` directly when
     /// you want real-time token delivery.
-    async fn consume_sse_stream(
-        response: reqwest::Response,
-    ) -> anyhow::Result<NativeChatResponse> {
+    async fn consume_sse_stream(response: reqwest::Response) -> anyhow::Result<NativeChatResponse> {
         Self::consume_sse_stream_with_tokens(response, None).await
     }
 
@@ -609,6 +625,8 @@ impl AnthropicProvider {
         let mut current_block_type = String::new();
         let mut input_tokens: Option<u64> = None;
         let mut output_tokens: Option<u64> = None;
+        let mut cache_creation_input_tokens: Option<u64> = None;
+        let mut cache_read_input_tokens: Option<u64> = None;
         let mut sse_detected = false;
         let mut format_decided = false;
 
@@ -671,6 +689,8 @@ impl AnthropicProvider {
                     &mut current_block_type,
                     &mut input_tokens,
                     &mut output_tokens,
+                    &mut cache_creation_input_tokens,
+                    &mut cache_read_input_tokens,
                 );
             }
         }
@@ -690,6 +710,8 @@ impl AnthropicProvider {
                 &mut current_block_type,
                 &mut input_tokens,
                 &mut output_tokens,
+                &mut cache_creation_input_tokens,
+                &mut cache_read_input_tokens,
             );
         }
 
@@ -718,10 +740,16 @@ impl AnthropicProvider {
             );
         }
 
-        let usage = if input_tokens.is_some() || output_tokens.is_some() {
+        let usage = if input_tokens.is_some()
+            || output_tokens.is_some()
+            || cache_creation_input_tokens.is_some()
+            || cache_read_input_tokens.is_some()
+        {
             Some(AnthropicUsage {
                 input_tokens,
                 output_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
             })
         } else {
             None
@@ -748,6 +776,8 @@ impl AnthropicProvider {
         current_block_type: &mut String,
         input_tokens: &mut Option<u64>,
         output_tokens: &mut Option<u64>,
+        cache_creation_input_tokens: &mut Option<u64>,
+        cache_read_input_tokens: &mut Option<u64>,
     ) {
         for line in event_block.lines() {
             // SSE spec: space after colon is optional (Kimi sends "data:{json}")
@@ -767,6 +797,22 @@ impl AnthropicProvider {
                 Some("message_start") => {
                     if let Some(usage) = event.get("message").and_then(|m| m.get("usage")) {
                         *input_tokens = usage.get("input_tokens").and_then(|v| v.as_u64());
+                        // Anthropic puts cache_* counters on message_start
+                        // (they describe the prompt that was just billed,
+                        // not the output). Pick them up here so the final
+                        // TokenUsage shows real hit rate.
+                        if let Some(v) = usage
+                            .get("cache_creation_input_tokens")
+                            .and_then(serde_json::Value::as_u64)
+                        {
+                            *cache_creation_input_tokens = Some(v);
+                        }
+                        if let Some(v) = usage
+                            .get("cache_read_input_tokens")
+                            .and_then(serde_json::Value::as_u64)
+                        {
+                            *cache_read_input_tokens = Some(v);
+                        }
                     }
                 }
                 Some("content_block_start") => {
@@ -840,7 +886,6 @@ impl AnthropicProvider {
             }
         }
     }
-
 }
 
 #[async_trait]
@@ -1838,6 +1883,32 @@ mod tests {
         let usage = result.usage.unwrap();
         assert_eq!(usage.input_tokens, Some(300));
         assert_eq!(usage.output_tokens, Some(75));
+        // Cache fields absent on this fixture → both stay None.
+        assert!(usage.cache_creation_input_tokens.is_none());
+        assert!(usage.cache_read_input_tokens.is_none());
+    }
+
+    /// PR #78 — Anthropic surfaces the prefix-cache breakdown on the
+    /// `usage` object when the request crossed a `cache_control`
+    /// breakpoint. Buffered (non-streaming) JSON path.
+    #[test]
+    fn native_response_parses_cache_breakdown() {
+        let json = r#"{
+            "content": [{"type": "text", "text": "ok"}],
+            "usage": {
+                "input_tokens": 10000,
+                "output_tokens": 50,
+                "cache_creation_input_tokens": 8000,
+                "cache_read_input_tokens": 1500
+            }
+        }"#;
+        let resp: NativeChatResponse = serde_json::from_str(json).unwrap();
+        let result = AnthropicProvider::parse_native_response(resp);
+        let usage = result.usage.expect("usage must parse");
+        assert_eq!(usage.input_tokens, Some(10_000));
+        assert_eq!(usage.output_tokens, Some(50));
+        assert_eq!(usage.cache_creation_input_tokens, Some(8_000));
+        assert_eq!(usage.cache_read_input_tokens, Some(1_500));
     }
 
     #[test]
