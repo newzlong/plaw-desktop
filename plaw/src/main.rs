@@ -609,6 +609,30 @@ Examples:
         #[command(subcommand)]
         sandbox_command: SandboxCommands,
     },
+
+    /// Inspect and diagnose configured MCP (Model Context Protocol) servers
+    #[command(long_about = "\
+Inspect and diagnose configured MCP servers.
+
+Subcommands:
+  list           List configured [[mcp.servers]] entries with transport,
+                 endpoint, auth method, and per-server OAuth login state.
+                 Pure config inspection, no network.
+  test <name>    Real end-to-end probe: build an McpClient for the named
+                 server, perform the MCP handshake, call tools/list, print
+                 server-info + tool count + tool names, then close. Validates
+                 the entire MCP stack including OAuth without restarting
+                 the running plaw gateway.
+
+Examples:
+  plaw mcp list
+  plaw mcp list --format json
+  plaw mcp test github
+  plaw mcp test notion")]
+    Mcp {
+        #[command(subcommand)]
+        mcp_command: McpCommands,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -629,6 +653,27 @@ enum SandboxCommands {
 
 #[derive(Clone, Debug, clap::ValueEnum)]
 enum SandboxStatusFormat {
+    Text,
+    Json,
+}
+
+#[derive(Subcommand, Debug)]
+enum McpCommands {
+    /// Print configured [[mcp.servers]] entries with auth state
+    List {
+        /// Output format: `text` (human-readable) or `json` (machine-parseable)
+        #[arg(long, default_value = "text")]
+        format: McpListFormat,
+    },
+    /// One-shot probe: connect, handshake, list tools, disconnect
+    Test {
+        /// Name of the MCP server (must match a `[[mcp.servers]]` entry)
+        name: String,
+    },
+}
+
+#[derive(Clone, Debug, clap::ValueEnum)]
+enum McpListFormat {
     Text,
     Json,
 }
@@ -1291,6 +1336,22 @@ async fn main() -> Result<()> {
                 Ok(())
             }
         },
+
+        Commands::Mcp { mcp_command } => match mcp_command {
+            McpCommands::List { format } => {
+                let auth_service = std::sync::Arc::new(auth::AuthService::from_config(&config));
+                let report = mcp_list_report(&config, &auth_service).await;
+                match format {
+                    McpListFormat::Text => println!("{}", render_mcp_list_text(&report)),
+                    McpListFormat::Json => println!(
+                        "{}",
+                        serde_json::to_string_pretty(&report).expect("MCP list report serializes")
+                    ),
+                }
+                Ok(())
+            }
+            McpCommands::Test { name } => mcp_test_run(&config, &name).await,
+        },
     }
 }
 
@@ -1443,6 +1504,307 @@ fn render_sandbox_status_text(report: &SandboxStatusReport) -> String {
         report.resource_limits.max_subprocesses
     ));
     out
+}
+
+// ─── PR #84: `plaw mcp` observability + diagnostics ─────────────────
+
+/// Top-level report for `plaw mcp list`.
+///
+/// Stable wire format pinned by
+/// `mcp_list_report_json_roundtrip_is_stable` — once a script /
+/// dashboard depends on these field names, we don't rename them.
+#[derive(Debug, Serialize)]
+struct McpServerListReport {
+    enabled: bool,
+    total: usize,
+    servers: Vec<McpServerEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct McpServerEntry {
+    name: String,
+    /// Wire-format kebab-case: `"stdio" | "http"`. Matches TOML
+    /// `[[mcp.servers]] transport.kind`.
+    transport: String,
+    /// `command` for stdio servers, `url` for http servers.
+    endpoint: String,
+    /// `"none" | "bearer" | "oauth"`.
+    auth_method: String,
+    /// `Some("logged_in" | "not_logged_in" | "expired")` for OAuth
+    /// servers; `None` for non-OAuth (stdio / static bearer).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    oauth_status: Option<String>,
+    allowed_tools: Vec<String>,
+}
+
+/// Build the `mcp list` report. Async because the OAuth-status probe
+/// hits `AuthService::get_valid_mcp_access_token` which reads
+/// `auth-profiles.json` from disk.
+async fn mcp_list_report(
+    config: &Config,
+    auth_service: &std::sync::Arc<auth::AuthService>,
+) -> McpServerListReport {
+    let mut entries = Vec::with_capacity(config.mcp.servers.len());
+    for cfg in &config.mcp.servers {
+        let (transport, endpoint, auth_method, oauth_status) = match &cfg.transport {
+            crate::config::McpTransport::Stdio => ("stdio", cfg.command.as_str(), "none", None),
+            crate::config::McpTransport::Http {
+                url,
+                bearer_token,
+                oauth,
+                ..
+            } => {
+                let (method, status) = if oauth.is_some() {
+                    let status = match auth_service.get_valid_mcp_access_token(&cfg.name).await {
+                        Ok(Some(_)) => Some("logged_in".to_string()),
+                        Ok(None) => Some("not_logged_in".to_string()),
+                        Err(_) => Some("expired".to_string()),
+                    };
+                    ("oauth", status)
+                } else if bearer_token.is_some() {
+                    ("bearer", None)
+                } else {
+                    ("none", None)
+                };
+                ("http", url.as_str(), method, status)
+            }
+        };
+        entries.push(McpServerEntry {
+            name: cfg.name.clone(),
+            transport: transport.to_string(),
+            endpoint: endpoint.to_string(),
+            auth_method: auth_method.to_string(),
+            oauth_status,
+            allowed_tools: cfg.allowed_tools.clone(),
+        });
+    }
+
+    McpServerListReport {
+        enabled: config.mcp.enabled,
+        total: entries.len(),
+        servers: entries,
+    }
+}
+
+/// Human-readable renderer for `plaw mcp list`. The Sandbox PR #82
+/// pattern: explicit-disabled header / per-server block / actionable
+/// hint for OAuth servers in `not_logged_in` state.
+fn render_mcp_list_text(report: &McpServerListReport) -> String {
+    let mut out = String::new();
+    out.push_str("plaw MCP servers\n");
+    out.push_str("================\n\n");
+    let enabled_str = if report.enabled {
+        "true"
+    } else {
+        "false (set [mcp].enabled = true in config.toml to enable)"
+    };
+    out.push_str(&format!("enabled : {enabled_str}\n"));
+    out.push_str(&format!("total   : {}\n\n", report.total));
+
+    if report.servers.is_empty() {
+        out.push_str("no MCP servers configured\n");
+        return out;
+    }
+
+    for srv in &report.servers {
+        out.push_str(&format!("• {} ({})\n", srv.name, srv.transport));
+        out.push_str(&format!("    endpoint    : {}\n", srv.endpoint));
+        out.push_str(&format!("    auth method : {}\n", srv.auth_method));
+        if let Some(status) = &srv.oauth_status {
+            let annotation = match status.as_str() {
+                "not_logged_in" => " — run `plaw auth login --provider mcp:<server>` to log in",
+                "expired" => " — token expired; re-run `plaw auth login --provider mcp:<server>`",
+                _ => "",
+            };
+            out.push_str(&format!("    oauth       : {status}{annotation}\n"));
+        }
+        let tools_display = if srv.allowed_tools.iter().any(|t| t == "*") {
+            "* (all)".to_string()
+        } else {
+            srv.allowed_tools.join(", ")
+        };
+        out.push_str(&format!("    allowed     : {tools_display}\n"));
+    }
+    out
+}
+
+/// `plaw mcp test <name>`: one-shot real connect → handshake →
+/// tools/list → shutdown. Surfaces server name typos pre-connect
+/// (with the list of valid names), OAuth-required-but-not-logged-in
+/// pre-connect (with a clear pointer at `plaw auth login`), and any
+/// downstream connect/handshake/list errors via `format!("{:#}")`
+/// preserving the full anyhow chain.
+async fn mcp_test_run(config: &Config, name: &str) -> Result<()> {
+    if !config.mcp.enabled {
+        bail!(
+            "MCP is disabled in config.toml; set [mcp].enabled = true and add at least one [[mcp.servers]] entry"
+        );
+    }
+
+    let cfg = match config.mcp.servers.iter().find(|s| s.name == name) {
+        Some(c) => c,
+        None => {
+            let available: Vec<&str> = config.mcp.servers.iter().map(|s| s.name.as_str()).collect();
+            if available.is_empty() {
+                bail!(
+                    "no MCP server named '{name}' in config.toml (and no servers are configured at all)"
+                );
+            } else {
+                bail!(
+                    "no MCP server named '{name}' in config.toml. Available: {}",
+                    available.join(", ")
+                );
+            }
+        }
+    };
+
+    let auth_service = std::sync::Arc::new(auth::AuthService::from_config(config));
+
+    // Preflight OAuth check: if the server uses OAuth but no token
+    // is stored, surface that BEFORE attempting any network I/O so
+    // the user sees a clear actionable message instead of a 401.
+    if let crate::config::McpTransport::Http { oauth, .. } = &cfg.transport {
+        if oauth.is_some() {
+            match auth_service.get_valid_mcp_access_token(&cfg.name).await {
+                Ok(Some(_)) => {} // logged in, proceed
+                Ok(None) => bail!(
+                    "server '{name}' requires OAuth but no valid token is stored. Run: plaw auth login --provider mcp:{name}"
+                ),
+                Err(e) => bail!(
+                    "server '{name}' OAuth refresh failed: {e:#}. Try: plaw auth login --provider mcp:{name}"
+                ),
+            }
+        }
+    }
+
+    let startup_timeout = std::time::Duration::from_millis(cfg.startup_timeout_ms);
+    let request_timeout = std::time::Duration::from_millis(cfg.request_timeout_ms);
+
+    println!("Connecting to MCP server '{name}' ...");
+    let client = match &cfg.transport {
+        crate::config::McpTransport::Stdio => crate::tools::mcp::client::McpClient::connect(
+            &cfg.name,
+            &cfg.command,
+            &cfg.args,
+            &cfg.env,
+            startup_timeout,
+            request_timeout,
+        )
+        .await
+        .with_context(|| format!("connect failed for stdio server '{name}'"))?,
+        crate::config::McpTransport::Http {
+            url,
+            bearer_token,
+            headers,
+            oauth,
+        } => {
+            let workspace = config
+                .config_path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            let secret_store = crate::security::SecretStore::new(&workspace, false);
+            let (oauth_svc, oauth_name) = if oauth.is_some() {
+                (Some(auth_service.clone()), Some(cfg.name.clone()))
+            } else {
+                (None, None)
+            };
+            crate::tools::mcp::client::McpClient::connect_http(
+                &cfg.name,
+                url,
+                bearer_token.as_ref(),
+                headers,
+                startup_timeout,
+                request_timeout,
+                &secret_store,
+                oauth_svc,
+                oauth_name,
+            )
+            .await
+            .with_context(|| format!("connect failed for http server '{name}'"))?
+        }
+    };
+
+    let init = client.initialize_result();
+    let server_info = &init.server_info;
+    println!(
+        "Connected: {} v{} (protocol {})",
+        server_info.name, server_info.version, init.protocol_version
+    );
+
+    let tools = client
+        .list_tools()
+        .await
+        .with_context(|| format!("tools/list failed for server '{name}'"))?;
+
+    println!("\nServer advertises {} tool(s):", tools.len());
+    let allowed = &cfg.allowed_tools;
+    let wildcard = allowed.iter().any(|t| t == "*");
+    for tool in &tools {
+        let blocked = !wildcard && !allowed.iter().any(|t| t == &tool.name);
+        let suffix = if blocked {
+            " [blocked by allow-list]"
+        } else {
+            ""
+        };
+        let desc = tool
+            .description
+            .as_deref()
+            .map(|d| {
+                let one_line: String = d
+                    .split('\n')
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(80)
+                    .collect();
+                if !one_line.is_empty() {
+                    format!(" — {one_line}")
+                } else {
+                    String::new()
+                }
+            })
+            .unwrap_or_default();
+        println!("  • {}{}{}", tool.name, suffix, desc);
+    }
+
+    // Graceful shutdown so stdio child gets a chance to flush its
+    // stderr/logs (Lens A finding). Drop alone would SIGKILL via
+    // kill_on_drop(true).
+    client.shutdown().await;
+
+    Ok(())
+}
+
+/// Render `McpTransport` in the same kebab-case wire-form users see
+/// in TOML (`"stdio"`, `"http"`). Plain `Debug` would surface
+/// `Stdio` / `Http { ... }` — inconsistent with the JSON wire format.
+fn format_mcp_transport(transport: &crate::config::McpTransport) -> &'static str {
+    match transport {
+        crate::config::McpTransport::Stdio => "stdio",
+        crate::config::McpTransport::Http { .. } => "http",
+    }
+}
+
+/// Classify the auth method for a server config entry. Used by both
+/// the report builder and the unit tests.
+fn format_mcp_auth_method(transport: &crate::config::McpTransport) -> &'static str {
+    match transport {
+        crate::config::McpTransport::Stdio => "none",
+        crate::config::McpTransport::Http {
+            bearer_token,
+            oauth,
+            ..
+        } => {
+            if oauth.is_some() {
+                "oauth"
+            } else if bearer_token.is_some() {
+                "bearer"
+            } else {
+                "none"
+            }
+        }
+    }
 }
 
 fn handle_estop_command(
@@ -2596,5 +2958,297 @@ mod tests {
         assert!(json.contains("\"windows_limits\":{"));
         assert!(json.contains("\"resource_limits\":{"));
         assert!(json.contains("\"process_memory_mb\":2048"));
+    }
+
+    // ── PR #84: `plaw mcp list` / `plaw mcp test` ────────────────────
+
+    use tempfile::TempDir as McpTempDir;
+
+    #[test]
+    fn mcp_list_parses_with_default_text_format() {
+        let cli = Cli::try_parse_from(["plaw", "mcp", "list"]).expect("mcp list parses");
+        match cli.command {
+            Commands::Mcp {
+                mcp_command: McpCommands::List { format },
+            } => assert!(matches!(format, McpListFormat::Text)),
+            other => panic!("expected mcp list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mcp_list_parses_json_format() {
+        let cli = Cli::try_parse_from(["plaw", "mcp", "list", "--format", "json"])
+            .expect("--format json parses");
+        match cli.command {
+            Commands::Mcp {
+                mcp_command: McpCommands::List { format },
+            } => assert!(matches!(format, McpListFormat::Json)),
+            other => panic!("expected mcp list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mcp_test_parses_required_name_arg() {
+        let cli =
+            Cli::try_parse_from(["plaw", "mcp", "test", "github"]).expect("mcp test <name> parses");
+        match cli.command {
+            Commands::Mcp {
+                mcp_command: McpCommands::Test { name },
+            } => assert_eq!(name, "github"),
+            other => panic!("expected mcp test, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mcp_test_rejects_missing_name() {
+        let err = Cli::try_parse_from(["plaw", "mcp", "test"])
+            .err()
+            .expect("mcp test without name must fail");
+        // clap's "required argument missing" message variant covers
+        // both English wordings ("required arguments were not provided"
+        // / "the following required arguments"). Check on the actual
+        // exit kind instead of message contents.
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument,
+            "unexpected clap error kind: {:?}",
+            err.kind()
+        );
+    }
+
+    #[test]
+    fn format_mcp_transport_renders_kebab_case() {
+        use crate::config::McpTransport;
+        assert_eq!(format_mcp_transport(&McpTransport::Stdio), "stdio");
+        let http = McpTransport::Http {
+            url: "https://x".into(),
+            bearer_token: None,
+            headers: std::collections::HashMap::new(),
+            oauth: None,
+        };
+        assert_eq!(format_mcp_transport(&http), "http");
+    }
+
+    #[test]
+    fn format_mcp_auth_method_returns_none_bearer_oauth() {
+        use crate::config::{McpOAuthConfig, McpTransport};
+        use crate::security::Secret;
+        // Stdio → always "none"
+        assert_eq!(format_mcp_auth_method(&McpTransport::Stdio), "none");
+        // HTTP no auth → "none"
+        let http_no_auth = McpTransport::Http {
+            url: "https://x".into(),
+            bearer_token: None,
+            headers: std::collections::HashMap::new(),
+            oauth: None,
+        };
+        assert_eq!(format_mcp_auth_method(&http_no_auth), "none");
+        // HTTP with static bearer → "bearer"
+        let secret_store = crate::security::SecretStore::new(std::path::Path::new(""), false);
+        let bearer = Secret::new_from_plaintext("token", &secret_store).unwrap();
+        let http_bearer = McpTransport::Http {
+            url: "https://x".into(),
+            bearer_token: Some(bearer),
+            headers: std::collections::HashMap::new(),
+            oauth: None,
+        };
+        assert_eq!(format_mcp_auth_method(&http_bearer), "bearer");
+        // HTTP with OAuth → "oauth" (precedence over bearer)
+        let http_oauth = McpTransport::Http {
+            url: "https://x".into(),
+            bearer_token: None,
+            headers: std::collections::HashMap::new(),
+            oauth: Some(McpOAuthConfig::default()),
+        };
+        assert_eq!(format_mcp_auth_method(&http_oauth), "oauth");
+    }
+
+    fn make_test_mcp_config(enabled: bool, servers: Vec<crate::config::McpServerConfig>) -> Config {
+        let mut config = Config::default();
+        config.mcp.enabled = enabled;
+        config.mcp.servers = servers;
+        config
+    }
+
+    fn make_stdio_server(name: &str) -> crate::config::McpServerConfig {
+        crate::config::McpServerConfig {
+            name: name.into(),
+            transport: crate::config::McpTransport::Stdio,
+            command: "echo".into(),
+            args: Vec::new(),
+            env: std::collections::HashMap::new(),
+            allowed_tools: vec!["*".into()],
+            startup_timeout_ms: 10_000,
+            request_timeout_ms: 60_000,
+        }
+    }
+
+    fn make_http_oauth_server(name: &str, url: &str) -> crate::config::McpServerConfig {
+        crate::config::McpServerConfig {
+            name: name.into(),
+            transport: crate::config::McpTransport::Http {
+                url: url.into(),
+                bearer_token: None,
+                headers: std::collections::HashMap::new(),
+                oauth: Some(crate::config::McpOAuthConfig::default()),
+            },
+            command: String::new(),
+            args: Vec::new(),
+            env: std::collections::HashMap::new(),
+            allowed_tools: vec!["*".into()],
+            startup_timeout_ms: 10_000,
+            request_timeout_ms: 60_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_list_report_when_disabled_returns_empty_with_disabled_flag() {
+        let tmp = McpTempDir::new().unwrap();
+        let auth_service = std::sync::Arc::new(auth::AuthService::new(tmp.path(), false));
+        let config = make_test_mcp_config(false, vec![]);
+        let report = mcp_list_report(&config, &auth_service).await;
+        assert!(!report.enabled);
+        assert_eq!(report.total, 0);
+        assert!(report.servers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mcp_list_report_includes_oauth_status_for_http_servers() {
+        let tmp = McpTempDir::new().unwrap();
+        let auth_service = std::sync::Arc::new(auth::AuthService::new(tmp.path(), false));
+
+        // Pre-stash a token for "alpha" only (using future expiry so
+        // get_valid_mcp_access_token returns Some).
+        let token_set = crate::auth::profiles::TokenSet {
+            access_token: "fresh-token".into(),
+            refresh_token: Some("r".into()),
+            id_token: None,
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            token_type: Some("Bearer".into()),
+            scope: None,
+        };
+        auth_service
+            .store_mcp_oauth(
+                "alpha",
+                token_set,
+                Some("cid".into()),
+                None,
+                std::collections::HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        let config = make_test_mcp_config(
+            true,
+            vec![
+                make_http_oauth_server("alpha", "https://a.example/mcp"),
+                make_http_oauth_server("beta", "https://b.example/mcp"),
+                make_stdio_server("local-stdio"),
+            ],
+        );
+        let report = mcp_list_report(&config, &auth_service).await;
+
+        let alpha = report.servers.iter().find(|s| s.name == "alpha").unwrap();
+        assert_eq!(alpha.transport, "http");
+        assert_eq!(alpha.auth_method, "oauth");
+        assert_eq!(alpha.oauth_status.as_deref(), Some("logged_in"));
+
+        let beta = report.servers.iter().find(|s| s.name == "beta").unwrap();
+        assert_eq!(beta.auth_method, "oauth");
+        assert_eq!(beta.oauth_status.as_deref(), Some("not_logged_in"));
+
+        let stdio = report
+            .servers
+            .iter()
+            .find(|s| s.name == "local-stdio")
+            .unwrap();
+        assert_eq!(stdio.transport, "stdio");
+        assert_eq!(stdio.auth_method, "none");
+        assert!(stdio.oauth_status.is_none());
+    }
+
+    #[test]
+    fn render_mcp_list_text_includes_oauth_not_logged_in_warning() {
+        let report = McpServerListReport {
+            enabled: true,
+            total: 1,
+            servers: vec![McpServerEntry {
+                name: "alpha".into(),
+                transport: "http".into(),
+                endpoint: "https://a.example/mcp".into(),
+                auth_method: "oauth".into(),
+                oauth_status: Some("not_logged_in".into()),
+                allowed_tools: vec!["*".into()],
+            }],
+        };
+        let text = render_mcp_list_text(&report);
+        // Actionable error contract — must mention the login command
+        // verbatim per PR #82's honesty principle.
+        assert!(text.contains("plaw auth login"));
+        assert!(text.contains("not_logged_in"));
+        assert!(text.contains("alpha"));
+        assert!(text.contains("https://a.example/mcp"));
+    }
+
+    #[test]
+    fn render_mcp_list_text_handles_empty_server_list() {
+        let report = McpServerListReport {
+            enabled: true,
+            total: 0,
+            servers: vec![],
+        };
+        let text = render_mcp_list_text(&report);
+        assert!(text.contains("no MCP servers configured"));
+        // No per-server header should appear when servers is empty.
+        assert!(!text.contains("auth method"));
+    }
+
+    /// JSON wire-format contract pin — once scripts grep for these
+    /// field names + values, we don't rename them.
+    #[test]
+    fn mcp_list_report_json_roundtrip_is_stable() {
+        let report = McpServerListReport {
+            enabled: true,
+            total: 2,
+            servers: vec![
+                McpServerEntry {
+                    name: "alpha".into(),
+                    transport: "http".into(),
+                    endpoint: "https://a.example/mcp".into(),
+                    auth_method: "oauth".into(),
+                    oauth_status: Some("not_logged_in".into()),
+                    allowed_tools: vec!["*".into()],
+                },
+                McpServerEntry {
+                    name: "local".into(),
+                    transport: "stdio".into(),
+                    endpoint: "echo".into(),
+                    auth_method: "none".into(),
+                    oauth_status: None,
+                    allowed_tools: vec!["shell".into()],
+                },
+            ],
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        // Top-level
+        assert!(json.contains("\"enabled\":true"));
+        assert!(json.contains("\"total\":2"));
+        assert!(json.contains("\"servers\":["));
+        // Per-server field names + canonical values
+        assert!(json.contains("\"name\":\"alpha\""));
+        assert!(json.contains("\"transport\":\"stdio\""));
+        assert!(json.contains("\"transport\":\"http\""));
+        assert!(json.contains("\"endpoint\":\"https://a.example/mcp\""));
+        assert!(json.contains("\"auth_method\":\"oauth\""));
+        assert!(json.contains("\"auth_method\":\"none\""));
+        assert!(json.contains("\"oauth_status\":\"not_logged_in\""));
+        assert!(json.contains("\"allowed_tools\":[\"*\"]"));
+        // `oauth_status` MUST be skipped when None (script consumers
+        // rely on this to distinguish OAuth from non-OAuth servers).
+        // The stdio entry should NOT carry an "oauth_status" key.
+        let stdio_segment = &json[json.find("\"local\"").unwrap()..];
+        let next_brace = stdio_segment.find('}').unwrap();
+        let stdio_obj = &stdio_segment[..next_brace];
+        assert!(!stdio_obj.contains("oauth_status"));
     }
 }
