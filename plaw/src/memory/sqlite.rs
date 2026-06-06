@@ -30,10 +30,11 @@ const SQLITE_OPEN_TIMEOUT_CAP_SECS: u64 = 300;
 /// [`super::snapshot::hydrate_from_snapshot`] (cold-boot rebuild from
 /// `MEMORY_SNAPSHOT.md`) call into [`init_brain_db_schema`] which
 /// applies this slice.
-pub(super) const MEMORIES_MIGRATIONS: &[crate::db::Migration] = &[crate::db::Migration {
-    version: 1,
-    description: "baseline memories + FTS5 + sync triggers + embedding_cache",
-    sql: "-- Core memories table
+pub(super) const MEMORIES_MIGRATIONS: &[crate::db::Migration] = &[
+    crate::db::Migration {
+        version: 1,
+        description: "baseline memories + FTS5 + sync triggers + embedding_cache",
+        sql: "-- Core memories table
         CREATE TABLE IF NOT EXISTS memories (
             id          TEXT PRIMARY KEY,
             key         TEXT NOT NULL UNIQUE,
@@ -75,21 +76,122 @@ pub(super) const MEMORIES_MIGRATIONS: &[crate::db::Migration] = &[crate::db::Mig
             accessed_at  TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_cache_accessed ON embedding_cache(accessed_at);",
-}];
+    },
+    crate::db::Migration {
+        version: 2,
+        description: "bi-temporal columns + partial unique key index + FTS5 rebuild",
+        // Table-rebuild pattern: SQLite cannot drop a table-level UNIQUE
+        // constraint in place, and bi-temporal needs many rows per key. We
+        // therefore CREATE memories_new with the wider schema, copy v1 rows
+        // into it (backfilling valid_from / ingested_at from created_at,
+        // valid_to NULL = "currently true"), DROP the old table, RENAME
+        // the new one, then replace UNIQUE(key) with a partial unique index
+        // `(key) WHERE valid_to IS NULL`.
+        //
+        // The whole block runs in the per-migration transaction provided by
+        // `db::migrate`, so a failure anywhere rolls everything back and
+        // user_version stays at 1 — the old table is intact and the user
+        // can retry after the bug is fixed.
+        //
+        // PRE-CONDITION: `init_brain_db_schema` calls `ensure_session_id_column`
+        // BEFORE the v1→v2 step, so we can safely SELECT `session_id` here.
+        sql: "
+        CREATE TABLE memories_new (
+            id            TEXT PRIMARY KEY,
+            key           TEXT NOT NULL,
+            content       TEXT NOT NULL,
+            category      TEXT NOT NULL DEFAULT 'core',
+            embedding     BLOB,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL,
+            session_id    TEXT,
+            valid_from    TEXT NOT NULL,
+            valid_to      TEXT,
+            supersedes_id TEXT,
+            ingested_at   TEXT NOT NULL
+        );
+
+        INSERT INTO memories_new (
+            id, key, content, category, embedding,
+            created_at, updated_at, session_id,
+            valid_from, valid_to, supersedes_id, ingested_at
+        )
+        SELECT
+            id, key, content, category, embedding,
+            created_at, updated_at, session_id,
+            COALESCE(created_at, '1970-01-01T00:00:00Z') AS valid_from,
+            NULL AS valid_to,
+            NULL AS supersedes_id,
+            COALESCE(created_at, '1970-01-01T00:00:00Z') AS ingested_at
+        FROM memories;
+
+        DROP TABLE memories;
+        ALTER TABLE memories_new RENAME TO memories;
+
+        -- Partial unique index replaces the v1 table-level UNIQUE(key).
+        -- A key may have many superseded rows but at most one live row.
+        CREATE UNIQUE INDEX idx_memories_key_live
+            ON memories(key) WHERE valid_to IS NULL;
+
+        -- Supporting indexes. v1 left key + category + session_id covered;
+        -- recreate them against the new table plus add bi-temporal helpers.
+        CREATE INDEX idx_memories_category    ON memories(category);
+        CREATE INDEX idx_memories_session     ON memories(session_id);
+        CREATE INDEX idx_memories_key         ON memories(key);
+        CREATE INDEX idx_memories_valid_to    ON memories(valid_to);
+        CREATE INDEX idx_memories_valid_from  ON memories(valid_from);
+        CREATE INDEX idx_memories_supersedes_id ON memories(supersedes_id);
+        CREATE INDEX idx_memories_current
+            ON memories(updated_at DESC) WHERE valid_to IS NULL;
+        CREATE INDEX idx_memories_current_by_category
+            ON memories(category, updated_at DESC) WHERE valid_to IS NULL;
+
+        -- FTS5 triggers were auto-dropped when we DROPped the old table.
+        -- Recreate them against the renamed table so future inserts/updates
+        -- continue to sync the FTS index.
+        CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
+            INSERT INTO memories_fts(rowid, key, content)
+            VALUES (new.rowid, new.key, new.content);
+        END;
+        CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN
+            INSERT INTO memories_fts(memories_fts, rowid, key, content)
+            VALUES ('delete', old.rowid, old.key, old.content);
+        END;
+        CREATE TRIGGER memories_au AFTER UPDATE ON memories BEGIN
+            INSERT INTO memories_fts(memories_fts, rowid, key, content)
+            VALUES ('delete', old.rowid, old.key, old.content);
+            INSERT INTO memories_fts(rowid, key, content)
+            VALUES (new.rowid, new.key, new.content);
+        END;
+
+        -- After the table swap, FTS5 rowids point at the dropped table.
+        -- Rebuild the FTS index from the new table's rowids in one shot.
+        INSERT INTO memories_fts(memories_fts) VALUES('rebuild');
+        ",
+    },
+];
 
 /// Legacy ad-hoc column add for `memories.session_id`. Kept OUTSIDE the
-/// versioned migration slice because SQLite has no `ALTER TABLE ADD COLUMN
-/// IF NOT EXISTS`, and existing pre-framework users already have this
-/// column from this same runtime check. Folding it into a v2 Migration
-/// would fail on those users' next launch. Future schema changes (new
-/// columns, new tables) should go straight into `MEMORIES_MIGRATIONS` as
-/// v2+ — only this one legacy column stays outside.
+/// versioned migration slice because v1's `CREATE TABLE` did not include
+/// `session_id`, and pre-framework users (who already had the column from
+/// this runtime check) would re-fail if we folded it into a Migration.
+///
+/// Now also called BEFORE v2 by [`init_brain_db_schema`] so that v2's
+/// table-rebuild can safely SELECT the `session_id` column even on fresh
+/// installs where v1 just finished and the column was never added yet.
+/// Returns `Ok(())` when the `memories` table does not yet exist — the
+/// caller is expected to invoke this on either side of `db::migrate`.
 pub(super) fn ensure_session_id_column(conn: &Connection) -> anyhow::Result<()> {
-    let has_session_id: bool = conn
+    use rusqlite::OptionalExtension;
+    let table_sql: Option<String> = conn
         .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'")?
-        .query_row([], |row| row.get::<_, String>(0))?
-        .contains("session_id");
-    if !has_session_id {
+        .query_row([], |row| row.get::<_, String>(0))
+        .optional()?;
+    let Some(sql) = table_sql else {
+        // Fresh database before v1 has run — nothing to patch.
+        return Ok(());
+    };
+    if !sql.contains("session_id") {
         conn.execute_batch(
             "ALTER TABLE memories ADD COLUMN session_id TEXT;
              CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id);",
@@ -108,9 +210,22 @@ pub(super) fn ensure_session_id_column(conn: &Connection) -> anyhow::Result<()> 
 ///   inline duplicate of the schema, which drifted from the production
 ///   schema (it lacked the FTS5 sync triggers and the session_id column).
 ///   Routing both paths through one function eliminates that drift.
+///
+/// Migration order (split into two `db::migrate` calls):
+///   1. Apply v1 only — creates the baseline `memories` table on fresh
+///      installs.
+///   2. Run `ensure_session_id_column` — adds the legacy ad-hoc column
+///      that v1's `CREATE TABLE` did not include. Required by v2 because
+///      v2's table-rebuild copies `session_id` into the new schema.
+///   3. Apply remaining migrations (v2+) — `db::migrate` is idempotent,
+///      sees `user_version = 1`, and only steps forward.
 pub(super) fn init_brain_db_schema(conn: &Connection) -> anyhow::Result<()> {
-    crate::db::migrate(conn, "memories", MEMORIES_MIGRATIONS)?;
+    // Step 1: v0→v1 (creates table on fresh installs).
+    crate::db::migrate(conn, "memories", &MEMORIES_MIGRATIONS[..1])?;
+    // Step 2: legacy ad-hoc column add (idempotent; no-op when present).
     ensure_session_id_column(conn)?;
+    // Step 3: v1→v2 (+ any future versions).
+    crate::db::migrate(conn, "memories", MEMORIES_MIGRATIONS)?;
     Ok(())
 }
 
@@ -339,10 +454,15 @@ impl SqliteMemory {
             return Ok(Vec::new());
         }
 
+        // `m.valid_to IS NULL` filter excludes superseded rows from the FTS
+        // hit list. Done in the JOIN rather than via trigger surgery so the
+        // FTS index stays history-inclusive — cheaper than rebuilding on
+        // every supersede.
         let sql = "SELECT m.id, bm25(memories_fts) as score
                    FROM memories_fts f
                    JOIN memories m ON m.rowid = f.rowid
                    WHERE memories_fts MATCH ?1
+                     AND m.valid_to IS NULL
                    ORDER BY score
                    LIMIT ?2";
 
@@ -376,7 +496,12 @@ impl SqliteMemory {
         category: Option<&str>,
         session_id: Option<&str>,
     ) -> anyhow::Result<Vec<(String, f32)>> {
-        let mut sql = "SELECT id, embedding FROM memories WHERE embedding IS NOT NULL".to_string();
+        // `valid_to IS NULL` keeps superseded embeddings out of cosine
+        // ranking. Historical vectors stay on disk (no NULL-out on
+        // supersede) — they are reachable only via `recall_as_of`.
+        let mut sql = "SELECT id, embedding FROM memories \
+                       WHERE embedding IS NOT NULL AND valid_to IS NULL"
+            .to_string();
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         let mut idx = 1;
 
@@ -481,7 +606,7 @@ impl Memory for SqliteMemory {
         category: MemoryCategory,
         session_id: Option<&str>,
     ) -> anyhow::Result<()> {
-        // Compute embedding (async, before blocking work)
+        // Compute embedding (async, before blocking work).
         let embedding_bytes = self
             .get_or_compute_embedding(content)
             .await?
@@ -493,22 +618,45 @@ impl Memory for SqliteMemory {
         let sid = session_id.map(String::from);
 
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            let conn = conn.lock();
+            use rusqlite::OptionalExtension;
+            let mut conn = conn.lock();
+            let tx = conn.transaction()?;
             let now = Local::now().to_rfc3339();
             let cat = Self::category_to_str(&category);
-            let id = Uuid::new_v4().to_string();
+            let new_id = Uuid::new_v4().to_string();
 
-            conn.execute(
-                "INSERT INTO memories (id, key, content, category, embedding, created_at, updated_at, session_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                 ON CONFLICT(key) DO UPDATE SET
-                    content = excluded.content,
-                    category = excluded.category,
-                    embedding = excluded.embedding,
-                    updated_at = excluded.updated_at,
-                    session_id = excluded.session_id",
-                params![id, key, content, cat, embedding_bytes, now, now, sid],
+            // Bi-temporal auto-supersede: if a live row already exists for
+            // this key (valid_to IS NULL), stamp its valid_to = now and
+            // link the new row's supersedes_id. The partial unique index
+            // `idx_memories_key_live` is what guarantees at most one live
+            // row per key, so this lookup is unambiguous.
+            let old_id: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM memories WHERE key = ?1 AND valid_to IS NULL",
+                    params![key],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?;
+
+            if let Some(ref old) = old_id {
+                tx.execute(
+                    "UPDATE memories SET valid_to = ?1, updated_at = ?1 WHERE id = ?2",
+                    params![now, old],
+                )?;
+            }
+
+            tx.execute(
+                "INSERT INTO memories
+                    (id, key, content, category, embedding,
+                     created_at, updated_at, session_id,
+                     valid_from, valid_to, supersedes_id, ingested_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5,
+                         ?6, ?6, ?7,
+                         ?6, NULL, ?8, ?6)",
+                params![new_id, key, content, cat, embedding_bytes, now, sid, old_id],
             )?;
+
+            tx.commit()?;
             Ok(())
         })
         .await?
@@ -576,9 +724,15 @@ impl Memory for SqliteMemory {
                     .map(|i| format!("?{i}"))
                     .collect::<Vec<_>>()
                     .join(", ");
+                // `valid_to IS NULL` is a defence-in-depth filter — the FTS5
+                // candidate set already pre-filtered, but hybrid_merge can
+                // re-introduce vector candidates. Cheap because the merged
+                // list is small (≤ 2*limit ids).
                 let sql = format!(
-                    "SELECT id, key, content, category, created_at, session_id \
-                     FROM memories WHERE id IN ({placeholders})"
+                    "SELECT id, key, content, category, created_at, session_id, \
+                            valid_from, valid_to, supersedes_id \
+                     FROM memories \
+                     WHERE id IN ({placeholders}) AND valid_to IS NULL"
                 );
                 let mut stmt = conn.prepare(&sql)?;
                 let id_params: Vec<Box<dyn rusqlite::types::ToSql>> = merged
@@ -595,17 +749,22 @@ impl Memory for SqliteMemory {
                         row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
                         row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
                     ))
                 })?;
 
                 let mut entry_map = std::collections::HashMap::new();
                 for row in rows {
-                    let (id, key, content, cat, ts, sid) = row?;
-                    entry_map.insert(id, (key, content, cat, ts, sid));
+                    let (id, key, content, cat, ts, sid, vf, vt, supersedes) = row?;
+                    entry_map.insert(id, (key, content, cat, ts, sid, vf, vt, supersedes));
                 }
 
                 for scored in &merged {
-                    if let Some((key, content, cat, ts, sid)) = entry_map.remove(&scored.id) {
+                    if let Some((key, content, cat, ts, sid, vf, vt, supersedes)) =
+                        entry_map.remove(&scored.id)
+                    {
                         let entry = MemoryEntry {
                             id: scored.id.clone(),
                             key,
@@ -614,7 +773,9 @@ impl Memory for SqliteMemory {
                             timestamp: ts,
                             session_id: sid,
                             score: Some(f64::from(scored.final_score)),
-                            ..MemoryEntry::default()
+                            valid_from: vf,
+                            valid_to: vt,
+                            supersedes_id: supersedes,
                         };
                         if let Some(filter_sid) = session_ref {
                             if entry.session_id.as_deref() != Some(filter_sid) {
@@ -645,10 +806,14 @@ impl Memory for SqliteMemory {
                         })
                         .collect();
                     let where_clause = conditions.join(" OR ");
+                    // Wrap the OR'd LIKE conditions in their own group so
+                    // the outer `valid_to IS NULL` filter binds tightly.
                     let sql = format!(
-                        "SELECT id, key, content, category, created_at, session_id FROM memories
-                         WHERE {where_clause}
-                         ORDER BY updated_at DESC
+                        "SELECT id, key, content, category, created_at, session_id, \
+                                valid_from, valid_to, supersedes_id \
+                         FROM memories \
+                         WHERE ({where_clause}) AND valid_to IS NULL \
+                         ORDER BY updated_at DESC \
                          LIMIT ?{}",
                         keywords.len() * 2 + 1
                     );
@@ -671,7 +836,9 @@ impl Memory for SqliteMemory {
                             timestamp: row.get(4)?,
                             session_id: row.get(5)?,
                             score: Some(1.0),
-                            ..MemoryEntry::default()
+                            valid_from: row.get(6)?,
+                            valid_to: row.get(7)?,
+                            supersedes_id: row.get(8)?,
                         })
                     })?;
                     for row in rows {
@@ -698,8 +865,14 @@ impl Memory for SqliteMemory {
 
         tokio::task::spawn_blocking(move || -> anyhow::Result<Option<MemoryEntry>> {
             let conn = conn.lock();
+            // `valid_to IS NULL` filter — return only the currently-live
+            // row. The partial unique index guarantees uniqueness so we
+            // never see more than one match here.
             let mut stmt = conn.prepare(
-                "SELECT id, key, content, category, created_at, session_id FROM memories WHERE key = ?1",
+                "SELECT id, key, content, category, created_at, session_id, \
+                        valid_from, valid_to, supersedes_id \
+                 FROM memories \
+                 WHERE key = ?1 AND valid_to IS NULL",
             )?;
 
             let mut rows = stmt.query_map(params![key], |row| {
@@ -711,7 +884,9 @@ impl Memory for SqliteMemory {
                     timestamp: row.get(4)?,
                     session_id: row.get(5)?,
                     score: None,
-                    ..MemoryEntry::default()
+                    valid_from: row.get(6)?,
+                    valid_to: row.get(7)?,
+                    supersedes_id: row.get(8)?,
                 })
             })?;
 
@@ -748,15 +923,23 @@ impl Memory for SqliteMemory {
                     timestamp: row.get(4)?,
                     session_id: row.get(5)?,
                     score: None,
-                    ..MemoryEntry::default()
+                    valid_from: row.get(6)?,
+                    valid_to: row.get(7)?,
+                    supersedes_id: row.get(8)?,
                 })
             };
 
+            // All list queries filter `valid_to IS NULL` so only live rows
+            // surface. Partial index `idx_memories_current` /
+            // `idx_memories_current_by_category` keep the scan cheap.
             if let Some(ref cat) = category {
                 let cat_str = Self::category_to_str(cat);
                 let mut stmt = conn.prepare(
-                    "SELECT id, key, content, category, created_at, session_id FROM memories
-                     WHERE category = ?1 ORDER BY updated_at DESC LIMIT ?2",
+                    "SELECT id, key, content, category, created_at, session_id, \
+                            valid_from, valid_to, supersedes_id \
+                     FROM memories \
+                     WHERE category = ?1 AND valid_to IS NULL \
+                     ORDER BY updated_at DESC LIMIT ?2",
                 )?;
                 let rows = stmt.query_map(params![cat_str, DEFAULT_LIST_LIMIT], row_mapper)?;
                 for row in rows {
@@ -770,7 +953,10 @@ impl Memory for SqliteMemory {
                 }
             } else {
                 let mut stmt = conn.prepare(
-                    "SELECT id, key, content, category, created_at, session_id FROM memories
+                    "SELECT id, key, content, category, created_at, session_id, \
+                            valid_from, valid_to, supersedes_id \
+                     FROM memories \
+                     WHERE valid_to IS NULL \
                      ORDER BY updated_at DESC LIMIT ?1",
                 )?;
                 let rows = stmt.query_map(params![DEFAULT_LIST_LIMIT], row_mapper)?;
@@ -807,10 +993,215 @@ impl Memory for SqliteMemory {
 
         tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
             let conn = conn.lock();
-            let count: i64 =
-                conn.query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
+            // Default read: live rows only (valid_to IS NULL). Callers that
+            // need the raw history-inclusive count can hit the table
+            // directly; this trait method is part of the "current truth"
+            // surface, mirroring recall/get/list.
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM memories WHERE valid_to IS NULL",
+                [],
+                |row| row.get(0),
+            )?;
             #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
             Ok(count as usize)
+        })
+        .await?
+    }
+
+    /// Bi-temporal time travel: returns rows that were currently true at
+    /// `as_of` (RFC3339). Uses the LIKE-fallback search shape against the
+    /// bi-temporal window — keeps the implementation small while still
+    /// honouring `session_id` scoping and ranking by `updated_at`.
+    ///
+    /// FTS5 / vector ranking are intentionally not threaded through here
+    /// in PR #75: keyword and similarity scores are stamped *at write time*
+    /// and only the live snapshot keeps them accurate, so re-ranking a
+    /// historical slice would mix yesterday's vectors with today's
+    /// weights. Callers that need rigorous time-travel ranking should
+    /// open a follow-up PR with a snapshotted-weights design.
+    async fn recall_as_of(
+        &self,
+        query: &str,
+        limit: usize,
+        session_id: Option<&str>,
+        as_of: &str,
+    ) -> anyhow::Result<Vec<MemoryEntry>> {
+        if query.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.conn.clone();
+        let query = query.to_string();
+        let as_of = as_of.to_string();
+        let sid = session_id.map(String::from);
+
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<MemoryEntry>> {
+            let conn = conn.lock();
+            let session_ref = sid.as_deref();
+
+            const MAX_LIKE_KEYWORDS: usize = 8;
+            let keywords: Vec<String> = query
+                .split_whitespace()
+                .take(MAX_LIKE_KEYWORDS)
+                .map(|w| format!("%{w}%"))
+                .collect();
+            if keywords.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            let conditions: Vec<String> = keywords
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format!("(content LIKE ?{} OR key LIKE ?{})", i * 2 + 1, i * 2 + 2))
+                .collect();
+            let where_clause = conditions.join(" OR ");
+            let as_of_idx = keywords.len() * 2 + 1;
+            let limit_idx = as_of_idx + 2;
+            let sql = format!(
+                "SELECT id, key, content, category, created_at, session_id, \
+                        valid_from, valid_to, supersedes_id \
+                 FROM memories \
+                 WHERE ({where_clause}) \
+                   AND valid_from <= ?{as_of_idx} \
+                   AND (valid_to IS NULL OR valid_to > ?{}) \
+                 ORDER BY updated_at DESC \
+                 LIMIT ?{limit_idx}",
+                as_of_idx + 1
+            );
+
+            let mut stmt = conn.prepare(&sql)?;
+            let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            for kw in &keywords {
+                param_values.push(Box::new(kw.clone()));
+                param_values.push(Box::new(kw.clone()));
+            }
+            // as_of bound used twice (valid_from ≤ as_of, valid_to > as_of).
+            param_values.push(Box::new(as_of.clone()));
+            param_values.push(Box::new(as_of.clone()));
+            #[allow(clippy::cast_possible_wrap)]
+            param_values.push(Box::new(limit as i64));
+            let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+                param_values.iter().map(AsRef::as_ref).collect();
+
+            let rows = stmt.query_map(params_ref.as_slice(), |row| {
+                Ok(MemoryEntry {
+                    id: row.get(0)?,
+                    key: row.get(1)?,
+                    content: row.get(2)?,
+                    category: Self::str_to_category(&row.get::<_, String>(3)?),
+                    timestamp: row.get(4)?,
+                    session_id: row.get(5)?,
+                    score: None,
+                    valid_from: row.get(6)?,
+                    valid_to: row.get(7)?,
+                    supersedes_id: row.get(8)?,
+                })
+            })?;
+
+            let mut results = Vec::new();
+            for row in rows {
+                let entry = row?;
+                if let Some(sid) = session_ref {
+                    if entry.session_id.as_deref() != Some(sid) {
+                        continue;
+                    }
+                }
+                results.push(entry);
+            }
+            Ok(results)
+        })
+        .await?
+    }
+
+    /// Cross-key supersession: stamps `old_id`'s `valid_to = now` and
+    /// inserts `new_content` as a fresh live row linked via
+    /// `supersedes_id = old_id`. Use when the new content lives under a
+    /// DIFFERENT key from the old row (e.g. moving a fact between
+    /// taxonomy buckets). Same-key supersession is handled transparently
+    /// by [`Self::store`].
+    ///
+    /// Errors if `old_id` does not exist or is already superseded —
+    /// surfacing the inconsistency lets callers retry with a fresh
+    /// lookup rather than silently dropping the link.
+    async fn supersede(
+        &self,
+        old_id: &str,
+        key: &str,
+        new_content: &str,
+        category: MemoryCategory,
+        session_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let embedding_bytes = self
+            .get_or_compute_embedding(new_content)
+            .await?
+            .map(|emb| vector::vec_to_bytes(&emb));
+
+        let conn = self.conn.clone();
+        let old_id = old_id.to_string();
+        let key = key.to_string();
+        let new_content = new_content.to_string();
+        let sid = session_id.map(String::from);
+
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            use rusqlite::OptionalExtension;
+            let mut conn = conn.lock();
+            let tx = conn.transaction()?;
+            let now = Local::now().to_rfc3339();
+            let cat = Self::category_to_str(&category);
+            let new_id = Uuid::new_v4().to_string();
+
+            // Verify `old_id` exists AND is currently live. Erroring on
+            // either condition is the fail-fast behaviour callers want —
+            // silently falling through to a bare INSERT would lose the
+            // intent of the supersession link.
+            let existing: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM memories WHERE id = ?1 AND valid_to IS NULL",
+                    params![old_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?;
+            let Some(old) = existing else {
+                anyhow::bail!(
+                    "supersede: no live memory with id={old_id} (already superseded, forgotten, or never existed)"
+                );
+            };
+
+            tx.execute(
+                "UPDATE memories SET valid_to = ?1, updated_at = ?1 WHERE id = ?2",
+                params![now, old],
+            )?;
+
+            // If the NEW key collides with another live row, stamp THAT
+            // row's valid_to too — preserves the partial-unique-index
+            // invariant `(key) WHERE valid_to IS NULL`.
+            let same_key_live: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM memories WHERE key = ?1 AND valid_to IS NULL",
+                    params![key],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?;
+            if let Some(collided) = same_key_live {
+                tx.execute(
+                    "UPDATE memories SET valid_to = ?1, updated_at = ?1 WHERE id = ?2",
+                    params![now, collided],
+                )?;
+            }
+
+            tx.execute(
+                "INSERT INTO memories
+                    (id, key, content, category, embedding,
+                     created_at, updated_at, session_id,
+                     valid_from, valid_to, supersedes_id, ingested_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5,
+                         ?6, ?6, ?7,
+                         ?6, NULL, ?8, ?6)",
+                params![new_id, key, new_content, cat, embedding_bytes, now, sid, old],
+            )?;
+
+            tx.commit()?;
+            Ok(())
         })
         .await?
     }
@@ -837,7 +1228,7 @@ mod tests {
     // ── db::migrate framework wire-up tests (PR #11 reference pattern) ──
 
     #[tokio::test]
-    async fn new_on_fresh_dir_creates_schema_and_sets_user_version_to_one() {
+    async fn new_on_fresh_dir_creates_schema_and_sets_user_version_to_two() {
         let (_tmp, mem) = temp_sqlite();
 
         // Schema usable end-to-end (store + retrieve).
@@ -847,15 +1238,15 @@ mod tests {
         let got = mem.get("smoke_test").await.unwrap();
         assert!(got.is_some(), "stored entry must be retrievable");
 
-        // PRAGMA user_version flipped from 0 to 1.
+        // PRAGMA user_version flipped from 0 to 2 (v1 baseline + v2 bi-temporal).
         let conn = mem.conn.lock();
         let v: i64 = conn
             .query_row("PRAGMA user_version;", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 1, "fresh brain.db must end at user_version = 1");
+        assert_eq!(v, 2, "fresh brain.db must end at user_version = 2");
 
-        // session_id column was added by ensure_session_id_column (outside
-        // the versioned slice — legacy convention).
+        // session_id column was added by ensure_session_id_column between
+        // v1 and v2 (so v2's table-rebuild could project it).
         let cols: Vec<String> = conn
             .prepare("PRAGMA table_info(memories)")
             .unwrap()
@@ -866,6 +1257,27 @@ mod tests {
         assert!(
             cols.iter().any(|c| c == "session_id"),
             "session_id column must be present after init_brain_db_schema"
+        );
+        // v2 columns must be present.
+        for required in ["valid_from", "valid_to", "supersedes_id", "ingested_at"] {
+            assert!(
+                cols.iter().any(|c| c == required),
+                "v2 column `{required}` missing after migration"
+            );
+        }
+        // v1's table-level UNIQUE(key) must be gone — replaced by the
+        // partial unique index `idx_memories_key_live`.
+        let idx_exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_memories_key_live'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|_| true)
+            .unwrap_or(false);
+        assert!(
+            idx_exists,
+            "partial unique index idx_memories_key_live must exist after v2"
         );
     }
 
@@ -879,7 +1291,7 @@ mod tests {
                 .unwrap();
         }
 
-        // Reopen the same workspace — db::migrate sees user_version = 1,
+        // Reopen the same workspace — db::migrate sees user_version = 2,
         // ensure_session_id_column sees the column already there, both
         // no-op. The previously stored entry survives.
         let mem = SqliteMemory::new(tmp.path()).unwrap();
@@ -894,7 +1306,119 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version;", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 1, "reopen must leave user_version unchanged");
+        assert_eq!(v, 2, "reopen must leave user_version unchanged");
+    }
+
+    #[tokio::test]
+    async fn v2_migration_on_v1_db_preserves_all_rows_as_live() {
+        // Seed a v1-only schema by running just MEMORIES_MIGRATIONS[0..1]
+        // + ensure_session_id_column, then insert raw rows. Re-open via
+        // init_brain_db_schema (which now includes v2) and assert every
+        // row carries the bi-temporal backfill (valid_from = created_at,
+        // valid_to = NULL, supersedes_id = NULL) plus is still findable
+        // via the FTS5 index.
+        let tmp = TempDir::new().unwrap();
+        // SqliteMemory opens at `<workspace>/memory/brain.db` — seed in
+        // the same location so re-opening hits the same file.
+        let db_path = tmp.path().join("memory").join("brain.db");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let cat_str = SqliteMemory::category_to_str(&MemoryCategory::Core);
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            // Apply v1 only.
+            crate::db::migrate(&conn, "memories", &MEMORIES_MIGRATIONS[..1]).unwrap();
+            super::ensure_session_id_column(&conn).unwrap();
+
+            // Insert 3 v1 rows directly.
+            for (id, key, content) in [
+                ("v1-id-1", "alpha", "first"),
+                ("v1-id-2", "beta", "second"),
+                ("v1-id-3", "gamma", "third"),
+            ] {
+                conn.execute(
+                    "INSERT INTO memories (id, key, content, category, created_at, updated_at, session_id) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)",
+                    params![
+                        id,
+                        key,
+                        content,
+                        cat_str,
+                        "2026-05-30T00:00:00Z",
+                        None::<String>,
+                    ],
+                )
+                .unwrap();
+            }
+            let cnt: i64 = conn
+                .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(cnt, 3);
+        }
+
+        // Re-open via SqliteMemory::new — this applies v2.
+        let mem = SqliteMemory::new(tmp.path()).unwrap();
+        let conn = mem.conn.lock();
+
+        // user_version = 2.
+        let v: i64 = conn
+            .query_row("PRAGMA user_version;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 2);
+
+        // All 3 rows survive.
+        let cnt: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cnt, 3, "v2 migration must preserve every v1 row");
+
+        // Each row got valid_from = created_at, valid_to = NULL,
+        // supersedes_id = NULL, ingested_at = created_at.
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, created_at, valid_from, valid_to, supersedes_id, ingested_at \
+                 FROM memories ORDER BY id",
+            )
+            .unwrap();
+        let rows: Vec<(
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+        )> = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(rows.len(), 3);
+        for (id, created_at, valid_from, valid_to, supersedes_id, ingested_at) in &rows {
+            assert_eq!(
+                valid_from, created_at,
+                "v2 backfill: valid_from must equal created_at for row {id}"
+            );
+            assert_eq!(
+                ingested_at, created_at,
+                "v2 backfill: ingested_at must equal created_at for row {id}"
+            );
+            assert!(
+                valid_to.is_none(),
+                "v2 backfill: valid_to must be NULL (live) for row {id}"
+            );
+            assert!(
+                supersedes_id.is_none(),
+                "v2 backfill: supersedes_id must be NULL for row {id}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1285,8 +1809,191 @@ mod tests {
         assert_eq!(count, 0);
     }
 
+    // ── Bi-temporal behaviour (PR #75) ───────────────────────────────
+
+    #[tokio::test]
+    async fn store_same_key_twice_creates_history_via_supersession() {
+        let (_tmp, mem) = temp_sqlite();
+        mem.store("pref", "v1", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+        mem.store("pref", "v2", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+
+        // Raw rows: 2 (one superseded, one live). count() filters live.
+        let raw: i64 = mem
+            .conn
+            .lock()
+            .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(raw, 2, "supersession keeps the old row on disk");
+        assert_eq!(mem.count().await.unwrap(), 1, "count() filters live rows");
+
+        let live = mem.get("pref").await.unwrap().unwrap();
+        assert_eq!(live.content, "v2");
+
+        // The live row must link supersedes_id to the v1 row's id.
+        let v1_id: String = mem
+            .conn
+            .lock()
+            .query_row("SELECT id FROM memories WHERE content = 'v1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(live.supersedes_id.as_deref(), Some(v1_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn recall_default_excludes_superseded_rows() {
+        let (_tmp, mem) = temp_sqlite();
+        mem.store("k", "alpha_marker", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+        mem.store("k", "beta_marker", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+
+        let stale = mem.recall("alpha_marker", 10, None).await.unwrap();
+        assert!(stale.is_empty(), "recall must hide superseded content");
+        let live = mem.recall("beta_marker", 10, None).await.unwrap();
+        assert!(!live.is_empty(), "recall must surface current truth");
+    }
+
+    #[tokio::test]
+    async fn recall_as_of_returns_historical_version() {
+        let (_tmp, mem) = temp_sqlite();
+        mem.store("k", "alpha_marker", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+
+        // Capture an instant strictly between the two stores.
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        let between = Local::now().to_rfc3339();
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+        mem.store("k", "beta_marker", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+
+        // Time-travel: at `between`, only the alpha row was live.
+        let hits = mem
+            .recall_as_of("alpha_marker", 10, None, &between)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1, "recall_as_of must return historical truth");
+        assert_eq!(hits[0].content, "alpha_marker");
+    }
+
+    #[tokio::test]
+    async fn partial_unique_index_blocks_two_live_rows_for_same_key() {
+        let (_tmp, mem) = temp_sqlite();
+        mem.store("dupkey", "first", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+
+        // Attempt to bypass the supersede path and insert a second live
+        // row with the same key — the partial unique index must reject.
+        let now = Local::now().to_rfc3339();
+        let cat = SqliteMemory::category_to_str(&MemoryCategory::Core);
+        let res = mem.conn.lock().execute(
+            "INSERT INTO memories
+                (id, key, content, category, created_at, updated_at, session_id,
+                 valid_from, valid_to, supersedes_id, ingested_at)
+             VALUES ('rogue', 'dupkey', 'second', ?1, ?2, ?2, NULL,
+                     ?2, NULL, NULL, ?2)",
+            params![cat, now],
+        );
+        assert!(
+            res.is_err(),
+            "partial unique index must block a second live row for the same key"
+        );
+    }
+
+    #[tokio::test]
+    async fn supersede_with_explicit_old_id_across_different_keys() {
+        let (_tmp, mem) = temp_sqlite();
+        mem.store("old_key", "v1", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+        let old = mem.get("old_key").await.unwrap().unwrap();
+
+        mem.supersede(&old.id, "new_key", "v2", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+
+        // old_key has no live row anymore.
+        assert!(mem.get("old_key").await.unwrap().is_none());
+        // new_key has a live row, linked to the old id.
+        let new = mem.get("new_key").await.unwrap().unwrap();
+        assert_eq!(new.content, "v2");
+        assert_eq!(new.supersedes_id.as_deref(), Some(old.id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn supersede_with_unknown_old_id_returns_error() {
+        let (_tmp, mem) = temp_sqlite();
+        let res = mem
+            .supersede(
+                "ghost-id",
+                "any_key",
+                "any_value",
+                MemoryCategory::Core,
+                None,
+            )
+            .await;
+        assert!(res.is_err(), "supersede must fail fast on missing old_id");
+        let msg = res.unwrap_err().to_string();
+        assert!(
+            msg.contains("no live memory"),
+            "error must surface the missing-id cause: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn forget_hard_deletes_including_superseded_history() {
+        // forget() stays a hard DELETE per PR #75 anti-scope — bi-temporal
+        // does NOT soften forget() into a valid_to stamp. This pins the
+        // contract so a future refactor doesn't quietly switch it.
+        let (_tmp, mem) = temp_sqlite();
+        mem.store("k", "v1", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+        mem.store("k", "v2", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+
+        let raw_before: i64 = mem
+            .conn
+            .lock()
+            .query_row("SELECT COUNT(*) FROM memories WHERE key='k'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(raw_before, 2);
+
+        assert!(mem.forget("k").await.unwrap(), "forget returns true on hit");
+        let raw_after: i64 = mem
+            .conn
+            .lock()
+            .query_row("SELECT COUNT(*) FROM memories WHERE key='k'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            raw_after, 0,
+            "forget must remove ALL rows including history"
+        );
+    }
+
     #[tokio::test]
     async fn fts5_syncs_on_update() {
+        // Bi-temporal semantics (PR #75): re-storing the same key inserts
+        // a NEW row and stamps the old one's `valid_to`. The FTS index
+        // legitimately contains BOTH rows (the old content remains
+        // findable as part of the history) but `recall()` filters
+        // superseded rows out via the `m.valid_to IS NULL` JOIN, so the
+        // user-facing search surface still hides the stale content.
         let (_tmp, mem) = temp_sqlite();
         mem.store(
             "upd_key",
@@ -1300,18 +2007,23 @@ mod tests {
             .await
             .unwrap();
 
-        let conn = mem.conn.lock();
-        // Old content should not be findable
-        let old: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH '\"original_content_111\"'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(old, 0);
+        // recall() must NOT surface the superseded content.
+        let stale_hits = mem.recall("original_content_111", 10, None).await.unwrap();
+        assert!(
+            stale_hits.is_empty(),
+            "recall must filter superseded rows via valid_to IS NULL"
+        );
 
-        // New content should be findable
+        // recall() finds the live content.
+        let live_hits = mem.recall("updated_content_222", 10, None).await.unwrap();
+        assert!(
+            !live_hits.is_empty(),
+            "recall must return the currently-live row"
+        );
+
+        // Raw FTS index still contains the historical row (intentional —
+        // gives `recall_as_of` a substrate to time-travel against).
+        let conn = mem.conn.lock();
         let new: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH '\"updated_content_222\"'",
@@ -1319,7 +2031,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(new, 1);
+        assert_eq!(new, 1, "live content must be in FTS index");
     }
 
     // ── Open timeout tests ────────────────────────────────────────

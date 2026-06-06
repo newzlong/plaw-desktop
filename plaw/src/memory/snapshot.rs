@@ -35,10 +35,13 @@ pub fn export_snapshot(workspace_dir: &Path) -> Result<usize> {
     let conn = Connection::open(&db_path)?;
     conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
 
+    // `valid_to IS NULL` keeps superseded rows out of the exported snapshot.
+    // The snapshot is meant to be "current truth" — history belongs in the
+    // SQLite store, not in the markdown handoff file.
     let mut stmt = conn.prepare(
         "SELECT key, content, category, created_at, updated_at
          FROM memories
-         WHERE category = 'core'
+         WHERE category = 'core' AND valid_to IS NULL
          ORDER BY updated_at DESC",
     )?;
 
@@ -127,10 +130,19 @@ pub fn hydrate_from_snapshot(workspace_dir: &Path) -> Result<usize> {
 
     for (key, content) in &entries {
         let id = uuid::Uuid::new_v4().to_string();
+        // v2 schema requires `valid_from` and `ingested_at` to be NOT NULL.
+        // Hydration produces fresh "currently true" rows — valid_from and
+        // ingested_at both stamp `now`, valid_to and supersedes_id stay
+        // NULL. `INSERT OR IGNORE` keeps the snapshot-replay invariant:
+        // if a row with the same key already exists in the partial unique
+        // index (`(key) WHERE valid_to IS NULL`), we skip — never clobber
+        // existing live data during hydration.
         let result = conn.execute(
-            "INSERT OR IGNORE INTO memories (id, key, content, category, created_at, updated_at)
-             VALUES (?1, ?2, ?3, 'core', ?4, ?5)",
-            params![id, key, content, now, now],
+            "INSERT OR IGNORE INTO memories
+                (id, key, content, category, created_at, updated_at,
+                 valid_from, valid_to, supersedes_id, ingested_at)
+             VALUES (?1, ?2, ?3, 'core', ?4, ?4, ?4, NULL, NULL, ?4)",
+            params![id, key, content, now],
         );
 
         match result {
@@ -328,39 +340,40 @@ Rule 3: Protect the user.
         let db_path = db_dir.join("brain.db");
 
         let conn = Connection::open(&db_path).unwrap();
-        conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             CREATE TABLE IF NOT EXISTS memories (
-                id TEXT PRIMARY KEY,
-                key TEXT NOT NULL UNIQUE,
-                content TEXT NOT NULL,
-                category TEXT NOT NULL DEFAULT 'core',
-                embedding BLOB,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-             );
-             CREATE INDEX IF NOT EXISTS idx_mem_key ON memories(key);",
-        )
-        .unwrap();
+        // Route through the canonical schema initializer instead of
+        // hand-rolling a v1 CREATE TABLE — keeps this test honest about
+        // bi-temporal columns (valid_from / valid_to / supersedes_id /
+        // ingested_at) and matches production. Per PR #75 the inline-
+        // schema duplication was an old footgun; now eliminated.
+        crate::memory::sqlite::init_brain_db_schema(&conn).unwrap();
 
         let now = Local::now().to_rfc3339();
         conn.execute(
-            "INSERT INTO memories (id, key, content, category, created_at, updated_at)
-             VALUES ('id1', 'identity', 'I am a test agent', 'core', ?1, ?2)",
-            params![now, now],
+            "INSERT INTO memories
+                (id, key, content, category, created_at, updated_at,
+                 valid_from, valid_to, supersedes_id, ingested_at)
+             VALUES ('id1', 'identity', 'I am a test agent', 'core',
+                     ?1, ?1, ?1, NULL, NULL, ?1)",
+            params![now],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO memories (id, key, content, category, created_at, updated_at)
-             VALUES ('id2', 'preference', 'User likes Rust', 'core', ?1, ?2)",
-            params![now, now],
+            "INSERT INTO memories
+                (id, key, content, category, created_at, updated_at,
+                 valid_from, valid_to, supersedes_id, ingested_at)
+             VALUES ('id2', 'preference', 'User likes Rust', 'core',
+                     ?1, ?1, ?1, NULL, NULL, ?1)",
+            params![now],
         )
         .unwrap();
-        // Non-core entry (should NOT be exported)
+        // Non-core entry (should NOT be exported).
         conn.execute(
-            "INSERT INTO memories (id, key, content, category, created_at, updated_at)
-             VALUES ('id3', 'conv1', 'Random convo', 'conversation', ?1, ?2)",
-            params![now, now],
+            "INSERT INTO memories
+                (id, key, content, category, created_at, updated_at,
+                 valid_from, valid_to, supersedes_id, ingested_at)
+             VALUES ('id3', 'conv1', 'Random convo', 'conversation',
+                     ?1, ?1, ?1, NULL, NULL, ?1)",
+            params![now],
         )
         .unwrap();
         drop(conn);
