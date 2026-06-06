@@ -66,9 +66,14 @@ pub(crate) fn pair_with_duplex(
 /// `#[cfg(test)]`-gated.
 pub(crate) mod http_mock {
     use axum::{
-        extract::State, http::HeaderMap, http::StatusCode, response::IntoResponse, routing::post,
+        body::Bytes,
+        extract::State,
+        http::{HeaderMap, StatusCode},
+        response::IntoResponse,
+        routing::post,
         Router,
     };
+    use futures_util::StreamExt;
     use std::sync::{Arc, Mutex as StdMutex};
     use tokio::net::TcpListener;
 
@@ -104,8 +109,33 @@ pub(crate) mod http_mock {
     pub(crate) struct ScriptedResponse {
         pub status: StatusCode,
         pub content_type: &'static str,
-        pub body: String,
+        pub body: ScriptedBody,
         pub extra_headers: Vec<(&'static str, String)>,
+    }
+
+    /// PR #85b: response body shape. `Buffered` is the PR #76 default
+    /// — caller pre-builds the full body string. `Stream` is new for
+    /// PR #85b's GET-listener tests — the caller drives a
+    /// `mpsc::Sender<Bytes>` to push chunks while the listener
+    /// consumes them. `Arc<Mutex<Option<Receiver>>>` so the handler
+    /// can `take()` the receiver exactly once when the request fires
+    /// (mpsc::Receiver does not implement Clone).
+    #[derive(Clone)]
+    pub(crate) enum ScriptedBody {
+        Buffered(String),
+        Stream(Arc<StdMutex<Option<tokio::sync::mpsc::Receiver<Bytes>>>>),
+    }
+
+    impl From<String> for ScriptedBody {
+        fn from(s: String) -> Self {
+            Self::Buffered(s)
+        }
+    }
+
+    impl From<&str> for ScriptedBody {
+        fn from(s: &str) -> Self {
+            Self::Buffered(s.to_string())
+        }
     }
 
     impl MockServerState {
@@ -117,10 +147,37 @@ pub(crate) mod http_mock {
             ScriptedResponse {
                 status: StatusCode::OK,
                 content_type: "application/json",
-                body: body.to_string(),
+                body: ScriptedBody::Buffered(body.to_string()),
                 extra_headers: Vec::new(),
             }
         }
+    }
+
+    /// PR #85b: construct a streaming SSE `ScriptedResponse` plus the
+    /// `mpsc::Sender<Bytes>` the test uses to push events as the
+    /// listener task consumes them. `initial_events` are pre-fed into
+    /// the channel before returning so simple cases don't need to
+    /// touch the sender; complex flows (e.g. send-then-close) drive
+    /// the sender after the listener spawns.
+    ///
+    /// Drop the returned `Sender` to signal clean EOF (the listener
+    /// then exits via the `byte_stream.next().await => None` branch).
+    pub(crate) fn script_sse_stream(
+        initial_events: Vec<&str>,
+    ) -> (ScriptedResponse, tokio::sync::mpsc::Sender<Bytes>) {
+        // Generous buffer — tests that fill it would be diagnostic
+        // about a hung listener.
+        let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(64);
+        for ev in initial_events {
+            let _ = tx.try_send(Bytes::from(ev.to_string()));
+        }
+        let response = ScriptedResponse {
+            status: StatusCode::OK,
+            content_type: "text/event-stream",
+            body: ScriptedBody::Stream(Arc::new(StdMutex::new(Some(rx)))),
+            extra_headers: Vec::new(),
+        };
+        (response, tx)
     }
 
     async fn mock_handler(
@@ -149,7 +206,7 @@ pub(crate) mod http_mock {
                 ScriptedResponse {
                     status: StatusCode::INTERNAL_SERVER_ERROR,
                     content_type: "text/plain",
-                    body: "no scripted response".into(),
+                    body: ScriptedBody::Buffered("no scripted response".into()),
                     extra_headers: Vec::new(),
                 }
             } else {
@@ -163,15 +220,33 @@ pub(crate) mod http_mock {
         for (k, v) in &resp.extra_headers {
             response = response.header(*k, v);
         }
-        response.body(axum::body::Body::from(resp.body)).unwrap()
+        let body = match resp.body {
+            ScriptedBody::Buffered(s) => axum::body::Body::from(s),
+            ScriptedBody::Stream(slot) => {
+                // Take the receiver. The mpsc Receiver is not Clone;
+                // exactly one handler call consumes the script.
+                let rx = slot.lock().unwrap().take().expect(
+                    "streaming ScriptedResponse already consumed — script another response \
+                     or push the same fixture multiple times",
+                );
+                let stream =
+                    tokio_stream::wrappers::ReceiverStream::new(rx).map(Ok::<_, std::io::Error>);
+                axum::body::Body::from_stream(stream)
+            }
+        };
+        response.body(body).unwrap()
     }
 
     /// Bind a random loopback port + return `(url, recorder)`. The
     /// axum task runs in the background until the runtime stops.
+    ///
+    /// PR #85b: routes BOTH `POST /` AND `GET /` to the same
+    /// handler so the listener's GET issuance (PR #85b) shares the
+    /// mock with the POST request path.
     pub(crate) async fn spawn_mock(state: MockServerState) -> (String, RequestRecorder) {
         let recorder = state.recorder.clone();
         let app = Router::new()
-            .route("/", post(mock_handler))
+            .route("/", post(mock_handler).get(mock_handler))
             .with_state(state);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

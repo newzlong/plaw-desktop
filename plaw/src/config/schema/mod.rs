@@ -534,6 +534,25 @@ pub struct McpServerConfig {
     /// to slow external APIs).
     #[serde(default = "default_mcp_request_timeout_ms")]
     pub request_timeout_ms: u64,
+    /// PR #85b: opt-in for the MCP standalone GET notification stream.
+    /// When `true` AND the server's `initialize` capabilities
+    /// advertised at least one `*ListChanged` flag, plaw spawns a
+    /// background tokio task per server that consumes server-pushed
+    /// notifications (tools/list_changed, prompts/list_changed,
+    /// resources/list_changed, notifications/message, etc.).
+    ///
+    /// Default: `false`. Speculative for the current MCP ecosystem
+    /// (most servers don't push); enabling it unblocks future Phase
+    /// 3b tool-list-refresh wiring and surfaces server-side log
+    /// notifications today.
+    ///
+    /// Listener behaviour is correctness-first: graceful exit on
+    /// HTTP 405 (spec-compliant for minimal servers), one OAuth
+    /// refresh attempt on 401, no auto-reconnect on stream close
+    /// (Phase 3b). Server-to-client REQUESTS get a `-32601 Method
+    /// not found` reply so the server doesn't deadlock.
+    #[serde(default)]
+    pub enable_notifications: bool,
 }
 
 /// Transport selector for a single `[[mcp.servers]]` entry.
@@ -9893,6 +9912,7 @@ root = "/tmp/my-project"
             allowed_tools: vec!["*".into()],
             startup_timeout_ms: 1000,
             request_timeout_ms: 5000,
+            enable_notifications: false,
         }
     }
 
@@ -9954,6 +9974,7 @@ root = "/tmp/my-project"
             allowed_tools: vec!["*".into()],
             startup_timeout_ms: 10_000,
             request_timeout_ms: 60_000,
+            enable_notifications: false,
         };
         assert!(cfg.validate_transport_mutual_exclusivity().is_ok());
     }

@@ -1719,6 +1719,7 @@ async fn mcp_test_run(config: &Config, name: &str) -> Result<()> {
                 &secret_store,
                 oauth_svc,
                 oauth_name,
+                cfg.enable_notifications,
             )
             .await
             .with_context(|| format!("connect failed for http server '{name}'"))?
@@ -3080,6 +3081,7 @@ mod tests {
             allowed_tools: vec!["*".into()],
             startup_timeout_ms: 10_000,
             request_timeout_ms: 60_000,
+            enable_notifications: false,
         }
     }
 
@@ -3098,6 +3100,7 @@ mod tests {
             allowed_tools: vec!["*".into()],
             startup_timeout_ms: 10_000,
             request_timeout_ms: 60_000,
+            enable_notifications: false,
         }
     }
 

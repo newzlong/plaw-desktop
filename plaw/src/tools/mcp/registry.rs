@@ -102,6 +102,7 @@ impl McpRegistry {
                             secret_store.as_ref(),
                             oauth_svc,
                             oauth_name,
+                            cfg.enable_notifications,
                         )
                         .await
                     }
@@ -263,6 +264,7 @@ mod tests {
             allowed_tools: vec!["*".into()],
             startup_timeout_ms: 200,
             request_timeout_ms: 1000,
+            enable_notifications: false,
         };
         let reg = McpRegistry::connect_all(&[cfg], test_secret_store(), None).await;
         assert_eq!(reg.connected_count(), 0);
@@ -295,6 +297,7 @@ mod tests {
             allowed_tools: vec!["*".into()],
             startup_timeout_ms: 300,
             request_timeout_ms: 500,
+            enable_notifications: false,
         };
         let reg = McpRegistry::connect_all(&[cfg], test_secret_store(), None).await;
         assert_eq!(reg.connected_count(), 0);

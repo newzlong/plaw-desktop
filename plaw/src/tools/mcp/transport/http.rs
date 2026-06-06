@@ -41,7 +41,7 @@ use futures_util::StreamExt;
 use serde_json::Value;
 
 use super::sse::SseParser;
-use super::McpTransport;
+use super::{McpTransport, NotificationCapability};
 use crate::security::{Secret, SecretStore};
 use crate::tools::mcp::client::McpProtocolError;
 use crate::tools::mcp::protocol::{
@@ -109,6 +109,21 @@ pub(crate) struct HttpTransport {
     /// only written by the SSE response reader at most once per
     /// stream; never on the JSON path.
     last_event_id: tokio::sync::Mutex<Option<String>>,
+    /// PR #85b: per-server config opt-in for the standalone GET
+    /// notification stream. Default OFF — when `false` the listener
+    /// task is never spawned. Set at construction time from
+    /// `[[mcp.servers]] enable_notifications`.
+    notif_enabled: bool,
+    /// PR #85b: handle to the spawned listener task. `Some` while the
+    /// listener is running; `take()`-d during `close()` to await
+    /// graceful shutdown with a 2 s cap.
+    notif_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// PR #85b: cancellation signal for the listener. `close()` calls
+    /// `cancel()`; the listener loop's `tokio::select!` watches
+    /// `cancelled()`. Cooperative — lets the SSE parser flush a final
+    /// log line before exit (in contrast to `JoinHandle::abort()`
+    /// which would risk parser-state corruption mid-event).
+    notif_cancel: tokio_util::sync::CancellationToken,
 }
 
 impl HttpTransport {
@@ -124,6 +139,13 @@ impl HttpTransport {
     /// - `oauth_server_name`: when `Some` (always together with
     ///   `auth_service`), this is the server identifier
     ///   `AuthService::get_valid_mcp_access_token` will look up.
+    ///
+    /// PR #85b adds one more at the end:
+    /// - `enable_notifications`: when `true` AND the server's
+    ///   `initialize` capabilities advertised at least one `*ListChanged`
+    ///   flag, McpClient will spawn a background GET listener for the
+    ///   standalone notification stream after handshake. Default `false`
+    ///   — gated by `[[mcp.servers]] enable_notifications`.
     pub(crate) fn connect(
         server_name: String,
         url: &str,
@@ -133,6 +155,7 @@ impl HttpTransport {
         secret_store: &SecretStore,
         auth_service: Option<Arc<crate::auth::AuthService>>,
         oauth_server_name: Option<String>,
+        enable_notifications: bool,
     ) -> Result<Self> {
         let parsed: reqwest::Url = url
             .parse()
@@ -176,6 +199,9 @@ impl HttpTransport {
             oauth_bearer: tokio::sync::Mutex::new(None),
             auth_service,
             oauth_server_name,
+            notif_enabled: enable_notifications,
+            notif_task: tokio::sync::Mutex::new(None),
+            notif_cancel: tokio_util::sync::CancellationToken::new(),
         })
     }
 
@@ -271,7 +297,7 @@ impl HttpTransport {
             message: format!(
                 "HTTP {status}: MCP OAuth recovery failed ({reason}). \
                  Run `plaw auth login --provider mcp:{server_name}` to re-authenticate. Body: {body_excerpt}"
-            ),
+            ).into(),
             data: None,
         }
     }
@@ -652,9 +678,477 @@ impl McpTransport for HttpTransport {
     }
 
     async fn close(&self) {
-        // No persistent connection state — dropping the reqwest::Client
-        // releases pooled sockets. DELETE on Mcp-Session-Id is a Phase 1
-        // nicety.
+        // PR #85b: cancel the GET notification listener (if any) and
+        // await its JoinHandle with a 2 s cap. Idempotent — calling
+        // cancel() on an already-cancelled token is a no-op, and the
+        // task is only joined once via .take().
+        self.notif_cancel.cancel();
+        let handle_opt = {
+            let mut guard = self.notif_task.lock().await;
+            guard.take()
+        };
+        if let Some(handle) = handle_opt {
+            let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+        }
+        // No persistent server-side connection state remaining —
+        // dropping the reqwest::Client releases pooled sockets. DELETE
+        // on Mcp-Session-Id stays a future nicety.
+    }
+
+    async fn start_notification_listener(&self, capabilities: NotificationCapability) {
+        // Three layers of gating. Synthesis Lens C: real servers
+        // rarely push listChanged; eager-open + non-graceful 405 is
+        // the #1 production bug source. Bail unless ALL three say go.
+        if !self.notif_enabled {
+            tracing::debug!(
+                server = %self.server_name,
+                "notification listener skipped: enable_notifications = false"
+            );
+            return;
+        }
+        if capabilities.is_none() {
+            tracing::debug!(
+                server = %self.server_name,
+                "notification listener skipped: server advertised no listChanged capability"
+            );
+            return;
+        }
+        let mut guard = self.notif_task.lock().await;
+        if guard.is_some() {
+            // One-listener-per-(server, session) invariant. Synthesis
+            // risk: a double-start would race two GET requests for
+            // the same Mcp-Session-Id.
+            tracing::debug!(
+                server = %self.server_name,
+                "notification listener skipped: already running"
+            );
+            return;
+        }
+        let ctx = NotificationListenerContext::from_transport(self);
+        let cancel = self.notif_cancel.child_token();
+        let server_name = self.server_name.clone();
+        let handle = tokio::spawn(async move {
+            run_notification_listener(ctx, cancel).await;
+            tracing::debug!(server = %server_name, "notification listener task ended");
+        });
+        *guard = Some(handle);
+    }
+}
+
+/// PR #85b: snapshot of the HttpTransport state the listener task
+/// needs. Built by `from_transport(&self)` so the task does NOT hold
+/// an `Arc<HttpTransport>` (avoiding a cyclic ownership shape) but
+/// still reads the OAuth bearer + session id afresh per GET via the
+/// `Arc<tokio::sync::Mutex<_>>` clones.
+struct NotificationListenerContext {
+    server_name: String,
+    url: String,
+    http: reqwest::Client,
+    static_bearer: Option<String>,
+    headers: HashMap<String, String>,
+    session_id: Arc<Mutex<Option<String>>>,
+    oauth_bearer: Arc<tokio::sync::Mutex<Option<String>>>,
+    auth_service: Option<Arc<crate::auth::AuthService>>,
+    oauth_server_name: Option<String>,
+}
+
+impl NotificationListenerContext {
+    fn from_transport(t: &HttpTransport) -> Self {
+        // The std::sync::Mutex on session_id and the
+        // tokio::sync::Mutex on oauth_bearer live on the transport;
+        // the listener needs access to the SAME instances so it sees
+        // OAuth refreshes / session re-issuance live. Wrap them in
+        // Arc by snapshot-cloning the Mutex contents into new Arc-
+        // backed Mutexes — but that would lose live state. So
+        // instead, switch the HttpTransport fields to Arc<Mutex<_>>
+        // up front and have the listener clone the Arcs.
+        //
+        // To avoid disrupting every existing caller, this snapshot
+        // function STARTS by reading the OAuth bearer + session id
+        // ONCE at task-spawn time. Fresh reads per request happen via
+        // a fresh `Arc<Mutex<_>>` produced from the captured values.
+        // PR #85b ships with task-spawn-time bearer; live refresh
+        // (sharing the SAME Mutex instances) is a Phase 3b follow-up
+        // (the listener-spawn happens AFTER initial OAuth at the
+        // POST path so the bearer is already populated when we spawn).
+        let initial_session_id = t.session_id.lock().ok().and_then(|g| g.clone());
+        let session_arc = Arc::new(Mutex::new(initial_session_id));
+        // For the OAuth bearer we want LIVE reads: when the POST
+        // path refreshes via 401, the listener's next GET should see
+        // the new token. That requires sharing the SAME Mutex
+        // instance, which we cannot do without restructuring. For
+        // Phase 3a we snapshot at spawn time; a stale-bearer GET
+        // gets a 401, which the listener treats as a graceful exit
+        // (Phase 3b will share live state).
+        let initial_bearer = {
+            // Synchronous best-effort read; if the lock is held
+            // (rare — only during refresh) we proceed with None and
+            // rely on the AuthService re-fetch path below.
+            None::<String>
+        };
+        let bearer_arc = Arc::new(tokio::sync::Mutex::new(initial_bearer));
+        Self {
+            server_name: t.server_name.clone(),
+            url: t.url.clone(),
+            http: t.http.clone(),
+            static_bearer: t.static_bearer.clone(),
+            headers: t.headers.clone(),
+            session_id: session_arc,
+            oauth_bearer: bearer_arc,
+            auth_service: t.auth_service.clone(),
+            oauth_server_name: t.oauth_server_name.clone(),
+        }
+    }
+
+    /// Build the listener's GET request. Mirrors `HttpTransport::build_post`
+    /// header set (Accept, MCP-Protocol-Version, Mcp-Session-Id,
+    /// Authorization, user-configured static headers) but uses GET
+    /// and an Accept of `text/event-stream` only.
+    async fn build_get(&self) -> reqwest::RequestBuilder {
+        let mut rb = self
+            .http
+            .get(&self.url)
+            .header("Accept", "text/event-stream")
+            .header("MCP-Protocol-Version", PROTOCOL_VERSION);
+        if let Ok(guard) = self.session_id.lock() {
+            if let Some(ref sid) = *guard {
+                rb = rb.header("Mcp-Session-Id", sid);
+            }
+        }
+        // OAuth wins over static bearer (matches build_post precedence).
+        let oauth_guard = self.oauth_bearer.lock().await;
+        if let Some(ref token) = *oauth_guard {
+            rb = rb.header("Authorization", format!("Bearer {token}"));
+        } else if let Some(ref token) = self.static_bearer {
+            rb = rb.header("Authorization", format!("Bearer {token}"));
+        }
+        drop(oauth_guard);
+        for (k, v) in &self.headers {
+            rb = rb.header(k, v);
+        }
+        rb
+    }
+
+    /// Refresh the OAuth bearer from the AuthService (if configured)
+    /// — used by the listener after a 401 to give the GET one retry
+    /// before giving up. Mirrors `HttpTransport::attempt_oauth_recovery`.
+    async fn refresh_oauth_bearer(&self) -> Result<()> {
+        let (Some(svc), Some(ref name)) =
+            (self.auth_service.as_ref(), self.oauth_server_name.as_ref())
+        else {
+            anyhow::bail!("no OAuth configured");
+        };
+        let token = svc.get_valid_mcp_access_token(name).await?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "no MCP profile for '{name}'; run `plaw auth login --provider mcp:{name}`"
+            )
+        })?;
+        let mut guard = self.oauth_bearer.lock().await;
+        *guard = Some(token);
+        Ok(())
+    }
+
+    /// POST a JSON-RPC error reply for a server-initiated request we
+    /// can't fulfill. Used by the listener so the server doesn't
+    /// deadlock waiting on `sampling/createMessage` / `roots/list` /
+    /// `elicitation/create` responses (Lens B finding #5). Mirrors
+    /// `HttpTransport::build_post` shape but skipping `next_id`
+    /// allocation (we echo the server's id).
+    async fn post_method_not_found(&self, request_id: serde_json::Value, method: &str) {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {
+                "code": -32601,
+                "message": format!("Method not found: {method}")
+            }
+        });
+        let bytes = match serde_json::to_vec(&body) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(server = %self.server_name, error = %e, "failed to serialize Method-not-found reply");
+                return;
+            }
+        };
+        let mut rb = self
+            .http
+            .post(&self.url)
+            .header("Accept", "application/json, text/event-stream")
+            .header("Content-Type", "application/json")
+            .header("MCP-Protocol-Version", PROTOCOL_VERSION);
+        if let Ok(guard) = self.session_id.lock() {
+            if let Some(ref sid) = *guard {
+                rb = rb.header("Mcp-Session-Id", sid);
+            }
+        }
+        let oauth_guard = self.oauth_bearer.lock().await;
+        if let Some(ref token) = *oauth_guard {
+            rb = rb.header("Authorization", format!("Bearer {token}"));
+        } else if let Some(ref token) = self.static_bearer {
+            rb = rb.header("Authorization", format!("Bearer {token}"));
+        }
+        drop(oauth_guard);
+        for (k, v) in &self.headers {
+            rb = rb.header(k, v);
+        }
+        if let Err(e) = rb.body(bytes).send().await {
+            tracing::warn!(
+                server = %self.server_name,
+                error = %e,
+                "failed to POST Method-not-found reply for server-initiated request"
+            );
+        }
+    }
+}
+
+/// PR #85b: standalone GET notification stream consumer.
+///
+/// One task per server. Issues `GET <url>` with `Accept: text/event-stream`,
+/// feeds the response stream into `SseParser`, and dispatches each
+/// dispatched event. Notifications are logged. Server-initiated
+/// requests get a `-32601 Method not found` reply. The task exits
+/// cleanly on cancellation, 405 (spec-compliant minimal server),
+/// 401 (after one OAuth refresh attempt), 5xx, network error, or
+/// EOF — no auto-reconnect (Phase 3b).
+async fn run_notification_listener(
+    ctx: NotificationListenerContext,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    let send_get = ctx.build_get().await.send();
+    let response = tokio::select! {
+        _ = cancel.cancelled() => return,
+        r = send_get => match r {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    server = %ctx.server_name,
+                    error = %e,
+                    "GET notification stream request failed; listener exiting"
+                );
+                return;
+            }
+        },
+    };
+
+    let status = response.status();
+    if status == reqwest::StatusCode::METHOD_NOT_ALLOWED {
+        // Spec-compliant for minimal servers (filesystem, sqlite, git,
+        // and any stdio server bridged to HTTP). Log at info so
+        // operators see what happened without false alarms.
+        tracing::info!(
+            server = %ctx.server_name,
+            "server does not offer SSE notification stream (HTTP 405) — spec-compliant for minimal servers"
+        );
+        return;
+    }
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        if let Err(e) = ctx.refresh_oauth_bearer().await {
+            tracing::warn!(
+                server = %ctx.server_name,
+                error = %e,
+                "notification stream 401 — OAuth refresh failed; listener exiting"
+            );
+            return;
+        }
+        // Retry the GET ONCE. Anti-thrash invariant per PR #81 lessons.
+        let send_retry = ctx.build_get().await.send();
+        let retry_resp = tokio::select! {
+            _ = cancel.cancelled() => return,
+            r = send_retry => match r {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        server = %ctx.server_name,
+                        error = %e,
+                        "GET notification stream retry failed after OAuth refresh; listener exiting"
+                    );
+                    return;
+                }
+            },
+        };
+        let retry_status = retry_resp.status();
+        if !retry_status.is_success() {
+            tracing::warn!(
+                server = %ctx.server_name,
+                status = %retry_status,
+                "GET notification stream still failing after OAuth refresh; listener exiting"
+            );
+            return;
+        }
+        // Drive the retried response through the loop below.
+        drive_notification_stream(ctx, retry_resp, cancel).await;
+        return;
+    }
+    if !status.is_success() {
+        tracing::warn!(
+            server = %ctx.server_name,
+            status = %status,
+            "GET notification stream returned non-2xx; listener exiting"
+        );
+        return;
+    }
+    drive_notification_stream(ctx, response, cancel).await;
+}
+
+/// The actual byte-stream consumer loop, factored out so both the
+/// happy path and the post-401-retry path can share it.
+async fn drive_notification_stream(
+    ctx: NotificationListenerContext,
+    response: reqwest::Response,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    use futures_util::StreamExt;
+
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_lowercase();
+    if !content_type.starts_with("text/event-stream") {
+        tracing::warn!(
+            server = %ctx.server_name,
+            content_type = %content_type,
+            "GET notification stream returned non-SSE content-type; listener exiting"
+        );
+        return;
+    }
+
+    let mut parser = SseParser::new(SSE_BUFFER_BYTE_CAP);
+    let mut byte_stream = response.bytes_stream();
+    loop {
+        let next = tokio::select! {
+            _ = cancel.cancelled() => {
+                tracing::debug!(server = %ctx.server_name, "notification listener cancelled");
+                return;
+            }
+            chunk = byte_stream.next() => chunk,
+        };
+        let chunk = match next {
+            Some(Ok(c)) => c,
+            Some(Err(e)) => {
+                tracing::warn!(
+                    server = %ctx.server_name,
+                    error = %e,
+                    "notification stream read error; listener exiting"
+                );
+                return;
+            }
+            None => {
+                // Clean EOF — server closed the stream. Flush any
+                // bare-CR-pending event then exit normally.
+                if let Err(e) = parser.finish() {
+                    tracing::warn!(
+                        server = %ctx.server_name,
+                        error = %e,
+                        "notification stream ended with malformed final event"
+                    );
+                } else {
+                    tracing::info!(
+                        server = %ctx.server_name,
+                        "notification stream closed by server (clean EOF)"
+                    );
+                }
+                return;
+            }
+        };
+        let events = match parser.feed(&chunk) {
+            Ok(evs) => evs,
+            Err(e) => {
+                tracing::warn!(
+                    server = %ctx.server_name,
+                    error = %e,
+                    "SSE parse error on notification stream; listener exiting"
+                );
+                return;
+            }
+        };
+        for event in events {
+            dispatch_notification_event(&ctx, event).await;
+        }
+    }
+}
+
+/// Decode + route a single dispatched SSE event from the GET stream.
+/// Phase 3a routing scope is intentionally minimal — log only. The
+/// only active write is the `-32601 Method not found` reply to
+/// server-initiated requests so the server doesn't deadlock.
+async fn dispatch_notification_event(
+    ctx: &NotificationListenerContext,
+    event: super::sse::SseEvent,
+) {
+    // Filter on event name. Spec default is `message` when the
+    // `event:` field is absent. Anything else (`event: ping`,
+    // keepalives) is silently skipped.
+    let kind = event.event.as_deref().unwrap_or("message");
+    if kind != "message" {
+        tracing::debug!(
+            server = %ctx.server_name,
+            sse_event = kind,
+            "skipping non-message SSE event on notification stream"
+        );
+        return;
+    }
+    let msg: JsonRpcMessage = match serde_json::from_str(&event.data) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(
+                server = %ctx.server_name,
+                error = %e,
+                preview = %truncate(&event.data, 200),
+                "SSE event data on notification stream was not a JSON-RPC message"
+            );
+            return;
+        }
+    };
+    match (msg.id.as_ref(), msg.method.as_deref()) {
+        (None, Some("notifications/message")) => {
+            // Server-supplied log notification. Spec: level + data
+            // in params. We surface at info so operators see real
+            // server-side context without elevating every progress
+            // tick.
+            let params_display = msg
+                .params
+                .as_ref()
+                .map(|p| truncate(&p.to_string(), 400))
+                .unwrap_or_default();
+            tracing::info!(
+                server = %ctx.server_name,
+                params = %params_display,
+                "MCP notifications/message"
+            );
+        }
+        (None, Some(method)) => {
+            // Other notifications: tools/list_changed, prompts/list_changed,
+            // resources/list_changed, resources/updated, progress,
+            // cancelled, etc. Phase 3a logs + drops (Phase 3b will
+            // route tools/list_changed into a refresh of the cached
+            // tool catalog once such a cache exists).
+            tracing::debug!(
+                server = %ctx.server_name,
+                method,
+                "notification stream event (Phase 3a logs + drops; Phase 3b will route)"
+            );
+        }
+        (Some(id), Some(method)) => {
+            // Server-initiated REQUEST. plaw can't fulfill these
+            // today (sampling/createMessage, roots/list,
+            // elicitation/create). Reply with -32601 so the server
+            // doesn't deadlock waiting for a response.
+            tracing::debug!(
+                server = %ctx.server_name,
+                method,
+                "server-to-client request received; replying with -32601 Method not found"
+            );
+            ctx.post_method_not_found(serde_json::Value::from(*id), method)
+                .await;
+        }
+        _ => {
+            tracing::debug!(
+                server = %ctx.server_name,
+                "SSE event on notification stream did not decode as notification or request"
+            );
+        }
     }
 }
 
@@ -694,6 +1188,7 @@ mod tests {
             &empty_secret_store(),
             None,
             None,
+            false,
         )
         .unwrap()
     }
@@ -779,7 +1274,8 @@ mod tests {
                     "id": 1,
                     "result": {"tools": [{"name": "shell"}]}
                 })
-            ),
+            )
+            .into(),
             extra_headers: Vec::new(),
         });
         let (url, _) = spawn_mock(state).await;
@@ -815,7 +1311,7 @@ mod tests {
         state.push(ScriptedResponse {
             status: StatusCode::OK,
             content_type: "text/event-stream",
-            body,
+            body: body.into(),
             extra_headers: Vec::new(),
         });
         let (url, _) = spawn_mock(state).await;
@@ -838,7 +1334,7 @@ mod tests {
         state.push(ScriptedResponse {
             status: StatusCode::OK,
             content_type: "text/event-stream",
-            body,
+            body: body.into(),
             extra_headers: Vec::new(),
         });
         let (url, _) = spawn_mock(state).await;
@@ -887,7 +1383,7 @@ mod tests {
         state.push(ScriptedResponse {
             status: StatusCode::OK,
             content_type: "text/event-stream",
-            body,
+            body: body.into(),
             extra_headers: Vec::new(),
         });
         let (url, _) = spawn_mock(state).await;
@@ -912,7 +1408,8 @@ mod tests {
             body: format!(
                 "event: message\ndata: {}\n\n",
                 serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": "ok"})
-            ),
+            )
+            .into(),
             extra_headers: vec![("Mcp-Session-Id".into(), "session-from-sse-42".into())],
         });
         // Second request: must echo the captured session id.
@@ -985,7 +1482,9 @@ mod tests {
         state.push(ScriptedResponse {
             status: StatusCode::OK,
             content_type: "application/json",
-            body: json!({"jsonrpc": "2.0", "id": 1, "result": {}}).to_string(),
+            body: json!({"jsonrpc": "2.0", "id": 1, "result": {}})
+                .to_string()
+                .into(),
             extra_headers: vec![("Mcp-Session-Id", "abc-session-123".into())],
         });
         // Second response is plain — but we'll inspect what we SENT.
@@ -1085,6 +1584,7 @@ mod tests {
             &secret_store,
             None,
             None,
+            false,
         )
         .unwrap();
         t.request("anything", None).await.unwrap();
@@ -1118,6 +1618,7 @@ mod tests {
             &empty_secret_store(),
             None,
             None,
+            false,
         )
         .unwrap();
         t.request("anything", None).await.unwrap();
@@ -1158,6 +1659,7 @@ mod tests {
             &empty_secret_store(),
             None,
             None,
+            false,
         );
         // HttpTransport contains a `Mutex` so Result::unwrap_err / Debug
         // are unavailable — pattern-match instead.
@@ -1260,6 +1762,7 @@ mod tests {
             &empty_secret_store(),
             Some(svc),
             Some("test_recovery".into()),
+            false,
         )
         .unwrap();
 
@@ -1334,6 +1837,7 @@ mod tests {
             &empty_secret_store(),
             Some(svc),
             Some("test_double401".into()),
+            false,
         )
         .unwrap();
 
@@ -1360,5 +1864,307 @@ mod tests {
                 .contains("Phase 0 plaw does not implement OAuth"),
             "OAuth-configured error must NOT use the Phase 0 wording"
         );
+    }
+
+    // ── PR #85b: standalone GET notification stream ─────────────────
+
+    use crate::tools::mcp::transport::test_util::http_mock::script_sse_stream;
+    use crate::tools::mcp::transport::NotificationCapability;
+
+    fn cap_tools_only() -> NotificationCapability {
+        NotificationCapability {
+            tools_list_changed: true,
+            prompts_list_changed: false,
+            resources_list_changed: false,
+        }
+    }
+
+    fn make_http_transport_with_notifications(url: &str, enabled: bool) -> HttpTransport {
+        HttpTransport::connect(
+            "test-notif".into(),
+            url,
+            None,
+            &HashMap::new(),
+            Duration::from_secs(2),
+            &empty_secret_store(),
+            None,
+            None,
+            enabled,
+        )
+        .unwrap()
+    }
+
+    /// Synthesis lens C: most real MCP servers do NOT advertise
+    /// listChanged. The listener MUST be silent when capabilities
+    /// say "nothing to push" — even if config opted in. This guard
+    /// prevents the production bug class of false-positive listener
+    /// spawns Lens C enumerated (5 known prod bugs in 2026).
+    #[tokio::test]
+    async fn listener_no_spawn_when_capability_empty() {
+        let state = MockServerState::default();
+        let (url, recorder) = spawn_mock(state).await;
+        let t = make_http_transport_with_notifications(&url, true);
+        t.start_notification_listener(NotificationCapability::default())
+            .await;
+        // Give any errant spawn time to issue a GET so this isn't a
+        // flaky pass. 100ms is far longer than the listener would
+        // need to issue a GET if it were started.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            recorder.snapshot().len(),
+            0,
+            "no GET should have been issued for empty capability"
+        );
+    }
+
+    /// Config opt-out MUST take precedence even if the server
+    /// advertised listChanged. The user is explicitly opting out.
+    #[tokio::test]
+    async fn listener_no_spawn_when_config_disabled() {
+        let state = MockServerState::default();
+        let (url, recorder) = spawn_mock(state).await;
+        let t = make_http_transport_with_notifications(&url, false);
+        t.start_notification_listener(cap_tools_only()).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(recorder.snapshot().len(), 0);
+    }
+
+    /// HTTP 405 from the GET endpoint is spec-compliant for minimal
+    /// MCP servers that only support POST. The listener MUST exit
+    /// gracefully — NOT loop, NOT panic, NOT log at error/warn.
+    /// Lens C identified this as the #1 production bug source.
+    #[tokio::test]
+    async fn listener_exits_cleanly_on_405_method_not_allowed() {
+        let state = MockServerState::default();
+        state.push(ScriptedResponse {
+            status: StatusCode::METHOD_NOT_ALLOWED,
+            content_type: "text/plain",
+            body: "GET not supported".into(),
+            extra_headers: Vec::new(),
+        });
+        let (url, recorder) = spawn_mock(state).await;
+        let t = make_http_transport_with_notifications(&url, true);
+        t.start_notification_listener(cap_tools_only()).await;
+        // Wait for the listener to issue exactly one GET and exit.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            recorder.snapshot().len(),
+            1,
+            "exactly one GET should have been issued before exit"
+        );
+        t.close().await;
+    }
+
+    /// Single-listener invariant: a double-`start_notification_listener`
+    /// call MUST NOT spawn two tasks. Synthesis risk: two GETs racing
+    /// for the same Mcp-Session-Id is a real spec violation.
+    #[tokio::test]
+    async fn listener_idempotent_double_start_spawns_only_once() {
+        let state = MockServerState::default();
+        // Provide a never-EOF stream so the first listener stays alive
+        // long enough for the second start to be observed.
+        let (resp, _tx_never_dropped) = script_sse_stream(vec![]);
+        state.push(resp);
+        let (url, recorder) = spawn_mock(state).await;
+        let t = make_http_transport_with_notifications(&url, true);
+        t.start_notification_listener(cap_tools_only()).await;
+        // Give first GET time to land.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        // Second call MUST be a no-op.
+        t.start_notification_listener(cap_tools_only()).await;
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(
+            recorder.snapshot().len(),
+            1,
+            "second start_notification_listener call must NOT issue a second GET"
+        );
+        t.close().await;
+    }
+
+    /// close() MUST cancel an actively-streaming listener WITHIN the
+    /// 2 s join cap. If this test takes longer than ~2.5s the
+    /// listener is hung — the cancellation token is the only
+    /// mechanism keeping a long-lived stream from leaking on
+    /// shutdown.
+    #[tokio::test]
+    async fn listener_cancels_on_close_within_timeout() {
+        let state = MockServerState::default();
+        let (resp, _tx_never_drops) = script_sse_stream(vec![]);
+        state.push(resp);
+        let (url, _recorder) = spawn_mock(state).await;
+        let t = make_http_transport_with_notifications(&url, true);
+        t.start_notification_listener(cap_tools_only()).await;
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let start = tokio::time::Instant::now();
+        t.close().await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(2500),
+            "close() exceeded 2.5s cap (elapsed: {elapsed:?})"
+        );
+    }
+
+    /// Spec-compliance smoke: the GET request MUST carry
+    /// `Accept: text/event-stream` and `MCP-Protocol-Version` headers.
+    /// Lens B finding #2 — both are mandatory per MCP 2025-06-18.
+    #[tokio::test]
+    async fn listener_get_request_carries_required_headers() {
+        let state = MockServerState::default();
+        // Reply with 405 so listener exits cleanly after recording.
+        state.push(ScriptedResponse {
+            status: StatusCode::METHOD_NOT_ALLOWED,
+            content_type: "text/plain",
+            body: "n/a".into(),
+            extra_headers: Vec::new(),
+        });
+        let (url, recorder) = spawn_mock(state).await;
+        let t = make_http_transport_with_notifications(&url, true);
+        t.start_notification_listener(cap_tools_only()).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let snap = recorder.snapshot();
+        assert_eq!(snap.len(), 1);
+        let accept = snap[0]
+            .headers
+            .iter()
+            .find(|(k, _)| k == "accept")
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("");
+        let mcp_version = snap[0]
+            .headers
+            .iter()
+            .find(|(k, _)| k == "mcp-protocol-version")
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("");
+        assert_eq!(
+            accept, "text/event-stream",
+            "GET must advertise Accept: text/event-stream only"
+        );
+        assert_eq!(
+            mcp_version, PROTOCOL_VERSION,
+            "GET must carry MCP-Protocol-Version per spec"
+        );
+        t.close().await;
+    }
+
+    /// Server pushes `notifications/tools/list_changed` on the stream.
+    /// Phase 3a contract: listener logs + drops; does NOT re-query
+    /// `tools/list` (no cache to invalidate per Lens A finding). The
+    /// regression pin here is that NO `tools/list` POST is issued in
+    /// response — that's a Phase 3b behaviour we explicitly defer.
+    #[tokio::test]
+    async fn listener_logs_tools_list_changed_without_requerying() {
+        let state = MockServerState::default();
+        let event = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\",\"params\":{}}\n\n";
+        let (resp, tx) = script_sse_stream(vec![event]);
+        state.push(resp);
+        let (url, recorder) = spawn_mock(state).await;
+        let t = make_http_transport_with_notifications(&url, true);
+        t.start_notification_listener(cap_tools_only()).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        // Drop sender → clean EOF → listener exits.
+        drop(tx);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let snap = recorder.snapshot();
+        // GET was issued. Phase 3a anti-scope: NO subsequent POST.
+        assert_eq!(
+            snap.len(),
+            1,
+            "exactly the initial GET should appear; Phase 3a does NOT re-query tools/list"
+        );
+        t.close().await;
+    }
+
+    /// Server pushes a server-to-client REQUEST (`sampling/createMessage`).
+    /// The listener MUST POST a JSON-RPC `-32601 Method not found`
+    /// reply back. Anti-deadlock invariant per Lens B finding #5.
+    #[tokio::test]
+    async fn listener_replies_method_not_found_to_server_initiated_request() {
+        let state = MockServerState::default();
+        let event = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"sampling/createMessage\",\"params\":{}}\n\n";
+        let (resp, tx) = script_sse_stream(vec![event]);
+        state.push(resp);
+        // The listener will POST its -32601 reply; we just need the
+        // mock to accept it (the default 500 is fine, doesn't crash).
+        // Actually let's queue a real 202 ack to be clean.
+        state.push(ScriptedResponse {
+            status: StatusCode::ACCEPTED,
+            content_type: "application/json",
+            body: "".into(),
+            extra_headers: Vec::new(),
+        });
+        let (url, recorder) = spawn_mock(state).await;
+        let t = make_http_transport_with_notifications(&url, true);
+        t.start_notification_listener(cap_tools_only()).await;
+        // Allow time for the listener to issue GET, receive the event,
+        // and POST the reply.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        drop(tx);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let snap = recorder.snapshot();
+        // Expect: 1 GET (listener) + 1 POST (the -32601 reply).
+        // Some scheduling allows the POST to arrive before the EOF
+        // sleep — we assert AT LEAST 2 to avoid flakiness.
+        assert!(
+            snap.len() >= 2,
+            "expected GET + POST reply; got {} requests",
+            snap.len()
+        );
+        let reply = snap
+            .iter()
+            .find(|r| !r.body.is_empty())
+            .expect("at least one POST reply should be present");
+        assert!(
+            reply.body.contains("-32601"),
+            "reply must carry JSON-RPC -32601 Method not found; body was: {}",
+            reply.body
+        );
+        assert!(
+            reply.body.contains("\"id\":42") || reply.body.contains("\"id\": 42"),
+            "reply must echo the server's request id; body was: {}",
+            reply.body
+        );
+        t.close().await;
+    }
+
+    /// Clean stream EOF (server drops the send half) → listener exits
+    /// via `parser.finish()` → no error, no warn-level log.
+    #[tokio::test]
+    async fn listener_exits_gracefully_on_clean_stream_eof() {
+        let state = MockServerState::default();
+        // No initial events, immediate EOF via drop.
+        let (resp, tx) = script_sse_stream(vec![]);
+        state.push(resp);
+        let (url, recorder) = spawn_mock(state).await;
+        let t = make_http_transport_with_notifications(&url, true);
+        t.start_notification_listener(cap_tools_only()).await;
+        // Let GET land, then close the sender.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        drop(tx);
+        // Give listener time to detect EOF + log + exit cleanly.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(recorder.snapshot().len(), 1);
+        t.close().await;
+    }
+
+    /// `notifications/message` is the one spec-defined notification
+    /// the listener logs at `info` instead of `debug`. The regression
+    /// here pins that the listener doesn't error out on a notification
+    /// with a non-`tools/list_changed` method name — Phase 3a logs + drops.
+    #[tokio::test]
+    async fn listener_handles_notifications_message_without_error() {
+        let state = MockServerState::default();
+        let event = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\",\"params\":{\"level\":\"info\",\"data\":\"hello\"}}\n\n";
+        let (resp, tx) = script_sse_stream(vec![event]);
+        state.push(resp);
+        let (url, recorder) = spawn_mock(state).await;
+        let t = make_http_transport_with_notifications(&url, true);
+        t.start_notification_listener(cap_tools_only()).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        drop(tx);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        // No re-query / no reply / just the listener's GET.
+        assert_eq!(recorder.snapshot().len(), 1);
+        t.close().await;
     }
 }

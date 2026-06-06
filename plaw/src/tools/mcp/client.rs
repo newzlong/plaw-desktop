@@ -75,6 +75,7 @@ impl McpClient {
         secret_store: &SecretStore,
         auth_service: Option<std::sync::Arc<crate::auth::AuthService>>,
         oauth_server_name: Option<String>,
+        enable_notifications: bool,
     ) -> Result<Self> {
         let server_name = server_name.into();
         let transport = HttpTransport::connect(
@@ -86,6 +87,7 @@ impl McpClient {
             secret_store,
             auth_service,
             oauth_server_name,
+            enable_notifications,
         )?;
         Self::with_transport(
             server_name,
@@ -121,6 +123,30 @@ impl McpClient {
             .await
             .with_context(|| format!("MCP server '{server_name}' handshake failed"))?;
         client.initialize_result = init;
+        // PR #85b: opt-in standalone GET notification stream. Build
+        // the capability hint from the just-completed handshake;
+        // pass to the transport which gates spawn on (config opt-in
+        // AND advertised capability). Stdio's default no-op makes
+        // this a free trait call for stdio servers.
+        let capabilities = crate::tools::mcp::transport::NotificationCapability {
+            tools_list_changed: client
+                .initialize_result
+                .capabilities
+                .tools
+                .as_ref()
+                .map(|t| t.list_changed)
+                .unwrap_or(false),
+            // ServerCapabilities currently only carries `tools` —
+            // prompts/resources listChanged are Phase 3b deserialization
+            // work. Keep these false for now so the hint reflects only
+            // what we actually observe.
+            prompts_list_changed: false,
+            resources_list_changed: false,
+        };
+        client
+            .transport
+            .start_notification_listener(capabilities)
+            .await;
         Ok(client)
     }
 
