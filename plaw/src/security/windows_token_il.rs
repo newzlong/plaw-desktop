@@ -329,6 +329,424 @@ pub fn validate_lowerable(target: IntegrityLevel) -> io::Result<()> {
     Ok(())
 }
 
+// ─── Phase 1a-2 (PR #88b): token-duplication + spawn primitives ────
+//
+// Three new unsafe call-site classes vs Phase 1a-1's four:
+//
+// 5. `DuplicateTokenEx(src, TOKEN_ALL_ACCESS, NULL, SecurityImpersonation,
+//     TokenPrimary, &mut dup)` — clone the current process's token into
+//    a NEW handle we can mutate without affecting the caller. Returns
+//    `dup` as a primary token suitable for CreateProcessAsUserW.
+//    Handle MUST be `CloseHandle`-d via `OwnedHandle::Drop`.
+//
+// 6. `SetTokenInformation(dup, TokenIntegrityLevel, &mil, sizeof(mil))`
+//    — apply the new IL to the duplicated token. Requires
+//    `TOKEN_ADJUST_DEFAULT` (covered by TOKEN_ALL_ACCESS above).
+//    Lowers without privilege escalation when target ≤ current
+//    (validate_lowerable() enforces this pre-flight).
+//
+// 7. `CreateProcessAsUserW(token, lpApplicationName, lpCommandLine,
+//     NULL, NULL, FALSE, dwCreationFlags, lpEnvironment,
+//     lpCurrentDirectory, &si, &pi)` — spawn the child with the
+//    lowered primary token. `pi.hProcess` and `pi.hThread` are new
+//    handles that the caller (LoweredChild) MUST close.
+//
+// The same SAFETY-comment pattern from Phase 1a-1 applies: Sized POD
+// structs, return-value-checked syscalls, handles closed via
+// `OwnedHandle::Drop` or explicit `CloseHandle`.
+
+use std::ffi::OsStr;
+use std::os::windows::ffi::OsStrExt;
+use std::path::Path;
+use std::process::ExitStatus;
+
+use std::os::windows::io::{FromRawHandle, OwnedHandle};
+
+/// Duplicate the current process's token, lower it to `target`, and
+/// return the new handle. The returned `OwnedHandle` is a PRIMARY
+/// token suitable for `CreateProcessAsUserW` (impersonation tokens
+/// would be rejected by that syscall).
+///
+/// Errors when:
+/// - `target == IntegrityLevel::Default` (the caller MUST resolve
+///   Default before invoking — `Default` has no concrete SID).
+/// - `validate_lowerable(target)` rejects the lowering.
+/// - Any of the OpenProcessToken / DuplicateTokenEx /
+///   SetTokenInformation Win32 calls fail (surfaced as
+///   `io::Error::from_raw_os_error`).
+pub fn duplicate_current_token_lowered(target: IntegrityLevel) -> io::Result<OwnedHandle> {
+    use windows_sys::Win32::Foundation::{GetLastError, HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Security::{
+        DuplicateTokenEx, SecurityImpersonation, SetTokenInformation, TokenIntegrityLevel,
+        TokenPrimary, SID_AND_ATTRIBUTES, TOKEN_ALL_ACCESS, TOKEN_DUPLICATE, TOKEN_MANDATORY_LABEL,
+        TOKEN_QUERY,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    if matches!(target, IntegrityLevel::Default) {
+        return Err(io::Error::other(
+            "duplicate_current_token_lowered: caller must resolve IntegrityLevel::Default \
+             against current_process_integrity() before invoking — Default has no SID",
+        ));
+    }
+    validate_lowerable(target)?;
+
+    // 1. Open a duplicate-capable handle to our own process token.
+    //    TOKEN_DUPLICATE is the minimum right needed for
+    //    DuplicateTokenEx; TOKEN_QUERY lets us read the existing IL
+    //    for diagnostic logging if needed.
+    let src_raw: HANDLE = {
+        let mut raw: HANDLE = INVALID_HANDLE_VALUE;
+        // SAFETY: pseudo-handle GetCurrentProcess() + Sized POD raw.
+        let ok = unsafe {
+            OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &mut raw)
+        };
+        if ok == 0 {
+            return Err(io::Error::from_raw_os_error(
+                unsafe { GetLastError() } as i32
+            ));
+        }
+        raw
+    };
+    // SAFETY: src_raw is a fresh, unaliased handle from OpenProcessToken.
+    let _src_owner = unsafe { OwnedHandle::from_raw_handle(src_raw as _) };
+
+    // 2. DuplicateTokenEx → primary token with TOKEN_ALL_ACCESS so we
+    //    can call SetTokenInformation(TokenIntegrityLevel) below.
+    //    SecurityImpersonation is the safe default level; TokenPrimary
+    //    makes it usable with CreateProcessAsUserW (impersonation
+    //    tokens would be rejected).
+    let dup_raw: HANDLE = {
+        let mut raw: HANDLE = INVALID_HANDLE_VALUE;
+        // SAFETY: src_raw is live; the &mut raw is a Sized POD.
+        let ok = unsafe {
+            DuplicateTokenEx(
+                src_raw,
+                TOKEN_ALL_ACCESS,
+                std::ptr::null_mut(),
+                SecurityImpersonation,
+                TokenPrimary,
+                &mut raw,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::from_raw_os_error(
+                unsafe { GetLastError() } as i32
+            ));
+        }
+        raw
+    };
+    // SAFETY: dup_raw is a fresh, unaliased handle from DuplicateTokenEx.
+    let dup_owner = unsafe { OwnedHandle::from_raw_handle(dup_raw as _) };
+
+    // 3. Build a TOKEN_MANDATORY_LABEL pointing at a SID we construct
+    //    in-place using the well-known SECURITY_MANDATORY_LABEL_AUTHORITY
+    //    + the IL-specific RID. The SID lives on the stack (well,
+    //    in a heap-Vec for the variable-length RID array) and survives
+    //    until the SetTokenInformation call returns.
+    let il_rid: u32 = match target {
+        IntegrityLevel::Default => {
+            unreachable!("Default rejected at function entry");
+        }
+        IntegrityLevel::Untrusted => 0x0000,
+        IntegrityLevel::Low => 0x1000,
+        IntegrityLevel::Medium => 0x2000,
+    };
+    let sid_bytes = build_integrity_sid(il_rid);
+    let mil = TOKEN_MANDATORY_LABEL {
+        Label: SID_AND_ATTRIBUTES {
+            Sid: sid_bytes.as_ptr() as *mut _,
+            // SE_GROUP_INTEGRITY = 0x20 is the canonical attribute
+            // for a mandatory label SID per winnt.h. windows-sys
+            // does not re-export this constant under
+            // `Win32::Security`, so we inline its well-known value
+            // — it has been stable since Vista.
+            Attributes: 0x0000_0020,
+        },
+    };
+    let mil_size = (std::mem::size_of::<TOKEN_MANDATORY_LABEL>() + sid_bytes.len()) as u32;
+    // SAFETY: dup_raw owns TOKEN_ALL_ACCESS; mil + sid_bytes live for
+    // the duration of this call; sizes are computed correctly.
+    let ok = unsafe {
+        SetTokenInformation(
+            dup_raw,
+            TokenIntegrityLevel,
+            &mil as *const _ as *const _,
+            mil_size,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::from_raw_os_error(
+            unsafe { GetLastError() } as i32
+        ));
+    }
+
+    Ok(dup_owner)
+}
+
+/// Build a minimal SID byte-buffer for an integrity level RID.
+///
+/// SID structure layout per MS-DTYP §2.4.2:
+/// - 1 byte: Revision (always 1)
+/// - 1 byte: SubAuthorityCount (always 1 for an IL SID)
+/// - 6 bytes: IdentifierAuthority (SECURITY_MANDATORY_LABEL_AUTHORITY = 16)
+/// - 4 bytes: SubAuthority[0] = the IL RID (little-endian)
+///
+/// Total: 12 bytes. We hand-build the buffer rather than calling
+/// `AllocateAndInitializeSid` to avoid the matching `FreeSid` lifetime
+/// dance — the buffer's lifetime is statically the caller's stack
+/// frame.
+fn build_integrity_sid(il_rid: u32) -> Vec<u8> {
+    let mut sid = Vec::with_capacity(12);
+    sid.push(1); // Revision
+    sid.push(1); // SubAuthorityCount
+                 // IdentifierAuthority: 6 bytes, big-endian per spec.
+                 // SECURITY_MANDATORY_LABEL_AUTHORITY = 16 = 0x00_00_00_00_00_10
+    sid.extend_from_slice(&[0, 0, 0, 0, 0, 16]);
+    // SubAuthority[0]: 4 bytes little-endian.
+    sid.extend_from_slice(&il_rid.to_le_bytes());
+    sid
+}
+
+/// Convert an OsStr to a null-terminated UTF-16 wide string for Win32
+/// `*W` APIs. The returned `Vec<u16>` owns the buffer; the trailing
+/// NUL is included so callers can pass `.as_ptr()` directly.
+fn wide_z<S: AsRef<OsStr>>(s: S) -> Vec<u16> {
+    let mut v: Vec<u16> = s.as_ref().encode_wide().collect();
+    v.push(0);
+    v
+}
+
+/// Build the `lpCommandLine` buffer for `CreateProcessAsUserW`.
+///
+/// Per Microsoft's command-line parsing rules (the
+/// `CommandLineToArgvW` algorithm in reverse), each argument is:
+/// - left bare if it contains no whitespace, no `"`, and no backslash
+///   followed by `"`,
+/// - wrapped in `"..."` with embedded `\` doubled before any `"` and
+///   doubled at end-of-string before the closing `"`.
+///
+/// The first token MUST be the program name; subsequent tokens are
+/// the args. We embed `program` as token 0 even when `lpApplicationName`
+/// is also passed because some Win32 documentation strongly recommends
+/// keeping argv[0] meaningful even though it's not used to locate the
+/// binary when lpApplicationName is set.
+fn build_command_line<P: AsRef<OsStr>>(program: P, args: &[String]) -> Vec<u16> {
+    let mut acc = String::new();
+    append_argv_token(&mut acc, &program.as_ref().to_string_lossy());
+    for arg in args {
+        acc.push(' ');
+        append_argv_token(&mut acc, arg);
+    }
+    wide_z(OsStr::new(&acc))
+}
+
+fn append_argv_token(acc: &mut String, token: &str) {
+    let needs_quoting =
+        token.is_empty() || token.contains(|c: char| c == ' ' || c == '\t' || c == '"');
+    if !needs_quoting {
+        acc.push_str(token);
+        return;
+    }
+    acc.push('"');
+    let mut backslashes: usize = 0;
+    for ch in token.chars() {
+        match ch {
+            '\\' => {
+                backslashes += 1;
+            }
+            '"' => {
+                // Double every preceding backslash + escape the quote.
+                for _ in 0..(backslashes * 2 + 1) {
+                    acc.push('\\');
+                }
+                acc.push('"');
+                backslashes = 0;
+            }
+            other => {
+                for _ in 0..backslashes {
+                    acc.push('\\');
+                }
+                backslashes = 0;
+                acc.push(other);
+            }
+        }
+    }
+    // Trailing backslashes must be doubled before the closing quote
+    // so CommandLineToArgvW doesn't interpret them as escaping the `"`.
+    for _ in 0..(backslashes * 2) {
+        acc.push('\\');
+    }
+    acc.push('"');
+}
+
+/// A child process spawned with a lowered Token IL.
+///
+/// Owns both the process handle (for wait + kill) and the primary
+/// thread handle (closed alongside the process on Drop). `id()`
+/// returns the OS process id; `wait()` consumes self and returns
+/// `ExitStatus`; `kill()` consumes self and force-terminates.
+///
+/// NOT a `tokio::process::Child` — `Child` has no public constructor
+/// for adopting a foreign handle. Lens D flagged this as the highest-
+/// risk API design; we ship a minimal newtype now and revisit tokio
+/// integration in Phase 1b if any caller actually needs async waits.
+#[derive(Debug)]
+pub struct LoweredChild {
+    /// PROCESS_INFORMATION.hProcess — used by WaitForSingleObject +
+    /// GetExitCodeProcess + TerminateProcess.
+    process: OwnedHandle,
+    /// PROCESS_INFORMATION.hThread — held purely for RAII closure;
+    /// the primary thread runs to completion as part of the process.
+    _thread: OwnedHandle,
+    /// PROCESS_INFORMATION.dwProcessId — stable across the child's
+    /// lifetime; safe to expose even after the process exits.
+    pid: u32,
+}
+
+impl LoweredChild {
+    /// OS process id of the spawned child. Stable for the lifetime of
+    /// the `LoweredChild` value. Matches `Child::id()` from std.
+    pub fn id(&self) -> u32 {
+        self.pid
+    }
+
+    /// Block until the child exits and return its `ExitStatus`.
+    /// Consumes `self` so the handles are closed deterministically
+    /// once the wait completes — no leak even if the caller drops
+    /// the returned status without inspecting it.
+    pub fn wait(self) -> io::Result<ExitStatus> {
+        use std::os::windows::io::AsRawHandle;
+        use std::os::windows::process::ExitStatusExt;
+        use windows_sys::Win32::Foundation::{GetLastError, HANDLE, WAIT_OBJECT_0};
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, WaitForSingleObject, INFINITE,
+        };
+
+        let process_raw = self.process.as_raw_handle() as HANDLE;
+        // SAFETY: process_raw is owned + alive until `self.process`
+        // drops at end of scope. WaitForSingleObject is documented to
+        // not modify the handle.
+        let wait_result = unsafe { WaitForSingleObject(process_raw, INFINITE) };
+        if wait_result != WAIT_OBJECT_0 {
+            return Err(io::Error::from_raw_os_error(
+                unsafe { GetLastError() } as i32
+            ));
+        }
+        let mut code: u32 = 0;
+        // SAFETY: process_raw is owned + alive; &mut code is a Sized POD.
+        let ok = unsafe { GetExitCodeProcess(process_raw, &mut code) };
+        if ok == 0 {
+            return Err(io::Error::from_raw_os_error(
+                unsafe { GetLastError() } as i32
+            ));
+        }
+        Ok(ExitStatus::from_raw(code))
+    }
+
+    /// Force-terminate the child with exit code 1. Consumes `self`
+    /// to close the handles. Useful for test cleanup if a probe
+    /// hangs unexpectedly.
+    #[allow(dead_code)]
+    pub fn kill(self) -> io::Result<()> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{GetLastError, HANDLE};
+        use windows_sys::Win32::System::Threading::TerminateProcess;
+
+        let process_raw = self.process.as_raw_handle() as HANDLE;
+        // SAFETY: process_raw is owned + alive.
+        let ok = unsafe { TerminateProcess(process_raw, 1) };
+        if ok == 0 {
+            return Err(io::Error::from_raw_os_error(
+                unsafe { GetLastError() } as i32
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Spawn `program` with the given `args` at the requested integrity
+/// level. The child inherits the parent's environment + working
+/// directory; future PRs can add env/cwd parameters when a caller
+/// needs them (YAGNI per CLAUDE.md §3.2).
+///
+/// Errors when:
+/// - `level == IntegrityLevel::Default` — caller must resolve Default
+///   first (mirrors `duplicate_current_token_lowered`).
+/// - Token duplication fails (`duplicate_current_token_lowered`).
+/// - `CreateProcessAsUserW` fails (binary not found, command-line too
+///   long, etc.) — surfaced as the underlying Win32 error.
+pub fn spawn_with_lowered_token<P: AsRef<Path>>(
+    program: P,
+    args: &[String],
+    level: IntegrityLevel,
+) -> io::Result<LoweredChild> {
+    use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::System::Threading::{
+        CreateProcessAsUserW, PROCESS_INFORMATION, STARTUPINFOW,
+    };
+
+    if matches!(level, IntegrityLevel::Default) {
+        return Err(io::Error::other(
+            "spawn_with_lowered_token: caller must resolve IntegrityLevel::Default before invoking",
+        ));
+    }
+    let token = duplicate_current_token_lowered(level)?;
+
+    let program_wide = wide_z(program.as_ref().as_os_str());
+    let mut cmd_line = build_command_line(program.as_ref().as_os_str(), args);
+
+    let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
+    si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+    let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+
+    // SAFETY: All pointer-typed args point to live, properly-sized
+    // buffers. lpApplicationName is a null-terminated wide string;
+    // lpCommandLine is a null-terminated wide string the FFI is
+    // allowed to mutate (Windows docs say so — we pass an owned Vec
+    // so this is fine). lpProcessAttributes / lpThreadAttributes are
+    // NULL → default security descriptors. bInheritHandles = FALSE
+    // because the probe communicates via a file path, not inherited
+    // handles. dwCreationFlags = 0 → child inherits console, no
+    // CREATE_NEW_PROCESS_GROUP. lpEnvironment = NULL → inherit
+    // parent's env. lpCurrentDirectory = NULL → inherit parent's cwd.
+    let ok = unsafe {
+        CreateProcessAsUserW(
+            token.as_raw_handle() as _,
+            program_wide.as_ptr(),
+            cmd_line.as_mut_ptr(),
+            std::ptr::null::<SECURITY_ATTRIBUTES>() as *mut _,
+            std::ptr::null::<SECURITY_ATTRIBUTES>() as *mut _,
+            0, // bInheritHandles = FALSE
+            0, // dwCreationFlags
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            &si,
+            &mut pi,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::from_raw_os_error(
+            unsafe { GetLastError() } as i32
+        ));
+    }
+
+    // SAFETY: pi.hProcess and pi.hThread are fresh, unaliased handles
+    // populated by a successful CreateProcessAsUserW call.
+    let process = unsafe { OwnedHandle::from_raw_handle(pi.hProcess as _) };
+    let thread = unsafe { OwnedHandle::from_raw_handle(pi.hThread as _) };
+
+    Ok(LoweredChild {
+        process,
+        _thread: thread,
+        pid: pi.dwProcessId,
+    })
+}
+
+// Bring AsRawHandle into scope for the spawn fn body.
+use std::os::windows::io::AsRawHandle;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,5 +857,82 @@ mod tests {
             let parsed: IntegrityLevel = serde_json::from_str(&serialized).unwrap();
             assert_eq!(parsed, level);
         }
+    }
+
+    /// Default must be resolved by the caller. Surfacing a clear
+    /// error here is the regression-pin that prevents a future
+    /// caller from accidentally passing Default through.
+    #[test]
+    fn duplicate_current_token_lowered_rejects_default() {
+        let err = duplicate_current_token_lowered(IntegrityLevel::Default).unwrap_err();
+        assert!(
+            err.to_string().contains("Default"),
+            "rejection error should name the Default sentinel; got: {err}"
+        );
+    }
+
+    /// Smoke test: token duplication + IL lowering succeeds for
+    /// Low (which our test runner can always lower to from Medium).
+    /// The end-to-end CreateProcessAsUserW + LoweredChild test
+    /// lives in `plaw/tests/windows_token_il_spawn.rs` because it
+    /// needs `CARGO_BIN_EXE_plaw-il-probe` which is only set for
+    /// integration tests.
+    #[test]
+    fn duplicate_current_token_lowered_produces_handle_for_low() {
+        let handle = duplicate_current_token_lowered(IntegrityLevel::Low)
+            .expect("Medium → Low lowering must succeed unelevated");
+        drop(handle);
+    }
+
+    /// `spawn_with_lowered_token` MUST refuse Default at the front
+    /// door so callers never pass it through to
+    /// `duplicate_current_token_lowered` (which would also refuse it
+    /// — defense-in-depth).
+    #[test]
+    fn spawn_with_lowered_token_rejects_default_level() {
+        // We don't have CARGO_BIN_EXE here so use a definitely-non-
+        // existent path — the Default-check fires BEFORE we ever
+        // call into the spawn syscall.
+        let err = spawn_with_lowered_token(
+            std::path::PathBuf::from("non-existent.exe"),
+            &[],
+            IntegrityLevel::Default,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("Default"),
+            "rejection error should name the Default sentinel; got: {err}"
+        );
+    }
+
+    /// Pin the command-line quoting behaviour against the
+    /// `CommandLineToArgvW`-reverse algorithm. Without this test, a
+    /// future refactor that "simplifies" the quoting (e.g. doesn't
+    /// double backslashes before `"`) would silently break
+    /// CreateProcessAsUserW for arg-rich invocations.
+    #[test]
+    fn build_command_line_handles_whitespace_quotes_and_backslashes() {
+        let decode = |wide: &[u16]| -> String {
+            let end = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
+            String::from_utf16_lossy(&wide[..end])
+        };
+
+        // Plain ASCII, no quoting needed.
+        let bare = build_command_line("plaw.exe", &["status".to_string()]);
+        assert_eq!(decode(&bare), "plaw.exe status");
+
+        // Whitespace → quoted.
+        let spaced = build_command_line("plaw.exe", &["with space".to_string()]);
+        assert_eq!(decode(&spaced), "plaw.exe \"with space\"");
+
+        // Embedded quote → escaped.
+        let quoted = build_command_line("plaw.exe", &["a\"b".to_string()]);
+        assert_eq!(decode(&quoted), "plaw.exe \"a\\\"b\"");
+
+        // Backslashes only escape if they precede a `"` — bare
+        // backslashes inside a quoted region are NOT doubled because
+        // no `"` follows them.
+        let backslashed = build_command_line("plaw.exe", &["C:\\Program Files\\plaw".to_string()]);
+        assert_eq!(decode(&backslashed), "plaw.exe \"C:\\Program Files\\plaw\"");
     }
 }

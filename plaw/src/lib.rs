@@ -81,6 +81,15 @@ pub mod providers;
 pub mod rag;
 pub mod runtime;
 pub(crate) mod security;
+/// PR #88b: narrow Windows-only re-export so the integration tests in
+/// `plaw/tests/windows_token_il_spawn.rs` can call the spawn primitives
+/// via `env!(CARGO_BIN_EXE_plaw-il-probe)` without widening `security`
+/// itself. The rest of the `security` module stays `pub(crate)`. Phase
+/// 1b will route through the `Sandbox` trait — the trait already lives
+/// in `traits.rs` which is reached internally; no further re-export
+/// needed for the production path.
+#[cfg(target_os = "windows")]
+pub use security::windows_token_il;
 pub(crate) mod service;
 pub(crate) mod skills;
 pub mod tools;
