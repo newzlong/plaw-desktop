@@ -42,6 +42,12 @@ pub mod syscall_anomaly;
 pub mod traits;
 #[cfg(target_os = "windows")]
 pub mod windows_job;
+/// PR #88 (Phase 1a-1) — Windows Token Integrity Level observation
+/// primitives. Dormant per [[plaw-dormant-subsystem-pattern]]: zero
+/// production callers until Phase 1b (PR #89) extends the Sandbox
+/// trait. See module-level doc for the 4-phase split.
+#[cfg(target_os = "windows")]
+pub mod windows_token_il;
 
 #[allow(unused_imports)]
 pub use audit::{AuditEvent, AuditEventType, AuditLogger};
@@ -154,10 +160,7 @@ mod tests {
 
     #[test]
     fn scrub_outbound_redacts_anthropic_key() {
-        let leaked = format!(
-            "Found in env: sk-ant-{}",
-            "A".repeat(40)
-        );
+        let leaked = format!("Found in env: sk-ant-{}", "A".repeat(40));
         let scrubbed = scrub_outbound(&leaked);
         assert!(scrubbed.contains("[REDACTED_API_KEY]"));
         assert!(!scrubbed.contains("sk-ant-AAAA"));
