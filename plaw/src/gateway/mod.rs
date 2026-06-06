@@ -488,11 +488,18 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         // fresh — AuthProfilesStore is cheap (PathBuf + bool) and the
         // OpenAI / Gemini paths build their own copy too.
         let mcp_auth_service = std::sync::Arc::new(crate::auth::AuthService::from_config(&config));
+        // PR #87: hand the registry the SAME sandbox the gateway hands to
+        // ShellTool / BrowserTool so MCP stdio subprocesses share the same
+        // Job Object / kernel-enforced caps. Without this thread, MCP
+        // servers escape the sandbox the agent loop's other subprocess
+        // tools live under.
+        let mcp_sandbox = crate::security::create_sandbox(&config.security);
         let mcp_registry = std::sync::Arc::new(
             crate::tools::mcp::McpRegistry::connect_all(
                 &config.mcp.servers,
                 secret_store.clone(),
                 Some(mcp_auth_service),
+                mcp_sandbox,
             )
             .await,
         );

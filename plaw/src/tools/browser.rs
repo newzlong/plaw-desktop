@@ -62,6 +62,16 @@ impl Default for ComputerUseConfig {
 /// Browser automation tool using pluggable backends.
 pub struct BrowserTool {
     security: Arc<SecurityPolicy>,
+    /// PR #87: Sandbox applied to every `agent-browser` subprocess spawn.
+    /// Until PR #87 this tool spawned via `tokio::process::Command::spawn()`
+    /// directly — bypassing the Sandbox trait that ShellTool has used since
+    /// PR #77. On Windows that meant the browser CLI escaped the Job Object
+    /// (no resource caps, no KILL_ON_JOB_CLOSE); on Linux/macOS it meant no
+    /// landlock / firejail wrapping when those backends arrive. Now wired
+    /// via the same `wrap_command` (pre-spawn) + `after_spawn(pid)`
+    /// (post-spawn Job Object assignment on Windows) choreography ShellTool
+    /// uses.
+    sandbox: Arc<dyn crate::security::Sandbox>,
     allowed_domains: Vec<String>,
     session_name: Option<String>,
     backend: String,
@@ -209,11 +219,13 @@ pub enum BrowserAction {
 impl BrowserTool {
     pub fn new(
         security: Arc<SecurityPolicy>,
+        sandbox: Arc<dyn crate::security::Sandbox>,
         allowed_domains: Vec<String>,
         session_name: Option<String>,
     ) -> Self {
         Self::new_with_backend(
             security,
+            sandbox,
             allowed_domains,
             session_name,
             "agent_browser".into(),
@@ -227,6 +239,7 @@ impl BrowserTool {
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_backend(
         security: Arc<SecurityPolicy>,
+        sandbox: Arc<dyn crate::security::Sandbox>,
         allowed_domains: Vec<String>,
         session_name: Option<String>,
         backend: String,
@@ -237,6 +250,7 @@ impl BrowserTool {
     ) -> Self {
         Self {
             security,
+            sandbox,
             allowed_domains: normalize_domains(allowed_domains),
             session_name,
             backend,
@@ -269,7 +283,11 @@ impl BrowserTool {
         } else {
             // Non-Windows fallback
             let exe = root.join("bin").join("agent-browser");
-            if exe.is_file() { Some(exe) } else { None }
+            if exe.is_file() {
+                Some(exe)
+            } else {
+                None
+            }
         }
     }
 
@@ -278,29 +296,49 @@ impl BrowserTool {
     }
 
     /// Check if agent-browser CLI is available (bundled or system PATH).
+    ///
+    /// PR #87: both probe spawns are routed through the Sandbox trait so
+    /// they share the same Job Object / wrapper as the main `run_command`
+    /// spawn. `--version` is short-lived and the binary is trusted, but
+    /// uniform sandboxing keeps the invariant "every browser-tool
+    /// subprocess is sandboxed" easy to reason about.
     pub async fn is_agent_browser_available(&self) -> bool {
         // Try bundled binary first
         if let Some(exe) = self.bundled_agent_browser_exe() {
-            let result = Command::new(&exe)
-                .arg("--version")
+            let mut cmd = Command::new(&exe);
+            cmd.arg("--version")
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .await;
-            if result.map(|s| s.success()).unwrap_or(false) {
-                return true;
+                .stderr(Stdio::null());
+            if self.sandbox.wrap_command(cmd.as_std_mut()).is_err() {
+                return false;
+            }
+            if let Ok(mut child) = cmd.spawn() {
+                if let Some(pid) = child.id() {
+                    let _ = self.sandbox.after_spawn(pid);
+                }
+                if let Ok(status) = child.wait().await {
+                    if status.success() {
+                        return true;
+                    }
+                }
             }
         }
 
         // Fall back to system PATH
-        Command::new("agent-browser")
-            .arg("--version")
+        let mut cmd = Command::new("agent-browser");
+        cmd.arg("--version")
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await
-            .map(|s| s.success())
-            .unwrap_or(false)
+            .stderr(Stdio::null());
+        if self.sandbox.wrap_command(cmd.as_std_mut()).is_err() {
+            return false;
+        }
+        let Ok(mut child) = cmd.spawn() else {
+            return false;
+        };
+        if let Some(pid) = child.id() {
+            let _ = self.sandbox.after_spawn(pid);
+        }
+        child.wait().await.map(|s| s.success()).unwrap_or(false)
     }
 
     /// Backward-compatible alias.
@@ -489,7 +527,10 @@ impl BrowserTool {
 
         // Inject environment variables for bundled components
         if let Some(root) = self.data_root() {
-            let ab_home = root.join("agent-browser").join("node_modules").join("agent-browser");
+            let ab_home = root
+                .join("agent-browser")
+                .join("node_modules")
+                .join("agent-browser");
             if ab_home.is_dir() {
                 cmd.env("AGENT_BROWSER_HOME", &ab_home);
             }
@@ -504,12 +545,7 @@ impl BrowserTool {
             if node_dir.is_dir() {
                 let bin_dir = root.join("bin");
                 let sys_path = std::env::var("PATH").unwrap_or_default();
-                let new_path = format!(
-                    "{};{};{}",
-                    node_dir.display(),
-                    bin_dir.display(),
-                    sys_path
-                );
+                let new_path = format!("{};{};{}", node_dir.display(), bin_dir.display(), sys_path);
                 cmd.env("PATH", new_path);
             }
         }
@@ -538,6 +574,22 @@ impl BrowserTool {
         let args_str = args.join(" ");
         let timeout_dur = Duration::from_secs(90);
 
+        // PR #87: pre-spawn sandbox wrap. On Linux/macOS today this is a
+        // NoopSandbox (the firejail / bubblewrap / docker / landlock
+        // backends do not auto-construct for the browser tool yet); on
+        // Windows it ensures the agent-browser child is born into the
+        // WindowsJobObjectSandbox's prepared Job Object so the post-spawn
+        // `after_spawn(pid)` AssignProcessToJobObject call below has a
+        // matching state machine.
+        self.sandbox
+            .wrap_command(cmd.as_std_mut())
+            .with_context(|| {
+                format!(
+                    "failed to apply sandbox '{}' to agent-browser",
+                    self.sandbox.name()
+                )
+            })?;
+
         // Use spawn + wait instead of output().
         // output() waits for all pipe handles to close, but the daemon
         // (grandchild) inherits the CLI's pipe handles on Windows and
@@ -547,6 +599,22 @@ impl BrowserTool {
             .stderr(Stdio::piped())
             .spawn()
             .context("failed to spawn agent-browser")?;
+
+        // PR #87: post-spawn Job Object assignment on Windows (NoopSandbox
+        // no-op elsewhere). Fail-soft per shell.rs:592 — log a warning and
+        // continue so a Job Object hiccup never bricks the browser tool;
+        // the kernel-enforced caps from PR #77 are defense-in-depth, not
+        // primary access control.
+        if let Some(pid) = child.id() {
+            if let Err(e) = self.sandbox.after_spawn(pid) {
+                tracing::warn!(
+                    sandbox = self.sandbox.name(),
+                    pid,
+                    error = %e,
+                    "sandbox after_spawn (Job Object assignment) failed for agent-browser; continuing without it"
+                );
+            }
+        }
 
         let child_stdout = child.stdout.take();
         let child_stderr = child.stderr.take();
@@ -572,13 +640,15 @@ impl BrowserTool {
             let _ = tokio::time::timeout(
                 Duration::from_secs(1),
                 tokio::io::AsyncReadExt::read_to_end(&mut out, &mut stdout_buf),
-            ).await;
+            )
+            .await;
         }
         if let Some(mut err) = child_stderr {
             let _ = tokio::time::timeout(
                 Duration::from_secs(1),
                 tokio::io::AsyncReadExt::read_to_end(&mut err, &mut stderr_buf),
-            ).await;
+            )
+            .await;
         }
 
         let stdout = String::from_utf8_lossy(&stdout_buf);
@@ -728,20 +798,18 @@ impl BrowserTool {
                 self.to_result(resp)
             }
 
-            BrowserAction::Close => {
-                match self.run_command(&["close"]).await {
-                    Ok(resp) => self.to_result(resp),
-                    Err(e) => {
-                        debug!("browser close via daemon failed: {e}, force-killing");
-                        Self::force_kill_browser_processes().await;
-                        Ok(ToolResult {
-                            output: "Browser closed (force-killed)".to_string(),
-                            success: true,
-                            error: None,
-                        })
-                    }
+            BrowserAction::Close => match self.run_command(&["close"]).await {
+                Ok(resp) => self.to_result(resp),
+                Err(e) => {
+                    debug!("browser close via daemon failed: {e}, force-killing");
+                    Self::force_kill_browser_processes().await;
+                    Ok(ToolResult {
+                        output: "Browser closed (force-killed)".to_string(),
+                        success: true,
+                        error: None,
+                    })
                 }
-            }
+            },
 
             BrowserAction::Find {
                 by,
@@ -1130,7 +1198,6 @@ impl BrowserTool {
         }
     }
 }
-
 
 #[async_trait]
 impl Tool for BrowserTool {
@@ -2554,6 +2621,16 @@ fn host_matches_allowlist(host: &str, allowed: &[String]) -> bool {
 mod tests {
     use super::*;
 
+    /// PR #87: test helper for the sandbox parameter added to all
+    /// BrowserTool constructors. Returns NoopSandbox so the constructor
+    /// + URL-validation tests stay byte-identical to pre-#87 behavior
+    /// (the real Job Object spawn tests live in a separate
+    /// #[cfg(target_os = "windows")] section and use the real
+    /// WindowsJobObjectSandbox).
+    fn test_sandbox() -> Arc<dyn crate::security::Sandbox> {
+        Arc::new(crate::security::NoopSandbox)
+    }
+
     #[cfg(unix)]
     fn symlink_dir(src: &Path, dst: &Path) {
         std::os::unix::fs::symlink(src, dst).expect("symlink should be created");
@@ -2653,7 +2730,7 @@ mod tests {
     #[test]
     fn validate_url_blocks_ipv6_ssrf() {
         let security = Arc::new(SecurityPolicy::default());
-        let tool = BrowserTool::new(security, vec!["*".into()], None);
+        let tool = BrowserTool::new(security, test_sandbox(), vec!["*".into()], None);
         assert!(tool.validate_url("https://[::1]/").is_err());
         assert!(tool.validate_url("https://[::ffff:127.0.0.1]/").is_err());
         assert!(tool
@@ -2712,7 +2789,7 @@ mod tests {
     #[test]
     fn browser_tool_default_backend_is_agent_browser() {
         let security = Arc::new(SecurityPolicy::default());
-        let tool = BrowserTool::new(security, vec!["example.com".into()], None);
+        let tool = BrowserTool::new(security, test_sandbox(), vec!["example.com".into()], None);
         assert_eq!(
             tool.configured_backend().unwrap(),
             BrowserBackendKind::AgentBrowser
@@ -2724,6 +2801,7 @@ mod tests {
         let security = Arc::new(SecurityPolicy::default());
         let tool = BrowserTool::new_with_backend(
             security,
+            test_sandbox(),
             vec!["example.com".into()],
             None,
             "auto".into(),
@@ -2740,6 +2818,7 @@ mod tests {
         let security = Arc::new(SecurityPolicy::default());
         let tool = BrowserTool::new_with_backend(
             security,
+            test_sandbox(),
             vec!["example.com".into()],
             None,
             "computer_use".into(),
@@ -2759,6 +2838,7 @@ mod tests {
         let security = Arc::new(SecurityPolicy::default());
         let tool = BrowserTool::new_with_backend(
             security,
+            test_sandbox(),
             vec!["example.com".into()],
             None,
             "computer_use".into(),
@@ -2779,6 +2859,7 @@ mod tests {
         let security = Arc::new(SecurityPolicy::default());
         let tool = BrowserTool::new_with_backend(
             security,
+            test_sandbox(),
             vec!["example.com".into()],
             None,
             "computer_use".into(),
@@ -2800,6 +2881,7 @@ mod tests {
         let security = Arc::new(SecurityPolicy::default());
         let tool = BrowserTool::new_with_backend(
             security,
+            test_sandbox(),
             vec!["example.com".into()],
             None,
             "computer_use".into(),
@@ -2827,7 +2909,7 @@ mod tests {
     #[test]
     fn screenshot_path_validation_blocks_escaped_paths() {
         let security = Arc::new(SecurityPolicy::default());
-        let tool = BrowserTool::new(security, vec!["example.com".into()], None);
+        let tool = BrowserTool::new(security, test_sandbox(), vec!["example.com".into()], None);
         assert!(tool.validate_output_path("path", "/etc/passwd").is_err());
         assert!(tool.validate_output_path("path", "../outside.png").is_err());
         assert!(tool
@@ -2840,6 +2922,7 @@ mod tests {
         let security = Arc::new(SecurityPolicy::default());
         let tool = BrowserTool::new_with_backend(
             security,
+            test_sandbox(),
             vec!["example.com".into()],
             None,
             "computer_use".into(),
@@ -2871,14 +2954,14 @@ mod tests {
     #[test]
     fn browser_tool_name() {
         let security = Arc::new(SecurityPolicy::default());
-        let tool = BrowserTool::new(security, vec!["example.com".into()], None);
+        let tool = BrowserTool::new(security, test_sandbox(), vec!["example.com".into()], None);
         assert_eq!(tool.name(), "browser");
     }
 
     #[test]
     fn browser_tool_validates_url() {
         let security = Arc::new(SecurityPolicy::default());
-        let tool = BrowserTool::new(security, vec!["example.com".into()], None);
+        let tool = BrowserTool::new(security, test_sandbox(), vec!["example.com".into()], None);
 
         // Valid
         assert!(tool.validate_url("https://example.com").is_ok());
@@ -2901,7 +2984,7 @@ mod tests {
     #[test]
     fn browser_tool_empty_allowlist_blocks() {
         let security = Arc::new(SecurityPolicy::default());
-        let tool = BrowserTool::new(security, vec![], None);
+        let tool = BrowserTool::new(security, test_sandbox(), vec![], None);
         assert!(tool.validate_url("https://example.com").is_err());
     }
 
@@ -2972,6 +3055,65 @@ mod tests {
             state.reset_session().await;
             state.reset_session().await;
         });
+    }
+
+    /// PR #87 regression: BrowserTool's probe path
+    /// (`is_agent_browser_available`) MUST invoke sandbox.wrap_command at
+    /// LEAST once. Pre-PR #87 the probe spawned via
+    /// tokio::process::Command directly, bypassing the Sandbox trait.
+    /// Asserting "at least once" instead of exactly-N because the probe
+    /// fans out to two spawns (bundled exe + system PATH fallback) — the
+    /// exact count varies by host (whether the bundled binary exists),
+    /// so the regression-pin is "the wrap_command pre-spawn hook is now
+    /// in the codepath" rather than a brittle count.
+    #[tokio::test]
+    async fn browser_probe_invokes_sandbox_wrap_command_at_least_once() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct CountingSandbox {
+            count: Arc<AtomicU32>,
+        }
+        impl crate::security::Sandbox for CountingSandbox {
+            fn wrap_command(&self, _cmd: &mut std::process::Command) -> std::io::Result<()> {
+                self.count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn name(&self) -> &str {
+                "counting"
+            }
+            fn description(&self) -> &str {
+                "test sandbox that counts wrap_command invocations"
+            }
+        }
+
+        let count = Arc::new(AtomicU32::new(0));
+        let sandbox: Arc<dyn crate::security::Sandbox> = Arc::new(CountingSandbox {
+            count: count.clone(),
+        });
+        let tool = BrowserTool::new_with_backend(
+            Arc::new(SecurityPolicy::default()),
+            sandbox,
+            vec!["*".into()],
+            None,
+            "agent_browser".into(),
+            true,
+            "http://127.0.0.1:9515".into(),
+            None,
+            ComputerUseConfig::default(),
+        );
+
+        // Probe doesn't care about agent-browser actually being installed
+        // — if absent, the spawn fails AFTER wrap_command was invoked.
+        let _ = tool.is_agent_browser_available().await;
+
+        assert!(
+            count.load(Ordering::SeqCst) >= 1,
+            "BrowserTool::is_agent_browser_available must invoke sandbox.wrap_command \
+             at least once before tokio::process::Command::spawn()"
+        );
     }
 }
 

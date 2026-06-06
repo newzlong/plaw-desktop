@@ -400,6 +400,7 @@ fn all_tools_impl(
         // Add full browser automation tool (pluggable backend)
         tool_arcs.push(Arc::new(BrowserTool::new_with_backend(
             security.clone(),
+            sandbox.clone(),
             browser_config.allowed_domains.clone(),
             browser_config.session_name.clone(),
             browser_config.backend.clone(),

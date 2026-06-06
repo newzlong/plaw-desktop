@@ -57,6 +57,7 @@ impl StdioTransport {
         command: &str,
         args: &[String],
         env: &HashMap<String, String>,
+        sandbox: Arc<dyn crate::security::Sandbox>,
     ) -> Result<Self> {
         let mut cmd = Command::new(command);
         cmd.args(args)
@@ -67,9 +68,40 @@ impl StdioTransport {
         for (k, v) in env {
             cmd.env(k, v);
         }
+        // PR #87: pre-spawn sandbox wrap. Until #87, MCP stdio subprocesses
+        // were spawned WITHOUT going through the Sandbox trait — escaping
+        // the Job Object on Windows + any future landlock/firejail on
+        // Linux. Wire wrap_command + after_spawn(pid) so MCP servers
+        // inherit the same kernel-enforced caps as ShellTool's subprocess
+        // children (PR #77's KILL_ON_JOB_CLOSE + memory cap + CPU time
+        // cap matter especially for long-running MCP servers like
+        // @modelcontextprotocol/server-filesystem that hold open for an
+        // entire agent session).
+        sandbox.wrap_command(cmd.as_std_mut()).with_context(|| {
+            format!(
+                "failed to apply sandbox '{}' to MCP server '{server_name}'",
+                sandbox.name()
+            )
+        })?;
         let mut child = cmd
             .spawn()
             .with_context(|| format!("failed to spawn MCP server '{server_name}'"))?;
+        // PR #87: post-spawn Job Object assignment. Fail-soft per
+        // ShellTool / BrowserTool pattern — log a warning + continue
+        // rather than break MCP startup over a Job Object hiccup. The
+        // KILL_ON_JOB_CLOSE invariant from PR #77 is defense-in-depth,
+        // not primary access control.
+        if let Some(pid) = child.id() {
+            if let Err(e) = sandbox.after_spawn(pid) {
+                tracing::warn!(
+                    sandbox = sandbox.name(),
+                    pid,
+                    server = %server_name,
+                    error = %e,
+                    "sandbox after_spawn (Job Object assignment) failed for MCP server; continuing without it"
+                );
+            }
+        }
 
         let stdin = child
             .stdin
@@ -276,4 +308,61 @@ fn truncate(s: &str, max: usize) -> String {
     let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
     out.push('…');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// PR #87 regression: StdioTransport::spawn MUST invoke
+    /// sandbox.wrap_command on the not-yet-spawned Command (pre-#87 it
+    /// spawned directly via tokio::process::Command::spawn(), bypassing
+    /// the Sandbox trait entirely on every platform).
+    struct CountingSandbox {
+        wrap_count: Arc<AtomicU32>,
+    }
+
+    impl crate::security::Sandbox for CountingSandbox {
+        fn wrap_command(&self, _cmd: &mut std::process::Command) -> std::io::Result<()> {
+            self.wrap_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn name(&self) -> &str {
+            "counting"
+        }
+        fn description(&self) -> &str {
+            "test sandbox that counts wrap_command invocations"
+        }
+    }
+
+    #[tokio::test]
+    async fn stdio_spawn_invokes_sandbox_wrap_command_exactly_once() {
+        let wrap_count = Arc::new(AtomicU32::new(0));
+        let sandbox: Arc<dyn crate::security::Sandbox> = Arc::new(CountingSandbox {
+            wrap_count: wrap_count.clone(),
+        });
+        // `echo` is available on every platform's PATH (Windows uses
+        // cmd's built-in via execvp lookup; Unix has /bin/echo or the
+        // shell builtin). Spawn fails on stdin/stdout pipe semantics
+        // mismatch with echo's behavior — the assert only cares that
+        // wrap_command was reached.
+        let _ = StdioTransport::spawn(
+            "test-sandbox-wire".to_string(),
+            "echo",
+            &["sandbox-wire-smoke".to_string()],
+            &HashMap::new(),
+            sandbox,
+        )
+        .await;
+        assert_eq!(
+            wrap_count.load(Ordering::SeqCst),
+            1,
+            "StdioTransport::spawn must invoke sandbox.wrap_command exactly once \
+             before tokio::process::Command::spawn()"
+        );
+    }
 }
