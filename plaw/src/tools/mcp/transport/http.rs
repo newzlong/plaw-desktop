@@ -23,7 +23,7 @@
 //! All of the ❌ items have explicit landing spots in Phase 1 (PR #77).
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -44,11 +44,12 @@ pub(crate) struct HttpTransport {
     server_name: String,
     url: String,
     http: reqwest::Client,
-    /// Static bearer token (already revealed at construction time). The
-    /// `Option<String>` here lives only inside this struct so the
-    /// plaintext never lands in `Debug` output of the surrounding
-    /// `McpClient` (which derives no transport-leaking impls).
-    bearer: Option<String>,
+    /// Static bearer token from `[mcp.servers.X.transport.bearer_token]`
+    /// (PR #76). Already revealed at construction time. NEVER swapped —
+    /// when OAuth is configured, `oauth_bearer` takes precedence in
+    /// `build_post`. Mutually exclusive with `oauth_*` fields per the
+    /// config-schema check in PR #79.
+    static_bearer: Option<String>,
     headers: HashMap<String, String>,
     /// Monotonic request id counter. HTTP correlates trivially (one POST
     /// = one round-trip) but the JSON-RPC `id` field is still mandatory.
@@ -60,6 +61,21 @@ pub(crate) struct HttpTransport {
     /// Set to true after the `initialize` response was parsed. Subsequent
     /// POSTs include the `MCP-Protocol-Version` header per spec §2.
     handshake_complete: std::sync::atomic::AtomicBool,
+    /// PR #81: OAuth-managed access token. Swapped on `attempt_oauth_recovery`
+    /// after a 401. `tokio::sync::Mutex` (NOT `std::sync::Mutex`) so the
+    /// hold can span the AuthService refresh + IdP roundtrip without
+    /// blocking the runtime. `None` when OAuth is not configured for
+    /// this server.
+    oauth_bearer: tokio::sync::Mutex<Option<String>>,
+    /// PR #81: handle to the AuthService used to refresh the OAuth token
+    /// when a 401 is observed. `None` = Phase 0 behavior preserved
+    /// byte-identically (the existing static-bearer-only flow).
+    auth_service: Option<Arc<crate::auth::AuthService>>,
+    /// PR #81: the MCP server name under which OAuth tokens are
+    /// persisted in `auth-profiles.json` (as `provider = "mcp:<name>"`).
+    /// `Some` iff `auth_service` is also `Some`. Set at construction time
+    /// from `[[mcp.servers]] name`.
+    oauth_server_name: Option<String>,
 }
 
 impl HttpTransport {
@@ -67,6 +83,14 @@ impl HttpTransport {
     /// The handshake itself is driven by the surrounding `McpClient` via
     /// [`McpTransport::request`]; this constructor only validates inputs
     /// and pre-builds the `reqwest::Client` with the configured timeout.
+    ///
+    /// PR #81 adds two optional parameters at the end:
+    /// - `auth_service`: when `Some`, OAuth recovery on 401 is enabled.
+    ///   When `None`, the transport behaves byte-identically to PR #76
+    ///   (Phase 0 fail-fast 401).
+    /// - `oauth_server_name`: when `Some` (always together with
+    ///   `auth_service`), this is the server identifier
+    ///   `AuthService::get_valid_mcp_access_token` will look up.
     pub(crate) fn connect(
         server_name: String,
         url: &str,
@@ -74,6 +98,8 @@ impl HttpTransport {
         headers: &HashMap<String, String>,
         request_timeout: Duration,
         secret_store: &SecretStore,
+        auth_service: Option<Arc<crate::auth::AuthService>>,
+        oauth_server_name: Option<String>,
     ) -> Result<Self> {
         let parsed: reqwest::Url = url
             .parse()
@@ -85,7 +111,7 @@ impl HttpTransport {
             );
         }
 
-        let bearer = bearer_token
+        let static_bearer = bearer_token
             .map(|s| s.reveal(secret_store))
             .transpose()
             .with_context(|| {
@@ -97,22 +123,39 @@ impl HttpTransport {
             .build()
             .context("building reqwest client for MCP HTTP transport")?;
 
+        // OAuth bearer starts empty — the first POST will hit the 401
+        // path, refresh via `attempt_oauth_recovery`, and cache the
+        // token in `oauth_bearer` for all subsequent requests. Eager
+        // priming would require making `connect` async, which would
+        // ripple through every test fixture; the cold-start
+        // round-trip cost is one extra HTTP request per plaw boot
+        // (acceptable per CLAUDE.md §3.1 KISS).
         Ok(Self {
             server_name,
             url: parsed.into(),
             http,
-            bearer,
+            static_bearer,
             headers: headers.clone(),
             next_id: std::sync::atomic::AtomicU64::new(1),
             session_id: Mutex::new(None),
             handshake_complete: std::sync::atomic::AtomicBool::new(false),
+            oauth_bearer: tokio::sync::Mutex::new(None),
+            auth_service,
+            oauth_server_name,
         })
     }
 
     /// Build a `reqwest::RequestBuilder` with the per-call headers
     /// (Accept, optional MCP-Protocol-Version, optional Mcp-Session-Id,
     /// optional Authorization, plus any user-configured static headers).
-    fn build_post(&self) -> reqwest::RequestBuilder {
+    ///
+    /// PR #81 OAuth precedence: when `oauth_bearer` holds a token, it
+    /// wins over `static_bearer`. The two MUST be mutually exclusive
+    /// at the config-schema layer (PR #79's
+    /// `validate_transport_mutual_exclusivity`) but the precedence here
+    /// is defence-in-depth for the case where a user manually edits
+    /// `auth-profiles.json` while a static bearer is also set.
+    async fn build_post(&self) -> reqwest::RequestBuilder {
         // Per spec §2 the client MUST advertise both response shapes.
         // We then reject text/event-stream after the fact (Phase 0).
         let mut rb = self
@@ -131,13 +174,72 @@ impl HttpTransport {
                 rb = rb.header("Mcp-Session-Id", sid);
             }
         }
-        if let Some(ref token) = self.bearer {
+        // OAuth takes precedence over static bearer. Both are tried
+        // before the static-bearer fallback below.
+        let oauth_guard = self.oauth_bearer.lock().await;
+        if let Some(ref token) = *oauth_guard {
+            rb = rb.header("Authorization", format!("Bearer {token}"));
+        } else if let Some(ref token) = self.static_bearer {
             rb = rb.header("Authorization", format!("Bearer {token}"));
         }
+        drop(oauth_guard);
         for (k, v) in &self.headers {
             rb = rb.header(k, v);
         }
         rb
+    }
+
+    /// PR #81: attempt to recover from a 401 by asking AuthService for
+    /// a fresh access token, swapping it into `oauth_bearer`. Returns
+    /// `Ok(())` when a token was obtained and stashed; `Err` when
+    /// OAuth is not configured for this server (the caller falls
+    /// through to the static-bearer error path) OR when the refresh
+    /// itself failed (the caller surfaces the OAuth-configured error
+    /// message pointing the user at `plaw auth login`).
+    async fn attempt_oauth_recovery(&self) -> Result<()> {
+        let (Some(svc), Some(server_name)) =
+            (self.auth_service.as_ref(), self.oauth_server_name.as_ref())
+        else {
+            anyhow::bail!("no OAuth configured");
+        };
+        let token = svc
+            .get_valid_mcp_access_token(server_name)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no MCP profile for '{server_name}'; run `plaw auth login --provider mcp:{server_name}`"
+                )
+            })?;
+        let mut guard = self.oauth_bearer.lock().await;
+        *guard = Some(token);
+        Ok(())
+    }
+
+    /// PR #81: synthetic JSON-RPC error for 401/403 when OAuth IS
+    /// configured but recovery failed (or the user is logged out).
+    /// Replaces the Phase 0 "configure a static bearer" message with
+    /// an actionable "run plaw auth login" pointer.
+    fn http_status_to_error_oauth_aware(
+        &self,
+        status: u16,
+        body: &str,
+        oauth_configured: bool,
+        recovery_error: Option<&str>,
+    ) -> JsonRpcError {
+        if !matches!(status, 401 | 403) || !oauth_configured {
+            return Self::http_status_to_error(status, body);
+        }
+        let reason = recovery_error.unwrap_or("token endpoint refused the refresh request");
+        let body_excerpt: String = body.chars().take(200).collect();
+        let server_name = self.oauth_server_name.as_deref().unwrap_or("<unknown>");
+        JsonRpcError {
+            code: -32001,
+            message: format!(
+                "HTTP {status}: MCP OAuth recovery failed ({reason}). \
+                 Run `plaw auth login --provider mcp:{server_name}` to re-authenticate. Body: {body_excerpt}"
+            ),
+            data: None,
+        }
     }
 
     /// Map a non-2xx HTTP status to a synthetic JSON-RPC error envelope
@@ -192,73 +294,125 @@ impl McpTransport for HttpTransport {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let req = JsonRpcRequest::new(id, method, params);
         let body = serde_json::to_vec(&req)?;
+        // PR #81: at most ONE recovery attempt per request. A second
+        // 401 after a successful refresh means something else is
+        // wrong (scope mismatch, audience mismatch, server bug); fall
+        // through to the error path rather than thrashing the IdP.
+        let oauth_configured = self.auth_service.is_some();
+        let mut already_retried = false;
 
-        let response = self.build_post().body(body).send().await.with_context(|| {
-            format!(
-                "MCP HTTP server '{}': POST {} failed",
-                self.server_name, method
-            )
-        })?;
+        loop {
+            let response = self
+                .build_post()
+                .await
+                .body(body.clone())
+                .send()
+                .await
+                .with_context(|| {
+                    format!(
+                        "MCP HTTP server '{}': POST {} failed",
+                        self.server_name, method
+                    )
+                })?;
 
-        let status = response.status();
-        self.capture_session_id(response.headers());
-        // Snapshot the content-type before consuming the response body so
-        // we can branch on application/json vs text/event-stream cleanly.
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_lowercase();
-        let body_bytes = response
-            .bytes()
-            .await
-            .with_context(|| format!("MCP HTTP server '{}': read body failed", self.server_name))?;
-        let body_str = String::from_utf8_lossy(&body_bytes);
+            let status = response.status();
+            self.capture_session_id(response.headers());
+            // Snapshot the content-type before consuming the response body so
+            // we can branch on application/json vs text/event-stream cleanly.
+            let content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_lowercase();
+            let body_bytes = response.bytes().await.with_context(|| {
+                format!("MCP HTTP server '{}': read body failed", self.server_name)
+            })?;
+            let body_str = String::from_utf8_lossy(&body_bytes);
 
-        if !status.is_success() {
-            return Err(McpProtocolError::from(Self::http_status_to_error(
-                status.as_u16(),
-                body_str.as_ref(),
-            ))
-            .into());
+            // PR #81: OAuth recovery on the FIRST 401 only.
+            if status == reqwest::StatusCode::UNAUTHORIZED && oauth_configured && !already_retried {
+                match self.attempt_oauth_recovery().await {
+                    Ok(()) => {
+                        already_retried = true;
+                        tracing::info!(
+                            server = %self.server_name,
+                            method,
+                            "OAuth token refreshed after 401; retrying request once"
+                        );
+                        continue;
+                    }
+                    Err(refresh_err) => {
+                        let synthetic = self.http_status_to_error_oauth_aware(
+                            status.as_u16(),
+                            body_str.as_ref(),
+                            true,
+                            Some(refresh_err.to_string().as_str()),
+                        );
+                        return Err(McpProtocolError::from(synthetic).into());
+                    }
+                }
+            }
+
+            if !status.is_success() {
+                // For 401/403 with OAuth configured: surface the
+                // "run plaw auth login" guidance even on second
+                // failure (so the user knows what to do).
+                let synthetic = if oauth_configured {
+                    self.http_status_to_error_oauth_aware(
+                        status.as_u16(),
+                        body_str.as_ref(),
+                        true,
+                        None,
+                    )
+                } else {
+                    Self::http_status_to_error(status.as_u16(), body_str.as_ref())
+                };
+                return Err(McpProtocolError::from(synthetic).into());
+            }
+
+            if content_type.starts_with("text/event-stream") {
+                bail!(
+                    "MCP HTTP server '{}' returned text/event-stream; Phase 0 only supports application/json responses. SSE response bodies are deferred.",
+                    self.server_name
+                );
+            }
+
+            let msg: JsonRpcMessage = serde_json::from_slice(&body_bytes).with_context(|| {
+                format!(
+                    "MCP HTTP server '{}': response was not a JSON-RPC message (body: {})",
+                    self.server_name,
+                    truncate(body_str.as_ref(), 200)
+                )
+            })?;
+
+            if let Some(err) = msg.error {
+                return Err(McpProtocolError::from(err).into());
+            }
+            // After the first successful response we treat the handshake as
+            // complete so subsequent POSTs include MCP-Protocol-Version.
+            self.handshake_complete
+                .store(true, std::sync::atomic::Ordering::Release);
+            return Ok(msg.result.unwrap_or(Value::Null));
         }
-
-        if content_type.starts_with("text/event-stream") {
-            bail!(
-                "MCP HTTP server '{}' returned text/event-stream; PR #76 Phase 0 only supports application/json responses. SSE response bodies land in PR #77.",
-                self.server_name
-            );
-        }
-
-        let msg: JsonRpcMessage = serde_json::from_slice(&body_bytes).with_context(|| {
-            format!(
-                "MCP HTTP server '{}': response was not a JSON-RPC message (body: {})",
-                self.server_name,
-                truncate(body_str.as_ref(), 200)
-            )
-        })?;
-
-        if let Some(err) = msg.error {
-            return Err(McpProtocolError::from(err).into());
-        }
-        // After the first successful response we treat the handshake as
-        // complete so subsequent POSTs include MCP-Protocol-Version.
-        self.handshake_complete
-            .store(true, std::sync::atomic::Ordering::Release);
-        Ok(msg.result.unwrap_or(Value::Null))
     }
 
     async fn notify(&self, method: &str, params: Option<Value>) -> Result<()> {
         let n = JsonRpcNotification::new(method, params);
         let body = serde_json::to_vec(&n)?;
 
-        let response = self.build_post().body(body).send().await.with_context(|| {
-            format!(
-                "MCP HTTP server '{}': POST notification {} failed",
-                self.server_name, method
-            )
-        })?;
+        let response = self
+            .build_post()
+            .await
+            .body(body)
+            .send()
+            .await
+            .with_context(|| {
+                format!(
+                    "MCP HTTP server '{}': POST notification {} failed",
+                    self.server_name, method
+                )
+            })?;
 
         let status = response.status();
         self.capture_session_id(response.headers());
@@ -431,6 +585,8 @@ mod tests {
             &HashMap::new(),
             Duration::from_secs(2),
             &empty_secret_store(),
+            None,
+            None,
         )
         .unwrap()
     }
@@ -509,9 +665,13 @@ mod tests {
         let t = make_transport(&url);
         let err = t.request("tools/list", None).await.unwrap_err();
         let msg = format!("{err:#}");
+        // PR #81 updated the SSE rejection wording (dropped the
+        // "PR #77" reference now that the rest of audit #12 has
+        // shipped). The body MUST still surface the content-type so
+        // operators know why the request failed.
         assert!(
-            msg.contains("text/event-stream") && msg.contains("PR #77"),
-            "Phase 0 SSE rejection must reference PR #77; got: {msg}"
+            msg.contains("text/event-stream") && msg.to_lowercase().contains("deferred"),
+            "SSE rejection must mention text/event-stream + deferral; got: {msg}"
         );
     }
 
@@ -620,6 +780,8 @@ mod tests {
             &HashMap::new(),
             Duration::from_secs(2),
             &secret_store,
+            None,
+            None,
         )
         .unwrap();
         t.request("anything", None).await.unwrap();
@@ -651,6 +813,8 @@ mod tests {
             &headers,
             Duration::from_secs(2),
             &empty_secret_store(),
+            None,
+            None,
         )
         .unwrap();
         t.request("anything", None).await.unwrap();
@@ -689,6 +853,8 @@ mod tests {
             &HashMap::new(),
             Duration::from_secs(2),
             &empty_secret_store(),
+            None,
+            None,
         );
         // HttpTransport contains a `Mutex` so Result::unwrap_err / Debug
         // are unavailable — pattern-match instead.
@@ -699,6 +865,197 @@ mod tests {
         assert!(
             msg.contains("http://") && msg.contains("https://"),
             "scheme rejection must mention allowed schemes; got: {msg}"
+        );
+    }
+
+    // ── PR #81: 401 OAuth recovery ─────────────────────────────────────
+
+    /// PR #81 regression: without an AuthService, a 401 surfaces the
+    /// Phase-0 "configure a static bearer" wording byte-identically to
+    /// PR #76. Users who never enabled OAuth see ZERO change.
+    #[tokio::test]
+    async fn no_oauth_configured_keeps_phase0_message_on_401() {
+        let state = MockServerState::default();
+        state.push(ScriptedResponse {
+            status: StatusCode::UNAUTHORIZED,
+            content_type: "text/plain",
+            body: "no bearer".into(),
+            extra_headers: Vec::new(),
+        });
+        let (url, _) = spawn_mock(state).await;
+        // make_transport passes (None, None) for auth_service +
+        // oauth_server_name — the canonical no-OAuth setup.
+        let t = make_transport(&url);
+        let err = t.request("tools/list", None).await.unwrap_err();
+        let proto = err.downcast_ref::<McpProtocolError>().unwrap();
+        assert_eq!(proto.0.code, -32001);
+        assert!(
+            proto
+                .0
+                .message
+                .contains("Phase 0 plaw does not implement OAuth"),
+            "expected Phase 0 wording; got: {}",
+            proto.0.message
+        );
+        assert!(
+            !proto.0.message.contains("plaw auth login"),
+            "Phase 0 message must NOT mention the OAuth login command"
+        );
+    }
+
+    /// PR #81 happy path: OAuth is configured, the FIRST request gets a
+    /// 401, the transport calls AuthService::get_valid_mcp_access_token,
+    /// swaps the bearer, retries once — and the second request hits
+    /// 200. Asserts: exactly 2 server-side requests, the second carries
+    /// the new bearer, the user sees Ok(Value).
+    #[tokio::test]
+    async fn oauth_recovery_on_401_swaps_bearer_and_retries() {
+        use crate::auth::profiles::TokenSet;
+        let state = MockServerState::default();
+        // First request: 401.
+        state.push(ScriptedResponse {
+            status: StatusCode::UNAUTHORIZED,
+            content_type: "text/plain",
+            body: "expired token".into(),
+            extra_headers: Vec::new(),
+        });
+        // Second request: 200 with a valid JSON-RPC envelope.
+        state.push(MockServerState::json_ok(json!({
+            "jsonrpc": "2.0", "id": 1, "result": {"recovered": true}
+        })));
+        let (url, recorder) = spawn_mock(state).await;
+
+        // Pre-seed an AuthService with a valid MCP profile so the
+        // recovery path finds a fresh access token. `auth-profiles.json`
+        // lives under a tempdir so the test is hermetic.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let svc = std::sync::Arc::new(crate::auth::AuthService::new(tmp.path(), false));
+        let token_set = TokenSet {
+            access_token: "fresh_access_token".into(),
+            refresh_token: Some("rrr".into()),
+            id_token: None,
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            token_type: Some("Bearer".into()),
+            scope: None,
+        };
+        svc.store_mcp_oauth(
+            "test_recovery",
+            token_set,
+            Some("cid".into()),
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+        let t = HttpTransport::connect(
+            "test_recovery".into(),
+            &url,
+            None,
+            &HashMap::new(),
+            Duration::from_secs(2),
+            &empty_secret_store(),
+            Some(svc),
+            Some("test_recovery".into()),
+        )
+        .unwrap();
+
+        let result = t.request("tools/list", None).await.unwrap();
+        assert_eq!(result, json!({"recovered": true}));
+
+        let snap = recorder.snapshot();
+        assert_eq!(
+            snap.len(),
+            2,
+            "expected exactly 2 server-side requests (1 initial 401 + 1 recovery retry); got {}",
+            snap.len()
+        );
+        // The retry must carry the NEW bearer.
+        let auth = snap[1]
+            .headers
+            .iter()
+            .find(|(k, _)| k == "authorization")
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("");
+        assert_eq!(auth, "Bearer fresh_access_token");
+    }
+
+    /// PR #81 second-401 path: even after a successful refresh, the
+    /// server might 401 again (scope mismatch, audience mismatch,
+    /// revoked token). The transport MUST NOT thrash — at most one
+    /// retry per request — and the error MUST point the user at
+    /// `plaw auth login` (NOT the Phase 0 "static bearer" wording).
+    #[tokio::test]
+    async fn oauth_recovery_second_401_falls_through_to_oauth_aware_error() {
+        use crate::auth::profiles::TokenSet;
+        let state = MockServerState::default();
+        state.push(ScriptedResponse {
+            status: StatusCode::UNAUTHORIZED,
+            content_type: "text/plain",
+            body: "first 401".into(),
+            extra_headers: Vec::new(),
+        });
+        state.push(ScriptedResponse {
+            status: StatusCode::UNAUTHORIZED,
+            content_type: "text/plain",
+            body: "still 401".into(),
+            extra_headers: Vec::new(),
+        });
+        let (url, recorder) = spawn_mock(state).await;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let svc = std::sync::Arc::new(crate::auth::AuthService::new(tmp.path(), false));
+        svc.store_mcp_oauth(
+            "test_double401",
+            TokenSet {
+                access_token: "fresh".into(),
+                refresh_token: Some("r".into()),
+                id_token: None,
+                expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+                token_type: Some("Bearer".into()),
+                scope: None,
+            },
+            Some("cid".into()),
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+        let t = HttpTransport::connect(
+            "test_double401".into(),
+            &url,
+            None,
+            &HashMap::new(),
+            Duration::from_secs(2),
+            &empty_secret_store(),
+            Some(svc),
+            Some("test_double401".into()),
+        )
+        .unwrap();
+
+        let err = t.request("tools/list", None).await.unwrap_err();
+        let snap = recorder.snapshot();
+        // At most ONE retry per request — exactly 2 server hits, not 3+.
+        assert_eq!(snap.len(), 2, "must not thrash the IdP / server");
+
+        let proto = err.downcast_ref::<McpProtocolError>().unwrap();
+        assert_eq!(proto.0.code, -32001);
+        assert!(
+            proto
+                .0
+                .message
+                .contains("plaw auth login --provider mcp:test_double401"),
+            "OAuth-configured error must point user at the login command; got: {}",
+            proto.0.message
+        );
+        // And must NOT mention the Phase 0 static-bearer wording.
+        assert!(
+            !proto
+                .0
+                .message
+                .contains("Phase 0 plaw does not implement OAuth"),
+            "OAuth-configured error must NOT use the Phase 0 wording"
         );
     }
 }
