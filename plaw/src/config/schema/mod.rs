@@ -4075,6 +4075,34 @@ pub struct SandboxConfig {
     /// Custom Firejail arguments (when backend = firejail)
     #[serde(default)]
     pub firejail_args: Vec<String>,
+
+    /// Windows Job Object only — maximum number of processes inside the
+    /// job (`JOB_OBJECT_LIMIT_ACTIVE_PROCESS`). Hits at attempt-to-spawn
+    /// time, so a saturated job rejects new children with
+    /// `ERROR_NOT_ENOUGH_QUOTA`. Default: 256 — tuned for dev-agent use
+    /// (`cargo build`, `npm install`, `pip install` routinely exceed
+    /// Linux-firejail-era values). Set lower (e.g. 16) to harden against
+    /// fork-bomb–style misbehaving tools.
+    #[serde(default)]
+    pub windows_max_processes: Option<u32>,
+
+    /// Windows Job Object only — per-process commit-charge cap in MiB
+    /// (`JOB_OBJECT_LIMIT_PROCESS_MEMORY` ⇒ `ProcessMemoryLimit`).
+    /// Kernel-enforced; processes attempting to allocate beyond the cap
+    /// terminate with `JOB_OBJECT_LIMIT_EXCEEDED`. Default: 2048 (2 GiB).
+    /// Note: this is the cap per child, NOT the total job; total job
+    /// memory remains unbounded in Phase 0.
+    #[serde(default)]
+    pub windows_process_memory_mb: Option<u64>,
+
+    /// Windows Job Object only — per-process **cumulative CPU time** in
+    /// seconds (`JOB_OBJECT_LIMIT_PROCESS_TIME` ⇒
+    /// `PerProcessUserTimeLimit`). This is NOT wall-clock time — a
+    /// 30-minute `sleep` consumes ~0s of CPU and never trips this cap;
+    /// a tight `while(true)` loop trips it at exactly the configured
+    /// duration. Default: 600 (10 minutes of busy work per child).
+    #[serde(default)]
+    pub windows_process_cpu_time_secs: Option<u64>,
 }
 
 impl Default for SandboxConfig {
@@ -4083,6 +4111,9 @@ impl Default for SandboxConfig {
             enabled: None, // Auto-detect
             backend: SandboxBackend::Auto,
             firejail_args: Vec::new(),
+            windows_max_processes: None,
+            windows_process_memory_mb: None,
+            windows_process_cpu_time_secs: None,
         }
     }
 }

@@ -188,6 +188,11 @@ win32job = "2.0"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
+    # PR #77 (Phase 0 Job Object hardening) — JOB_OBJECT_LIMIT_* flags,
+    # JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOBOBJECT_BASIC_UI_RESTRICTIONS,
+    # and SetInformationJobObject. win32job 2.0 does not expose these
+    # constants or the Basic UI Restrictions info class.
+    "Win32_System_JobObjects",
 ] }
 
 # USB device enumeration (hardware discovery) — only on platforms nusb supports

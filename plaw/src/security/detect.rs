@@ -73,7 +73,8 @@ pub fn create_sandbox(config: &SecurityConfig) -> Arc<dyn Sandbox> {
         SandboxBackend::WindowsJobObject => {
             #[cfg(target_os = "windows")]
             {
-                if let Ok(sandbox) = super::windows_job::WindowsJobObjectSandbox::new() {
+                let limits = super::windows_job::WindowsJobLimits::from_config(&config.sandbox);
+                if let Ok(sandbox) = super::windows_job::WindowsJobObjectSandbox::new(limits) {
                     return Arc::new(sandbox);
                 }
             }
@@ -161,7 +162,7 @@ mod tests {
             sandbox: SandboxConfig {
                 enabled: Some(false),
                 backend: SandboxBackend::None,
-                firejail_args: Vec::new(),
+                ..SandboxConfig::default()
             },
             ..Default::default()
         };
@@ -175,7 +176,7 @@ mod tests {
             sandbox: SandboxConfig {
                 enabled: None, // Auto-detect
                 backend: SandboxBackend::Auto,
-                firejail_args: Vec::new(),
+                ..SandboxConfig::default()
             },
             ..Default::default()
         };
