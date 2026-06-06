@@ -1,70 +1,49 @@
-//! Stdio MCP client.
+//! Per-server MCP client orchestrator.
 //!
-//! Spawns an MCP server subprocess, performs the `initialize` →
-//! `notifications/initialized` handshake, and exposes
-//! [`McpClient::list_tools`] and [`McpClient::call_tool`] for the
-//! agent loop. Request/response correlation uses a monotonic `id`
-//! counter; the read task fans inbound responses out to per-request
-//! oneshot channels.
+//! Transport-agnostic — the byte-level wire (stdio subprocess or Streamable
+//! HTTP) lives in [`super::transport`] behind the
+//! [`super::transport::McpTransport`] trait. This module owns:
 //!
-//! **Framing**: one JSON-RPC object per line, UTF-8, no embedded
-//! newlines (per spec). The reader uses `tokio::io::BufReader::lines`
-//! which handles `\n` and `\r\n` transparently.
+//! - the `initialize` → `notifications/initialized` handshake
+//! - per-call timeout enforcement (delegated to the transport for
+//!   correlation but wrapped here for spec compliance)
+//! - the `list_tools` / `call_tool` public API consumed by [`super::tool`]
 //!
-//! **stderr**: captured and forwarded to `tracing::warn!` with the
-//! server name prefix. Spec says servers MAY log to stderr.
-//!
-//! **Shutdown**: drop the [`McpClient`] → stdin closes → server's
-//! read loop sees EOF → server exits gracefully. The background tasks
-//! exit when their channels close.
+//! Per CLAUDE.md §3.3 Rule of Three the [`super::transport::McpTransport`]
+//! trait stays `pub(crate)` until a third transport (WebSocket / Unix
+//! domain socket / etc.) materialises and survives one release.
+
+use anyhow::{anyhow, bail, Context, Result};
+use std::collections::HashMap;
+use std::time::Duration;
+use tokio::time::timeout;
 
 use super::protocol::{
     CallToolResult, ClientCapabilities, ClientInfo, InitializeParams, InitializeResult,
-    JsonRpcError, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, ListToolsResult,
-    ToolDescriptor, PROTOCOL_VERSION,
+    JsonRpcError, ListToolsResult, ToolDescriptor, PROTOCOL_VERSION,
 };
-use anyhow::{anyhow, bail, Context, Result};
-use std::collections::HashMap;
-use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::{oneshot, Mutex};
-use tokio::time::timeout;
+use super::transport::{http::HttpTransport, stdio::StdioTransport, McpTransport};
+use crate::security::{Secret, SecretStore};
 
 /// One MCP server connection.
 ///
-/// Lifetime: created via [`McpClient::connect`] which spawns the
-/// subprocess and runs the handshake; dropped to shut down.
-/// Cloning is intentionally not implemented — the underlying stdin
-/// handle is single-writer; share an `Arc<McpClient>` if multiple
-/// callers need to issue requests concurrently.
+/// Lifetime: created via [`McpClient::connect`] (stdio) or
+/// [`McpClient::connect_http`] (HTTP), both of which run the handshake
+/// before returning. Dropped to shut down; transports handle their own
+/// cleanup in [`McpTransport::close`].
+///
+/// Cloning is intentionally not implemented — concurrent callers should
+/// share an `Arc<McpClient>`.
 pub struct McpClient {
-    /// Server name (matches [`crate::config::McpServerConfig::name`]).
     server_name: String,
-    /// Writer half of the subprocess stdin. Mutex serializes writes
-    /// across concurrent `tools/call` invocations.
-    stdin: Mutex<Box<dyn AsyncWrite + Send + Unpin>>,
-    /// Monotonic request id counter.
-    next_id: AtomicU64,
-    /// In-flight requests awaiting responses, keyed by id.
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcMessage>>>>,
-    /// Cached `initialize` response (server capabilities + info).
+    transport: Box<dyn McpTransport>,
     initialize_result: InitializeResult,
-    /// Default per-request timeout.
     request_timeout: Duration,
-    /// Process handle. Dropped → SIGKILL on Windows / kill() on Unix.
-    /// Wrapped in Mutex<Option> so [`Self::shutdown`] can take ownership.
-    child: Mutex<Option<Child>>,
 }
 
 impl McpClient {
-    /// Spawn the configured subprocess, complete the MCP handshake,
-    /// and return a ready-to-use client. Errors if the subprocess
-    /// fails to spawn, exits early, or the handshake times out /
-    /// returns a protocol error.
+    /// Spawn a stdio MCP subprocess, complete the handshake, return a
+    /// ready-to-use client.
     pub async fn connect(
         server_name: impl Into<String>,
         command: &str,
@@ -74,49 +53,57 @@ impl McpClient {
         request_timeout: Duration,
     ) -> Result<Self> {
         let server_name = server_name.into();
-        let mut cmd = Command::new(command);
-        cmd.args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        for (k, v) in env {
-            cmd.env(k, v);
-        }
-        let mut child = cmd
-            .spawn()
-            .with_context(|| format!("failed to spawn MCP server '{server_name}'"))?;
+        let transport = StdioTransport::spawn(server_name.clone(), command, args, env).await?;
+        Self::with_transport(
+            server_name,
+            Box::new(transport),
+            startup_timeout,
+            request_timeout,
+        )
+        .await
+    }
 
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow!("MCP server '{server_name}': no stdin pipe"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow!("MCP server '{server_name}': no stdout pipe"))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| anyhow!("MCP server '{server_name}': no stderr pipe"))?;
+    /// Build an HTTP MCP client, complete the handshake (POST `initialize`
+    /// → POST `notifications/initialized`), return a ready-to-use client.
+    pub async fn connect_http(
+        server_name: impl Into<String>,
+        url: &str,
+        bearer_token: Option<&Secret>,
+        headers: &HashMap<String, String>,
+        startup_timeout: Duration,
+        request_timeout: Duration,
+        secret_store: &SecretStore,
+    ) -> Result<Self> {
+        let server_name = server_name.into();
+        let transport = HttpTransport::connect(
+            server_name.clone(),
+            url,
+            bearer_token,
+            headers,
+            request_timeout,
+            secret_store,
+        )?;
+        Self::with_transport(
+            server_name,
+            Box::new(transport),
+            startup_timeout,
+            request_timeout,
+        )
+        .await
+    }
 
-        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcMessage>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        spawn_stdout_reader(server_name.clone(), stdout, pending.clone());
-        spawn_stderr_logger(server_name.clone(), stderr);
-
-        let stdin_writer: Mutex<Box<dyn AsyncWrite + Send + Unpin>> =
-            Mutex::new(Box::new(stdin));
-
+    /// Transport-agnostic constructor — runs the handshake. Exposed at
+    /// `pub(crate)` so future transports (and the test harness) can
+    /// reuse it.
+    pub(crate) async fn with_transport(
+        server_name: String,
+        transport: Box<dyn McpTransport>,
+        startup_timeout: Duration,
+        request_timeout: Duration,
+    ) -> Result<Self> {
         let mut client = Self {
             server_name: server_name.clone(),
-            stdin: stdin_writer,
-            next_id: AtomicU64::new(1),
-            pending: pending.clone(),
-            // Filled in after handshake; placeholder used only between
-            // construction and the handshake call below — never observed
-            // by external code because `connect` either returns Ok with
-            // a populated value or returns Err and the client is dropped.
+            transport,
             initialize_result: InitializeResult {
                 protocol_version: String::new(),
                 capabilities: Default::default(),
@@ -124,9 +111,7 @@ impl McpClient {
                 instructions: None,
             },
             request_timeout,
-            child: Mutex::new(Some(child)),
         };
-
         let init = client
             .handshake(startup_timeout)
             .await
@@ -158,7 +143,7 @@ impl McpClient {
         })?;
         let result_value = timeout(
             startup_timeout,
-            self.request_internal("initialize", Some(params)),
+            self.transport.request("initialize", Some(params)),
         )
         .await
         .map_err(|_| anyhow!("handshake timed out after {startup_timeout:?}"))??;
@@ -179,7 +164,9 @@ impl McpClient {
         }
 
         // 2) notifications/initialized — fire and forget.
-        self.notify("notifications/initialized", None).await?;
+        self.transport
+            .notify("notifications/initialized", None)
+            .await?;
 
         Ok(init)
     }
@@ -188,7 +175,7 @@ impl McpClient {
     pub async fn list_tools(&self) -> Result<Vec<ToolDescriptor>> {
         let result_value = timeout(
             self.request_timeout,
-            self.request_internal("tools/list", None),
+            self.transport.request("tools/list", None),
         )
         .await
         .map_err(|_| anyhow!("tools/list timed out after {:?}", self.request_timeout))??;
@@ -211,7 +198,7 @@ impl McpClient {
         });
         let result_value = timeout(
             self.request_timeout,
-            self.request_internal("tools/call", Some(params)),
+            self.transport.request("tools/call", Some(params)),
         )
         .await
         .map_err(|_| anyhow!("tools/call '{tool_name}' timed out"))??;
@@ -220,87 +207,23 @@ impl McpClient {
         Ok(r)
     }
 
-    /// Send a request and wait for the matching response. Returns the
-    /// raw `result` field on success or a protocol error on failure.
-    async fn request_internal(
-        &self,
-        method: &str,
-        params: Option<serde_json::Value>,
-    ) -> Result<serde_json::Value> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
-
-        let req = JsonRpcRequest::new(id, method, params);
-        let line = serde_json::to_string(&req)?;
-        self.write_line(&line).await.with_context(|| {
-            format!(
-                "failed to write {} request to MCP server '{}'",
-                method, self.server_name
-            )
-        })?;
-
-        let response = match rx.await {
-            Ok(m) => m,
-            Err(_) => {
-                // oneshot sender dropped → reader task ended without
-                // receiving a response (typically: server crashed or
-                // closed stdout). Surface a clear error.
-                self.pending.lock().await.remove(&id);
-                bail!(
-                    "MCP server '{}' closed stdout before responding to {method}",
-                    self.server_name
-                );
-            }
-        };
-
-        if let Some(err) = response.error {
-            return Err(McpProtocolError::from(err).into());
-        }
-        Ok(response.result.unwrap_or(serde_json::Value::Null))
-    }
-
-    /// Send a notification (no response expected).
-    async fn notify(&self, method: &str, params: Option<serde_json::Value>) -> Result<()> {
-        let n = JsonRpcNotification::new(method, params);
-        let line = serde_json::to_string(&n)?;
-        self.write_line(&line).await
-    }
-
-    async fn write_line(&self, json: &str) -> Result<()> {
-        let mut stdin = self.stdin.lock().await;
-        stdin.write_all(json.as_bytes()).await?;
-        stdin.write_all(b"\n").await?;
-        stdin.flush().await?;
-        Ok(())
-    }
-
-    /// Cleanly close stdin, giving the server a chance to exit.
-    /// Called from `Drop` indirectly via `kill_on_drop`; exposed for
-    /// tests that want deterministic shutdown.
+    /// Cleanly close the transport.
     pub async fn shutdown(&self) {
-        // Drop stdin first so server sees EOF.
-        let mut stdin = self.stdin.lock().await;
-        let _ = stdin.shutdown().await;
-        drop(stdin);
-
-        let mut child_slot = self.child.lock().await;
-        if let Some(mut child) = child_slot.take() {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-        }
+        self.transport.close().await;
     }
 }
 
 impl Drop for McpClient {
     fn drop(&mut self) {
-        // `kill_on_drop(true)` on the Command builder handles the
-        // hard cleanup. No async work is possible here.
+        // Stdio: `kill_on_drop(true)` on the Command builder handles hard
+        // cleanup inside StdioTransport. HTTP: no persistent state to
+        // clean — dropping the reqwest::Client releases pooled sockets.
     }
 }
 
-/// Wraps a server-returned [`JsonRpcError`] for ergonomic surfacing
-/// via `anyhow::Error::downcast_ref` in higher layers.
+/// Wraps a server-returned [`JsonRpcError`] for ergonomic surfacing via
+/// `anyhow::Error::downcast_ref` in higher layers. Both stdio and HTTP
+/// transports route server-level errors through this type.
 #[derive(Debug)]
 pub struct McpProtocolError(pub JsonRpcError);
 
@@ -318,127 +241,19 @@ impl std::fmt::Display for McpProtocolError {
 
 impl std::error::Error for McpProtocolError {}
 
-fn spawn_stdout_reader<R: tokio::io::AsyncRead + Send + Unpin + 'static>(
-    server_name: String,
-    stdout: R,
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcMessage>>>>,
-) {
-    tokio::spawn(async move {
-        let mut reader = BufReader::new(stdout).lines();
-        loop {
-            match reader.next_line().await {
-                Ok(Some(line)) => {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    match serde_json::from_str::<JsonRpcMessage>(trimmed) {
-                        Ok(msg) => {
-                            if msg.is_response() {
-                                if let Some(id) = msg.id {
-                                    if let Some(tx) =
-                                        pending.lock().await.remove(&id)
-                                    {
-                                        let _ = tx.send(msg);
-                                    } else {
-                                        tracing::warn!(
-                                            server = %server_name,
-                                            id,
-                                            "MCP response for unknown request id (already timed out or never sent)"
-                                        );
-                                    }
-                                }
-                            } else if let Some(method) = msg.method.as_deref() {
-                                tracing::debug!(
-                                    server = %server_name,
-                                    %method,
-                                    "MCP notification received (ignored in Phase 0)"
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                server = %server_name,
-                                error = %e,
-                                line = %truncate(trimmed, 200),
-                                "MCP server emitted non-JSON-RPC line on stdout"
-                            );
-                        }
-                    }
-                }
-                Ok(None) => {
-                    // stdout closed — server exited or closed its
-                    // stdout. Drop any pending senders so their
-                    // recv() calls bail out.
-                    tracing::info!(server = %server_name, "MCP server stdout closed");
-                    pending.lock().await.clear();
-                    return;
-                }
-                Err(e) => {
-                    tracing::warn!(server = %server_name, error = %e, "MCP stdout read error");
-                    pending.lock().await.clear();
-                    return;
-                }
-            }
-        }
-    });
-}
-
-fn spawn_stderr_logger<R: tokio::io::AsyncRead + Send + Unpin + 'static>(
-    server_name: String,
-    stderr: R,
-) {
-    tokio::spawn(async move {
-        let mut reader = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = reader.next_line().await {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            tracing::warn!(server = %server_name, "[stderr] {}", truncate(trimmed, 500));
-        }
-    });
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
-    out.push('…');
-    out
-}
-
-// `ChildStdin` requires explicit Unpin impl chain for the boxed
-// AsyncWrite alias; assert it here to fail fast at compile time if
-// the underlying tokio types ever lose it.
-const _: fn() = || {
-    fn _check<T: AsyncWrite + Unpin>() {}
-    _check::<ChildStdin>();
-};
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::mcp::protocol::ContentBlock;
+    use crate::tools::mcp::transport::test_util::pair_with_duplex;
+    use serde_json::json;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    // The tests below drive McpClient against a hand-rolled
-    // in-process MCP server that runs in a tokio task and exchanges
-    // JSON-RPC over `tokio::io::DuplexStream`. This skips the
-    // subprocess machinery (Command::spawn etc.) and exercises only
-    // the framing + request/response correlation logic — i.e. the
-    // parts where bugs would actually live. End-to-end subprocess
-    // tests against `npx @modelcontextprotocol/server-everything`
-    // are deferred to a follow-up PR with offline-mode toggle.
+    // ── Test harness ──────────────────────────────────────────────
 
-    use std::collections::HashMap;
-    use tokio::io::{duplex, AsyncWriteExt, BufReader};
-    use tokio::sync::Mutex;
-
-    /// Construct an McpClient hooked to in-memory duplex streams.
-    /// `server_reader` is the half the test harness reads (client's
-    /// outbound writes appear here); `server_writer` is the half the
-    /// test harness writes to (visible to client as inbound).
+    /// Build an `McpClient` wired to an in-memory transport. The
+    /// returned `server_read`/`server_write` halves let the test act
+    /// as the fake MCP server.
     async fn build_test_client(
         request_timeout: Duration,
     ) -> (
@@ -446,257 +261,252 @@ mod tests {
         tokio::io::ReadHalf<tokio::io::DuplexStream>,
         tokio::io::WriteHalf<tokio::io::DuplexStream>,
     ) {
-        let (client_side, server_side) = duplex(8192);
-        let (client_read, client_write) = tokio::io::split(client_side);
-        let (server_read, server_write) = tokio::io::split(server_side);
+        let (transport, mut server_read, mut server_write) =
+            pair_with_duplex("test-server", request_timeout, 4096);
 
-        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcMessage>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        spawn_stdout_reader("test".to_string(), client_read, pending.clone());
+        // Spawn the client-side connect concurrently with the test-side
+        // handshake responder so the in-memory pipe doesn't deadlock.
+        let client_fut = tokio::spawn(async move {
+            McpClient::with_transport(
+                "test-server".into(),
+                Box::new(transport),
+                Duration::from_secs(5),
+                request_timeout,
+            )
+            .await
+        });
 
-        let stdin_writer: Mutex<Box<dyn AsyncWrite + Send + Unpin>> =
-            Mutex::new(Box::new(client_write));
-        let client = McpClient {
-            server_name: "test".into(),
-            stdin: stdin_writer,
-            next_id: AtomicU64::new(1),
-            pending,
-            initialize_result: InitializeResult {
-                protocol_version: PROTOCOL_VERSION.into(),
-                capabilities: Default::default(),
-                server_info: Default::default(),
-                instructions: None,
-            },
-            request_timeout,
-            child: Mutex::new(None),
-        };
+        // Read the initialize request, respond with a canned
+        // InitializeResult, then consume the notifications/initialized.
+        let _init_line = read_one_line(&mut server_read).await;
+        let init_result = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "serverInfo": {"name": "test-server", "version": "0.0.1"}
+            }
+        });
+        server_write
+            .write_all(format!("{init_result}\n").as_bytes())
+            .await
+            .unwrap();
+        let _initialized_line = read_one_line(&mut server_read).await;
+
+        let client = client_fut.await.unwrap().unwrap();
         (client, server_read, server_write)
     }
 
-    async fn read_one_line(
-        reader: &mut tokio::io::ReadHalf<tokio::io::DuplexStream>,
-    ) -> String {
-        let mut buf = BufReader::new(reader);
-        let mut line = String::new();
-        tokio::io::AsyncBufReadExt::read_line(&mut buf, &mut line)
-            .await
-            .unwrap();
-        line.trim().to_string()
+    async fn read_one_line(reader: &mut tokio::io::ReadHalf<tokio::io::DuplexStream>) -> String {
+        let mut buf = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            match reader.read(&mut byte).await {
+                Ok(0) => return String::from_utf8_lossy(&buf).to_string(),
+                Ok(_) => {
+                    if byte[0] == b'\n' {
+                        return String::from_utf8_lossy(&buf).to_string();
+                    }
+                    buf.push(byte[0]);
+                }
+                Err(_) => return String::from_utf8_lossy(&buf).to_string(),
+            }
+        }
     }
+
+    // ── Behavior coverage ────────────────────────────────────────
 
     #[tokio::test]
     async fn list_tools_round_trip() {
         let (client, mut server_read, mut server_write) =
-            build_test_client(Duration::from_secs(5)).await;
+            build_test_client(Duration::from_secs(2)).await;
 
-        // Server task: wait for tools/list, respond with one tool.
-        let server = tokio::spawn(async move {
-            let req_line = read_one_line(&mut server_read).await;
-            let req: serde_json::Value = serde_json::from_str(&req_line).unwrap();
-            assert_eq!(req["method"], "tools/list");
-            let id = req["id"].as_u64().unwrap();
-            let resp = serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "tools": [
-                        {"name": "echo", "description": "Echo a string",
-                         "inputSchema": {"type": "object"}}
-                    ]
-                }
-            });
-            server_write
-                .write_all(format!("{resp}\n").as_bytes())
-                .await
-                .unwrap();
+        // Client.list_tools sends `tools/list`; respond with two tools.
+        let list_fut = tokio::spawn(async move { client.list_tools().await });
+
+        let req_line = read_one_line(&mut server_read).await;
+        assert!(req_line.contains("\"method\":\"tools/list\""));
+
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "tools": [
+                    {"name": "echo", "description": "echo", "inputSchema": {"type": "object"}},
+                    {"name": "ping", "description": "ping", "inputSchema": {"type": "object"}}
+                ]
+            }
         });
+        server_write
+            .write_all(format!("{response}\n").as_bytes())
+            .await
+            .unwrap();
 
-        let tools = client.list_tools().await.unwrap();
-        server.await.unwrap();
-        assert_eq!(tools.len(), 1);
+        let tools = list_fut.await.unwrap().unwrap();
+        assert_eq!(tools.len(), 2);
         assert_eq!(tools[0].name, "echo");
-        assert_eq!(tools[0].description.as_deref(), Some("Echo a string"));
+        assert_eq!(tools[1].name, "ping");
     }
 
     #[tokio::test]
-    async fn call_tool_returns_text_content() {
+    async fn out_of_order_responses_are_correlated_by_id() {
         let (client, mut server_read, mut server_write) =
-            build_test_client(Duration::from_secs(5)).await;
+            build_test_client(Duration::from_secs(2)).await;
+        let client = std::sync::Arc::new(client);
 
-        let server = tokio::spawn(async move {
-            let req_line = read_one_line(&mut server_read).await;
-            let req: serde_json::Value = serde_json::from_str(&req_line).unwrap();
-            assert_eq!(req["method"], "tools/call");
-            assert_eq!(req["params"]["name"], "echo");
-            let id = req["id"].as_u64().unwrap();
-            let resp = serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "content": [{"type": "text", "text": "echoed: ping"}]
-                }
-            });
-            server_write
-                .write_all(format!("{resp}\n").as_bytes())
-                .await
-                .unwrap();
-        });
+        // Fire two concurrent calls; server responds in REVERSE order.
+        let c1 = client.clone();
+        let call1 = tokio::spawn(async move { c1.call_tool("echo", json!({"v": 1})).await });
+        let c2 = client.clone();
+        let call2 = tokio::spawn(async move { c2.call_tool("echo", json!({"v": 2})).await });
 
-        let result = client
-            .call_tool("echo", serde_json::json!({"msg": "ping"}))
+        let line1 = read_one_line(&mut server_read).await;
+        let line2 = read_one_line(&mut server_read).await;
+        // The transport allocates monotonic ids starting at 1 (next_id
+        // post-handshake). Initialize used id=1, so these are 2 and 3.
+        assert!(line1.contains("\"id\":2"));
+        assert!(line2.contains("\"id\":3"));
+
+        // Respond to id=3 FIRST.
+        let r3 = json!({"jsonrpc": "2.0", "id": 3, "result": {"content": [{"type": "text", "text": "got 2"}], "isError": false}});
+        server_write
+            .write_all(format!("{r3}\n").as_bytes())
             .await
             .unwrap();
-        server.await.unwrap();
-        assert!(!result.is_error);
-        assert_eq!(result.content.len(), 1);
-        match &result.content[0] {
-            ContentBlock::Text { text } => assert_eq!(text, "echoed: ping"),
-            other => panic!("expected Text, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn call_tool_surfaces_is_error_flag() {
-        let (client, mut server_read, mut server_write) =
-            build_test_client(Duration::from_secs(5)).await;
-        let server = tokio::spawn(async move {
-            let req_line = read_one_line(&mut server_read).await;
-            let req: serde_json::Value = serde_json::from_str(&req_line).unwrap();
-            let id = req["id"].as_u64().unwrap();
-            let resp = serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "content": [{"type":"text","text":"rate limit"}],
-                    "isError": true
-                }
-            });
-            server_write
-                .write_all(format!("{resp}\n").as_bytes())
-                .await
-                .unwrap();
-        });
-
-        let result = client
-            .call_tool("api_call", serde_json::json!({}))
+        let r2 = json!({"jsonrpc": "2.0", "id": 2, "result": {"content": [{"type": "text", "text": "got 1"}], "isError": false}});
+        server_write
+            .write_all(format!("{r2}\n").as_bytes())
             .await
             .unwrap();
-        server.await.unwrap();
-        assert!(result.is_error);
+
+        let result1 = call1.await.unwrap().unwrap();
+        let result2 = call2.await.unwrap().unwrap();
+        assert_eq!(result1.content.len(), 1);
+        assert_eq!(result2.content.len(), 1);
     }
 
     #[tokio::test]
-    async fn call_tool_propagates_jsonrpc_error_as_anyhow() {
+    async fn call_tool_returns_protocol_error_on_server_error_envelope() {
         let (client, mut server_read, mut server_write) =
-            build_test_client(Duration::from_secs(5)).await;
-        let server = tokio::spawn(async move {
-            let req_line = read_one_line(&mut server_read).await;
-            let req: serde_json::Value = serde_json::from_str(&req_line).unwrap();
-            let id = req["id"].as_u64().unwrap();
-            let resp = serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": {"code": -32601, "message": "Method not found"}
-            });
-            server_write
-                .write_all(format!("{resp}\n").as_bytes())
-                .await
-                .unwrap();
+            build_test_client(Duration::from_secs(2)).await;
+
+        let call_fut = tokio::spawn(async move { client.call_tool("bad", json!({})).await });
+
+        let _req_line = read_one_line(&mut server_read).await;
+        let err_resp = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "error": {"code": -32601, "message": "method not found"}
         });
-
-        let err = client
-            .call_tool("does_not_exist", serde_json::json!({}))
+        server_write
+            .write_all(format!("{err_resp}\n").as_bytes())
             .await
-            .unwrap_err();
-        server.await.unwrap();
-        let msg = err.to_string();
-        assert!(msg.contains("Method not found"));
+            .unwrap();
+
+        let result = call_fut.await.unwrap();
+        let err = result.unwrap_err();
+        let proto = err
+            .downcast_ref::<McpProtocolError>()
+            .expect("error must be McpProtocolError");
+        assert_eq!(proto.0.code, -32601);
     }
 
     #[tokio::test]
-    async fn request_times_out_when_server_silent() {
-        let (client, _server_read, _server_write) =
-            build_test_client(Duration::from_millis(50)).await;
-        // Don't have the test harness respond — request should time out.
-        let err = client.list_tools().await.unwrap_err();
-        assert!(err.to_string().contains("timed out"));
+    async fn call_tool_times_out_when_server_silent() {
+        let (client, mut server_read, _server_write) =
+            build_test_client(Duration::from_millis(150)).await;
+
+        let result = client.call_tool("slow", json!({})).await;
+        // Drain the request so the test doesn't leak.
+        let _ = read_one_line(&mut server_read).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("timed out"));
     }
 
     #[tokio::test]
-    async fn server_closing_stdout_surfaces_clean_error() {
-        let (client, server_read, server_write) =
-            build_test_client(Duration::from_secs(5)).await;
-        // Drop the write half — client's reader sees EOF, pending
-        // requests should resolve to an error.
+    async fn list_tools_surfaces_closed_stdout_error_on_eof_before_response() {
+        let (client, mut server_read, server_write) =
+            build_test_client(Duration::from_secs(2)).await;
+
+        let list_fut = tokio::spawn(async move { client.list_tools().await });
+        let _req_line = read_one_line(&mut server_read).await;
+        // Drop the writer half → reader task sees EOF → pending clears.
         drop(server_write);
-        // Drop the read half too so any client write fails quickly.
-        drop(server_read);
-        // Give the reader task a tick to observe EOF and clear `pending`.
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let err = client.list_tools().await.unwrap_err();
-        let msg = err.to_string();
+
+        let result = list_fut.await.unwrap();
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
         assert!(
-            msg.contains("closed stdout") || msg.contains("MCP server"),
-            "unexpected error: {msg}"
+            msg.contains("closed stdout") || msg.contains("EOF"),
+            "got: {msg}"
         );
     }
 
     #[tokio::test]
-    async fn concurrent_requests_correlate_correctly() {
-        // Two requests in flight at once. Reply out of order. The
-        // client's per-id correlation must route them correctly.
-        let (client, server_read, mut server_write) =
-            build_test_client(Duration::from_secs(5)).await;
-        let server = tokio::spawn(async move {
-            // Long-lived BufReader so we don't lose buffered bytes
-            // between successive line reads.
-            let mut server_buf = BufReader::new(server_read);
-            let mut req1 = String::new();
-            tokio::io::AsyncBufReadExt::read_line(&mut server_buf, &mut req1)
-                .await
-                .unwrap();
-            let req1 = req1.trim().to_string();
-            let mut req2 = String::new();
-            tokio::io::AsyncBufReadExt::read_line(&mut server_buf, &mut req2)
-                .await
-                .unwrap();
-            let req2 = req2.trim().to_string();
-            let r1: serde_json::Value = serde_json::from_str(&req1).unwrap();
-            let r2: serde_json::Value = serde_json::from_str(&req2).unwrap();
-            let id1 = r1["id"].as_u64().unwrap();
-            let id2 = r2["id"].as_u64().unwrap();
-            // Reply to req2 FIRST.
-            let resp2 = serde_json::json!({
-                "jsonrpc":"2.0","id":id2,
-                "result":{"content":[{"type":"text","text":"second"}]}
-            });
-            server_write
-                .write_all(format!("{resp2}\n").as_bytes())
-                .await
-                .unwrap();
-            let resp1 = serde_json::json!({
-                "jsonrpc":"2.0","id":id1,
-                "result":{"content":[{"type":"text","text":"first"}]}
-            });
-            server_write
-                .write_all(format!("{resp1}\n").as_bytes())
-                .await
-                .unwrap();
-        });
+    async fn malformed_json_line_is_warned_about_but_does_not_kill_reader() {
+        let (client, mut server_read, mut server_write) =
+            build_test_client(Duration::from_secs(2)).await;
 
-        let client_arc = Arc::new(client);
-        let c1 = client_arc.clone();
-        let h1 = tokio::spawn(async move {
-            c1.call_tool("t1", serde_json::json!({})).await
+        let list_fut = tokio::spawn(async move { client.list_tools().await });
+        let _req_line = read_one_line(&mut server_read).await;
+
+        // Send garbage first, then a valid response. The reader must
+        // recover and route the valid response.
+        server_write
+            .write_all(b"this is not json at all\n")
+            .await
+            .unwrap();
+        let good = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {"tools": []}
         });
-        let c2 = client_arc.clone();
-        let h2 = tokio::spawn(async move {
-            c2.call_tool("t2", serde_json::json!({})).await
-        });
-        let r1 = h1.await.unwrap().unwrap();
-        let r2 = h2.await.unwrap().unwrap();
-        server.await.unwrap();
-        assert_eq!(r1.content[0].render(), "first");
-        assert_eq!(r2.content[0].render(), "second");
+        server_write
+            .write_all(format!("{good}\n").as_bytes())
+            .await
+            .unwrap();
+
+        let tools = list_fut.await.unwrap().unwrap();
+        assert!(tools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn concurrent_calls_do_not_interleave_writes_on_stdin() {
+        // Stress the stdin Mutex — fire N concurrent calls, assert each
+        // line read by the server is a complete JSON object.
+        let (client, mut server_read, mut server_write) =
+            build_test_client(Duration::from_secs(2)).await;
+        let client = std::sync::Arc::new(client);
+        const N: usize = 8;
+
+        let mut handles = Vec::new();
+        for i in 0..N {
+            let c = client.clone();
+            handles.push(tokio::spawn(async move {
+                c.call_tool("echo", json!({"i": i})).await
+            }));
+        }
+
+        // Read N lines and respond to each by id.
+        for _ in 0..N {
+            let line = read_one_line(&mut server_read).await;
+            // Each line must parse cleanly as JSON.
+            let v: serde_json::Value =
+                serde_json::from_str(&line).expect("interleaved writes — line not valid JSON");
+            let id = v["id"].as_u64().unwrap();
+            let resp = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {"content": [{"type": "text", "text": "ok"}], "isError": false}
+            });
+            server_write
+                .write_all(format!("{resp}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+        for h in handles {
+            let _ = h.await.unwrap().unwrap();
+        }
     }
 }

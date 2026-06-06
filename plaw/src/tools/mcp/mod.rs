@@ -5,35 +5,42 @@
 //! `notifications/initialized` handshake, and exposes a single
 //! `mcp_call(server, tool, arguments)` proxy tool to the agent loop.
 //!
-//! Phase 0 scope per the 2026-05-30 `mcp-client-discovery` workflow:
+//! Phase 0 scope per the 2026-05-30 `mcp-client-discovery` workflow,
+//! extended by PR #76 (2026-06-03):
 //!
-//! - **stdio transport only** — covers ~90% of public MCP servers
-//!   (npx / uvx -shipped); HTTP / SSE deferred to Phase 1.
+//! - **stdio + Streamable HTTP transports** — selected via
+//!   `[mcp.servers.X.transport]` config (default stdio for back-compat).
+//!   HTTP is sync request/response only; `text/event-stream` responses
+//!   are rejected with a clear error pointing to PR #77.
 //! - **Spec version `2025-06-18`** — advertised in `initialize`;
 //!   plaw is lenient about server-returned versions.
 //! - **`tools/list` + `tools/call`** — `resources`, `prompts`,
 //!   `sampling`, `elicitation`, `roots` all skipped.
-//! - **No OAuth** — credentials reach the subprocess via env vars
-//!   (spec explicitly says stdio servers SHOULD NOT do OAuth).
+//! - **No OAuth** — stdio uses env vars; HTTP supports a static
+//!   `bearer_token` only. Full OAuth 2.1 + PKCE deferred to PR #77.
 //! - **Eager spawn**, **lazy reconnect** — failed servers don't block
 //!   startup; the proxy tool's description surfaces their status.
 //!
-//! Layered architecture (one file per concern, ~150-300 LOC each):
+//! Layered architecture (one file per concern):
 //!
 //! ```text
-//!     [protocol]      JSON-RPC envelopes, MCP-specific types
+//!     [protocol]                JSON-RPC envelopes, MCP-specific types
 //!         ↑
-//!     [client]        stdio framing, request/response correlation
+//!     [transport/{stdio,http}]  wire framing + per-call correlation
 //!         ↑
-//!     [registry]      multi-server lifecycle, allow-list, status
+//!     [client]                  per-server orchestration (handshake,
+//!                               list_tools, call_tool, timeouts)
 //!         ↑
-//!     [tool]          McpTool — implements `Tool` trait for the agent loop
+//!     [registry]                multi-server lifecycle, allow-list, status
+//!         ↑
+//!     [tool]                    McpTool — implements `Tool` trait
 //! ```
 
 pub mod client;
 pub mod protocol;
 pub mod registry;
 pub mod tool;
+pub(crate) mod transport;
 
 pub use registry::{McpRegistry, ServerStatus};
 pub use tool::McpTool;

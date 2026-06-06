@@ -297,8 +297,15 @@ mod tests {
     use crate::config::McpServerConfig;
     use std::collections::HashMap;
 
+    fn test_secret_store() -> Arc<crate::security::SecretStore> {
+        Arc::new(crate::security::SecretStore::new(
+            std::path::Path::new(""),
+            false,
+        ))
+    }
+
     async fn empty_registry() -> Arc<McpRegistry> {
-        Arc::new(McpRegistry::connect_all(&[]).await)
+        Arc::new(McpRegistry::connect_all(&[], test_secret_store()).await)
     }
 
     #[tokio::test]
@@ -342,6 +349,7 @@ mod tests {
     async fn description_lists_failed_servers_when_no_connections_succeed() {
         let cfg = McpServerConfig {
             name: "bad-server".into(),
+            transport: crate::config::McpTransport::Stdio,
             command: "this-command-does-not-exist-zzz".into(),
             args: vec![],
             env: HashMap::new(),
@@ -349,7 +357,7 @@ mod tests {
             startup_timeout_ms: 100,
             request_timeout_ms: 500,
         };
-        let registry = Arc::new(McpRegistry::connect_all(&[cfg]).await);
+        let registry = Arc::new(McpRegistry::connect_all(&[cfg], test_secret_store()).await);
         let tool = McpTool::new(registry);
         let desc = tool.build_description();
         assert!(desc.contains("No MCP servers are currently connected"));

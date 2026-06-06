@@ -5,11 +5,11 @@
 // remaining sections (channels, providers, tools, runtime, memory) get
 // peeled off in follow-up PRs.
 mod proxy;
-pub use proxy::{ProxyConfig, ProxyScope};
 pub use proxy::{
     apply_runtime_proxy_to_builder, build_runtime_proxy_client,
     build_runtime_proxy_client_with_timeouts, runtime_proxy_config, set_runtime_proxy_config,
 };
+pub use proxy::{ProxyConfig, ProxyScope};
 mod chain_of_verification;
 mod research;
 pub use chain_of_verification::ChainOfVerificationConfig;
@@ -60,7 +60,6 @@ pub const DEFAULT_PROVIDER_FALLBACK: &str = "deepseek";
 /// Default model paired with `DEFAULT_PROVIDER_FALLBACK`. Override
 /// independently via `default_model` in config.toml.
 pub const DEFAULT_MODEL_FALLBACK: &str = "deepseek-v4-pro";
-
 
 // ── Top-level config ──────────────────────────────────────────────
 
@@ -494,8 +493,18 @@ pub struct McpServerConfig {
     /// Conventional shape: lowercase alphanumeric + hyphen, e.g.
     /// `"github"`, `"filesystem"`, `"sqlite-local"`.
     pub name: String,
-    /// Command to execute. Same semantics as `tokio::process::Command::new`.
-    /// Typical: `"npx"` for npm-published servers, `"uvx"` for Python.
+    /// Transport selector. Defaults to [`McpTransport::Stdio`] so PR #63
+    /// configs deserialise byte-identically. Set the nested
+    /// `[mcp.servers.transport]` table with `kind = "http"` to switch
+    /// to the Phase-0 Streamable HTTP transport (PR #76).
+    #[serde(default)]
+    pub transport: McpTransport,
+    /// Command to execute when `transport.kind = "stdio"`. Same semantics
+    /// as `tokio::process::Command::new`. Typical: `"npx"` for npm-
+    /// published servers, `"uvx"` for Python. Ignored when
+    /// `transport.kind = "http"` — kept defaultable so HTTP entries do
+    /// not need to spell out an unused field.
+    #[serde(default)]
     pub command: String,
     /// Arguments passed to `command`. Often holds the server's
     /// package id, e.g. `["-y", "@modelcontextprotocol/server-github"]`.
@@ -525,6 +534,49 @@ pub struct McpServerConfig {
     /// to slow external APIs).
     #[serde(default = "default_mcp_request_timeout_ms")]
     pub request_timeout_ms: u64,
+}
+
+/// Transport selector for a single `[[mcp.servers]]` entry.
+///
+/// Default = [`Self::Stdio`] which preserves PR #63 wire format
+/// byte-identically. The Phase-0 HTTP variant (PR #76) supports
+/// sync request/response only — `text/event-stream` response bodies
+/// are rejected and OAuth is unsupported. Streamable bidirectional
+/// (SSE response body, standalone GET, OAuth 2.1 + PKCE) is deferred
+/// to PR #77.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum McpTransport {
+    /// stdio JSON-RPC subprocess. Connection params come from the
+    /// sibling `command` / `args` / `env` fields on
+    /// [`McpServerConfig`] (kept flat so legacy TOML works unchanged).
+    Stdio,
+    /// Streamable HTTP transport per MCP spec 2025-06-18, Phase 0
+    /// subset. POSTs JSON-RPC envelopes to a single URL; rejects
+    /// `text/event-stream` response bodies. Static `bearer_token`
+    /// reaches self-hosted servers; full OAuth 2.1 is Phase 1.
+    Http {
+        /// Server endpoint URL. Required for the HTTP transport.
+        url: String,
+        /// Optional bearer token. Stored as
+        /// [`crate::security::Secret`] so it never lands in
+        /// `tracing` events in plaintext.
+        #[serde(default)]
+        bearer_token: Option<crate::security::Secret>,
+        /// Optional custom headers (e.g. `X-Api-Key`). Values are
+        /// treated as opaque — do NOT log. (Asymmetry vs
+        /// `bearer_token` documented; Phase 1 may upgrade to
+        /// `HashMap<String, Secret>` if header leaks become a real
+        /// concern.)
+        #[serde(default)]
+        headers: HashMap<String, String>,
+    },
+}
+
+impl Default for McpTransport {
+    fn default() -> Self {
+        Self::Stdio
+    }
 }
 
 fn default_mcp_allowed_tools() -> Vec<String> {
@@ -4478,9 +4530,7 @@ pub(crate) fn resolve_config_dir_for_workspace(workspace_dir: &Path) -> (PathBuf
         );
     }
 
-    let legacy_config_dir = workspace_dir
-        .parent()
-        .map(|parent| parent.join(".plaw"));
+    let legacy_config_dir = workspace_dir.parent().map(|parent| parent.join(".plaw"));
     if let Some(legacy_dir) = legacy_config_dir {
         if legacy_dir.join("config.toml").exists() {
             return (legacy_dir, workspace_config_dir);
@@ -4558,8 +4608,7 @@ async fn resolve_runtime_config_dirs(
         }
     }
 
-    if let Some((plaw_dir, workspace_dir)) =
-        load_persisted_workspace_dirs(default_plaw_dir).await?
+    if let Some((plaw_dir, workspace_dir)) = load_persisted_workspace_dirs(default_plaw_dir).await?
     {
         return Ok((
             plaw_dir,
@@ -5522,8 +5571,7 @@ impl Config {
         }
 
         // Gateway port: PLAW_GATEWAY_PORT or PORT
-        if let Ok(port_str) =
-            std::env::var("PLAW_GATEWAY_PORT").or_else(|_| std::env::var("PORT"))
+        if let Ok(port_str) = std::env::var("PLAW_GATEWAY_PORT").or_else(|_| std::env::var("PORT"))
         {
             if let Ok(port) = port_str.parse::<u16>() {
                 self.gateway.port = port;
@@ -5531,8 +5579,7 @@ impl Config {
         }
 
         // Gateway host: PLAW_GATEWAY_HOST or HOST
-        if let Ok(host) = std::env::var("PLAW_GATEWAY_HOST").or_else(|_| std::env::var("HOST"))
-        {
+        if let Ok(host) = std::env::var("PLAW_GATEWAY_HOST").or_else(|_| std::env::var("HOST")) {
             if !host.is_empty() {
                 self.gateway.host = host;
             }
@@ -5553,8 +5600,8 @@ impl Config {
         }
 
         // Reasoning override: PLAW_REASONING_ENABLED or REASONING_ENABLED
-        if let Ok(flag) = std::env::var("PLAW_REASONING_ENABLED")
-            .or_else(|_| std::env::var("REASONING_ENABLED"))
+        if let Ok(flag) =
+            std::env::var("PLAW_REASONING_ENABLED").or_else(|_| std::env::var("REASONING_ENABLED"))
         {
             let normalized = flag.trim().to_ascii_lowercase();
             match normalized.as_str() {
@@ -5700,8 +5747,7 @@ impl Config {
             self.proxy.all_proxy = normalize_proxy_url_option(Some(&proxy_url));
             proxy_url_overridden = true;
         }
-        if let Ok(no_proxy) =
-            std::env::var("PLAW_NO_PROXY").or_else(|_| std::env::var("NO_PROXY"))
+        if let Ok(no_proxy) = std::env::var("PLAW_NO_PROXY").or_else(|_| std::env::var("NO_PROXY"))
         {
             self.proxy.no_proxy = normalize_no_proxy_list(vec![no_proxy]);
         }
@@ -5957,7 +6003,10 @@ mod tests {
     #[test]
     async fn config_default_has_sane_values() {
         let c = Config::default();
-        assert_eq!(c.default_provider.as_deref(), Some(DEFAULT_PROVIDER_FALLBACK));
+        assert_eq!(
+            c.default_provider.as_deref(),
+            Some(DEFAULT_PROVIDER_FALLBACK)
+        );
         assert_eq!(c.default_model.as_deref(), Some(DEFAULT_MODEL_FALLBACK));
         assert!((c.default_temperature - 0.7).abs() < f64::EPSILON);
         assert!(c.api_key.is_none());
@@ -6415,7 +6464,12 @@ default_temperature = 0.7
         assert_eq!(parsed.heartbeat.to.as_deref(), Some("123456"));
         assert!(parsed.channels_config.telegram.is_some());
         assert_eq!(
-            parsed.channels_config.telegram.unwrap().bot_token.as_wire_str(),
+            parsed
+                .channels_config
+                .telegram
+                .unwrap()
+                .bot_token
+                .as_wire_str(),
             "123:ABC"
         );
     }
@@ -6696,10 +6750,8 @@ tool_dispatcher = "xml"
 
     #[tokio::test]
     async fn sync_directory_handles_existing_directory() {
-        let dir = std::env::temp_dir().join(format!(
-            "plaw_test_sync_directory_{}",
-            uuid::Uuid::new_v4()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("plaw_test_sync_directory_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).await.unwrap();
 
         sync_directory(&dir).await.unwrap();
@@ -6939,8 +6991,7 @@ tool_dispatcher = "xml"
 
     #[tokio::test]
     async fn config_save_atomic_cleanup() {
-        let dir =
-            std::env::temp_dir().join(format!("plaw_test_config_{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("plaw_test_config_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).await.unwrap();
 
         let config_path = dir.join("config.toml");
@@ -8925,10 +8976,7 @@ default_model = "legacy-model"
         let mut config = Config::default();
         std::env::set_var("PLAW_PROXY_ENABLED", "true");
         std::env::set_var("PLAW_HTTP_PROXY", "http://127.0.0.1:7890");
-        std::env::set_var(
-            "PLAW_PROXY_SERVICES",
-            "provider.openai, tool.http_request",
-        );
+        std::env::set_var("PLAW_PROXY_SERVICES", "provider.openai, tool.http_request");
         std::env::set_var("PLAW_PROXY_SCOPE", "services");
 
         config.apply_env_overrides();
@@ -9097,8 +9145,14 @@ default_model = "legacy-model"
         let parsed: LarkConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.app_id, "cli_123456");
         assert_eq!(parsed.app_secret.as_wire_str(), "secret_abc");
-        assert_eq!(parsed.encrypt_key.as_ref().map(|s| s.as_wire_str()), Some("encrypt_key"));
-        assert_eq!(parsed.verification_token.as_ref().map(|s| s.as_wire_str()), Some("verify_token"));
+        assert_eq!(
+            parsed.encrypt_key.as_ref().map(|s| s.as_wire_str()),
+            Some("encrypt_key")
+        );
+        assert_eq!(
+            parsed.verification_token.as_ref().map(|s| s.as_wire_str()),
+            Some("verify_token")
+        );
         assert_eq!(parsed.allowed_users.len(), 2);
         assert!(parsed.use_feishu);
     }
@@ -9198,8 +9252,14 @@ default_model = "legacy-model"
         let parsed: FeishuConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.app_id, "cli_feishu_123");
         assert_eq!(parsed.app_secret.as_wire_str(), "secret_abc");
-        assert_eq!(parsed.encrypt_key.as_ref().map(|s| s.as_wire_str()), Some("encrypt_key"));
-        assert_eq!(parsed.verification_token.as_ref().map(|s| s.as_wire_str()), Some("verify_token"));
+        assert_eq!(
+            parsed.encrypt_key.as_ref().map(|s| s.as_wire_str()),
+            Some("encrypt_key")
+        );
+        assert_eq!(
+            parsed.verification_token.as_ref().map(|s| s.as_wire_str()),
+            Some("verify_token")
+        );
         assert_eq!(parsed.allowed_users.len(), 2);
     }
 

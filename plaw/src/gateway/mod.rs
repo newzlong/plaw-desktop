@@ -485,7 +485,11 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     // the proxy tool's description surfaces availability to the LLM.
     if config.mcp.enabled {
         let mcp_registry = std::sync::Arc::new(
-            crate::tools::mcp::McpRegistry::connect_all(&config.mcp.servers).await,
+            crate::tools::mcp::McpRegistry::connect_all(
+                &config.mcp.servers,
+                secret_store.clone(),
+            )
+            .await,
         );
         let connected = mcp_registry.connected_count();
         let configured = mcp_registry.configured_count();
