@@ -1766,9 +1766,56 @@ async fn handle_auth_command(auth_command: AuthCommands, config: &Config) -> Res
                     println!("Active profile for openai-codex: {profile}");
                     Ok(())
                 }
+                provider_str if provider_str.starts_with(auth::MCP_PROVIDER_PREFIX) => {
+                    // PR #80: MCP OAuth ceremony driven by config under
+                    // [mcp.servers.<name>.transport.oauth]. The provider
+                    // string here is `mcp:<server_name>`; trim the
+                    // prefix to look the server up in config.
+                    let server_name = provider_str
+                        .strip_prefix(auth::MCP_PROVIDER_PREFIX)
+                        .unwrap_or_default()
+                        .to_string();
+                    if server_name.is_empty() {
+                        bail!(
+                            "`--provider mcp:<server>` requires a server name; e.g. `--provider mcp:plaw_workspace`"
+                        );
+                    }
+                    let server = config
+                        .mcp
+                        .servers
+                        .iter()
+                        .find(|s| s.name == server_name)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "MCP server '{server_name}' not found in config; check [[mcp.servers]] entries"
+                            )
+                        })?;
+                    let crate::config::McpTransport::Http { url, oauth, .. } = &server.transport
+                    else {
+                        bail!(
+                            "MCP server '{server_name}' uses the stdio transport; OAuth login only applies to HTTP transport"
+                        );
+                    };
+                    let oauth_config = oauth.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "MCP server '{server_name}' has no [oauth] block under transport; add `oauth = {{}}` to enable OAuth"
+                        )
+                    })?;
+
+                    println!("Starting MCP OAuth ceremony for '{server_name}' at {url} ...");
+                    let profile = auth_service
+                        .run_mcp_login(&server_name, url, oauth_config)
+                        .await?;
+                    println!("Saved MCP profile '{}'", profile.id);
+                    println!(
+                        "Run `plaw mcp reconnect {server_name}` to attach an authenticated session, \
+                         or restart plaw to reload."
+                    );
+                    Ok(())
+                }
                 _ => {
                     bail!(
-                        "`auth login` supports --provider openai-codex or gemini, got: {provider}"
+                        "`auth login` supports --provider openai-codex, gemini, or mcp:<server>, got: {provider}"
                     );
                 }
             }

@@ -139,6 +139,12 @@ which = "8.0"
 # Temporary directory creation (for self-update)
 tempfile = "3.14"
 
+# Browser launcher for MCP OAuth ceremony loopback flow (PR #80).
+# ~10 KB, no deps; wraps platform-specific `cmd /C start` / `xdg-open` /
+# `open`. Used ONLY by `tools/mcp/oauth/ceremony.rs` — keep the
+# dependency surface narrow.
+open = "5"
+
 # WebSocket client channels (Discord/Lark/DingTalk/Nostr)
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
