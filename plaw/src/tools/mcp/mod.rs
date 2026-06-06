@@ -37,6 +37,11 @@
 //! ```
 
 pub mod client;
+/// MCP OAuth 2.1 + PKCE foundations (PR #79). Dormant until PR #80
+/// wires the ceremony into a CLI command and PR #81 plumbs the
+/// 401-retry path through [`transport::http::HttpTransport`]. See
+/// `oauth/mod.rs` for the layered shipping rationale.
+pub(crate) mod oauth;
 pub mod protocol;
 pub mod registry;
 pub mod tool;

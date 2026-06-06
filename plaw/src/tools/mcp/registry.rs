@@ -79,6 +79,11 @@ impl McpRegistry {
                         url,
                         bearer_token,
                         headers,
+                        // PR #79 foundations: `oauth` is parsed but
+                        // not yet consumed at the registry layer. The
+                        // ceremony lives in PR #80; transport-level
+                        // 401-recovery wiring lives in PR #81.
+                        oauth: _,
                     } => {
                         McpClient::connect_http(
                             &cfg.name,
@@ -273,6 +278,7 @@ mod tests {
                 url: "http://127.0.0.1:1/this-port-should-never-listen".into(),
                 bearer_token: None,
                 headers: HashMap::new(),
+                oauth: None,
             },
             command: String::new(),
             args: vec![],

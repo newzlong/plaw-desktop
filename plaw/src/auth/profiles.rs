@@ -10,7 +10,20 @@ use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
 use tokio::time::sleep;
 
-const CURRENT_SCHEMA_VERSION: u32 = 1;
+/// On-disk schema version for `auth-profiles.json`.
+///
+/// Bumped from 1 → 2 in PR #79 (MCP OAuth foundations) to accept
+/// the new `oauth_client_id` + `oauth_client_secret` fields on each
+/// profile. Forward-compat is verified by an explicit unit test:
+/// a v1 file (no oauth_* fields) loads cleanly under v2 because both
+/// new fields default to `None` via `#[serde(default)]`.
+///
+/// Backward-compat: a v2 file CANNOT load under code that thinks
+/// CURRENT = 1; users who roll back PR #79 will get a "schema
+/// version 2 unsupported" error on next plaw boot. Acceptable per
+/// PR plan — auth-profiles.json is local user state, no
+/// cross-version distribution.
+const CURRENT_SCHEMA_VERSION: u32 = 2;
 const PROFILES_FILENAME: &str = "auth-profiles.json";
 const LOCK_FILENAME: &str = "auth-profiles.lock";
 const LOCK_WAIT_MS: u64 = 50;
@@ -67,12 +80,29 @@ pub struct AuthProfile {
     pub token: Option<String>,
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
+    /// RFC 7591 Dynamic Client Registration result OR pre-registered
+    /// OAuth App `client_id`. Plaintext per RFC 7591 — client_id is a
+    /// public identifier. PR #79 adds this field as a Phase 1
+    /// foundation; populated by the OAuth ceremony in PR #80.
+    #[serde(default)]
+    pub oauth_client_id: Option<String>,
+    /// Pre-registered OAuth App `client_secret`. Encrypted at rest
+    /// (same encrypt_optional path as `refresh_token`). Some OAuth
+    /// providers (GitHub) require a secret even for native
+    /// public-client flows; many (Linear, Notion via DCR) do not.
+    /// `None` for public clients per RFC 7591 §2 + RFC 7636 PKCE.
+    #[serde(default)]
+    pub oauth_client_secret: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 impl std::fmt::Debug for AuthProfile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `oauth_client_secret` and the `token_set` access/refresh tokens
+        // are intentionally NOT included — Debug output reaches tracing
+        // events, panic backtraces, and other channels where leaking a
+        // secret has real consequences.
         f.debug_struct("AuthProfile")
             .field("id", &self.id)
             .field("provider", &self.provider)
@@ -80,6 +110,7 @@ impl std::fmt::Debug for AuthProfile {
             .field("kind", &self.kind)
             .field("workspace_id", &self.workspace_id)
             .field("metadata", &self.metadata)
+            .field("oauth_client_id", &self.oauth_client_id)
             .field("created_at", &self.created_at)
             .field("updated_at", &self.updated_at)
             .finish_non_exhaustive()
@@ -100,6 +131,8 @@ impl AuthProfile {
             token_set: Some(token_set),
             token: None,
             metadata: BTreeMap::new(),
+            oauth_client_id: None,
+            oauth_client_secret: None,
             created_at: now,
             updated_at: now,
         }
@@ -118,6 +151,8 @@ impl AuthProfile {
             token_set: None,
             token: Some(token),
             metadata: BTreeMap::new(),
+            oauth_client_id: None,
+            oauth_client_secret: None,
             created_at: now,
             updated_at: now,
         }
@@ -256,6 +291,11 @@ impl AuthProfilesStore {
                 self.decrypt_optional(p.refresh_token.as_deref())?;
             let (id_token, id_migrated) = self.decrypt_optional(p.id_token.as_deref())?;
             let (token, token_migrated) = self.decrypt_optional(p.token.as_deref())?;
+            // PR #79: oauth_client_secret rides the same encrypted-at-rest
+            // path as refresh_token / access_token. oauth_client_id stays
+            // plaintext per RFC 7591 (it's a public identifier).
+            let (oauth_client_secret, oauth_client_secret_migrated) =
+                self.decrypt_optional(p.oauth_client_secret.as_deref())?;
 
             if let Some(value) = access_migrated {
                 p.access_token = Some(value);
@@ -271,6 +311,10 @@ impl AuthProfilesStore {
             }
             if let Some(value) = token_migrated {
                 p.token = Some(value);
+                migrated = true;
+            }
+            if let Some(value) = oauth_client_secret_migrated {
+                p.oauth_client_secret = Some(value);
                 migrated = true;
             }
 
@@ -304,6 +348,8 @@ impl AuthProfilesStore {
                     token_set,
                     token,
                     metadata: p.metadata.clone(),
+                    oauth_client_id: p.oauth_client_id.clone(),
+                    oauth_client_secret,
                     created_at: parse_datetime_with_fallback(&p.created_at),
                     updated_at: parse_datetime_with_fallback(&p.updated_at),
                 },
@@ -345,6 +391,10 @@ impl AuthProfilesStore {
                 };
 
             let token = self.encrypt_optional(profile.token.as_deref())?;
+            // PR #79: encrypt oauth_client_secret at rest. oauth_client_id
+            // stays plaintext (RFC 7591 public identifier).
+            let oauth_client_secret =
+                self.encrypt_optional(profile.oauth_client_secret.as_deref())?;
 
             persisted.profiles.insert(
                 id.clone(),
@@ -364,6 +414,8 @@ impl AuthProfilesStore {
                     metadata: profile.metadata.clone(),
                     created_at: profile.created_at.to_rfc3339(),
                     updated_at: profile.updated_at.to_rfc3339(),
+                    oauth_client_id: profile.oauth_client_id.clone(),
+                    oauth_client_secret,
                 },
             );
         }
@@ -585,6 +637,14 @@ struct PersistedAuthProfile {
     updated_at: String,
     #[serde(default)]
     metadata: BTreeMap<String, String>,
+    /// PR #79 — see [`AuthProfile::oauth_client_id`]. Plaintext.
+    /// `#[serde(default)]` so v1 files (no field) load cleanly as `None`.
+    #[serde(default)]
+    oauth_client_id: Option<String>,
+    /// PR #79 — see [`AuthProfile::oauth_client_secret`]. Encrypted at
+    /// rest via `encrypt_optional` (same path as `refresh_token`).
+    #[serde(default)]
+    oauth_client_secret: Option<String>,
 }
 
 fn default_schema_version() -> u32 {
@@ -709,6 +769,155 @@ mod tests {
         assert!(path.exists());
 
         let contents = tokio::fs::read_to_string(path).await.unwrap();
-        assert!(contents.contains("\"schema_version\": 1"));
+        // PR #79 bumped CURRENT_SCHEMA_VERSION 1 → 2 for oauth_client_* fields.
+        assert!(contents.contains("\"schema_version\": 2"));
+    }
+
+    // ── PR #79 OAuth foundations ─────────────────────────────────────
+
+    /// V1 files on disk MUST load cleanly under V2 code without losing
+    /// data — the two new fields (`oauth_client_id` / `oauth_client_secret`)
+    /// are `#[serde(default)]` so absent fields become `None`. This is
+    /// the trust-root regression test: existing logged-in users
+    /// (OpenAI Codex, Gemini, Anthropic) must NOT break on next plaw
+    /// boot after the schema bump.
+    #[tokio::test]
+    async fn schema_v1_file_loads_into_v2_with_oauth_fields_defaulted() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("auth-profiles.json");
+        // Hand-write a v1-shaped file by hand — no oauth_client_id, no
+        // oauth_client_secret. Use kind="token" so we don't need to
+        // exercise the encrypted token_set path.
+        let v1_json = r#"{
+            "schema_version": 1,
+            "updated_at": "2026-01-01T00:00:00Z",
+            "active_profiles": {},
+            "profiles": {
+                "anthropic:default": {
+                    "provider": "anthropic",
+                    "profile_name": "default",
+                    "kind": "token",
+                    "token": "legacy-token-value",
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-01T00:00:00Z"
+                }
+            }
+        }"#;
+        tokio::fs::write(&path, v1_json).await.unwrap();
+
+        let store = AuthProfilesStore::new(tmp.path(), false);
+        let data = store.load().await.unwrap();
+        let loaded = data
+            .profiles
+            .get("anthropic:default")
+            .expect("v1 profile must survive load");
+
+        assert_eq!(loaded.provider, "anthropic");
+        assert_eq!(loaded.token.as_deref(), Some("legacy-token-value"));
+        // New v2 fields default to None — no data loss, no fabricated value.
+        assert!(loaded.oauth_client_id.is_none());
+        assert!(loaded.oauth_client_secret.is_none());
+    }
+
+    /// V2 file with a v3 schema_version must be REJECTED with a clear
+    /// "unsupported schema version" error — the existing read_persisted_locked
+    /// invariant. Locks in the rollback story: a user on V2 who rolls
+    /// back to V1 code MUST get this error and know to upgrade.
+    #[tokio::test]
+    async fn future_schema_version_rejected_with_clear_error() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("auth-profiles.json");
+        let future_json = r#"{
+            "schema_version": 999,
+            "updated_at": "2026-01-01T00:00:00Z",
+            "active_profiles": {},
+            "profiles": {}
+        }"#;
+        tokio::fs::write(&path, future_json).await.unwrap();
+
+        let store = AuthProfilesStore::new(tmp.path(), false);
+        let err = store.load().await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Unsupported auth profile schema version 999"),
+            "got: {msg}"
+        );
+    }
+
+    /// Round-trip an OAuth profile with `oauth_client_id` (plaintext per
+    /// RFC 7591) + `oauth_client_secret` (encrypted at rest). Asserts:
+    /// (a) the raw file does NOT contain the plaintext secret, and
+    /// (b) reload decrypts back to the original. This is the security
+    /// invariant that justifies encrypt_optional treating the secret
+    /// the same as refresh_token.
+    #[tokio::test]
+    async fn oauth_client_credentials_round_trip_encrypted_secret() {
+        let tmp = TempDir::new().unwrap();
+        let store = AuthProfilesStore::new(tmp.path(), true);
+
+        let mut profile = AuthProfile::new_oauth(
+            "mcp:plaw_workspace",
+            "default",
+            TokenSet {
+                access_token: "access-xyz".into(),
+                refresh_token: Some("refresh-xyz".into()),
+                id_token: None,
+                expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
+                token_type: Some("Bearer".into()),
+                scope: None,
+            },
+        );
+        profile.oauth_client_id = Some("Iv1.public-id".into());
+        profile.oauth_client_secret = Some("super-secret-client-secret".into());
+
+        store.upsert_profile(profile.clone(), true).await.unwrap();
+        let data = store.load().await.unwrap();
+        let loaded = data.profiles.get(&profile.id).unwrap();
+
+        // Plaintext client_id round-trips literal.
+        assert_eq!(loaded.oauth_client_id.as_deref(), Some("Iv1.public-id"));
+        // Secret round-trips literal AFTER decrypt.
+        assert_eq!(
+            loaded.oauth_client_secret.as_deref(),
+            Some("super-secret-client-secret")
+        );
+
+        // Raw on-disk file: plaintext secret MUST NOT appear; the
+        // `enc2:` prefix MUST appear (proves encrypt path fired).
+        let raw = tokio::fs::read_to_string(store.path()).await.unwrap();
+        assert!(
+            !raw.contains("super-secret-client-secret"),
+            "client_secret leaked to disk in plaintext: {raw}"
+        );
+        assert!(raw.contains("enc2:"), "expected encrypt marker");
+        // Plaintext client_id should appear (it's a public identifier).
+        assert!(raw.contains("Iv1.public-id"));
+    }
+
+    /// Debug-format omits oauth_client_secret even when populated.
+    /// Same invariant as access/refresh tokens — prevents
+    /// `tracing::debug!(?profile)` from leaking credentials.
+    #[test]
+    fn debug_omits_oauth_client_secret() {
+        let mut profile = AuthProfile::new_oauth(
+            "mcp:plaw_workspace",
+            "default",
+            TokenSet {
+                access_token: "redacted-too".into(),
+                refresh_token: Some("also-redacted".into()),
+                id_token: None,
+                expires_at: None,
+                token_type: None,
+                scope: None,
+            },
+        );
+        profile.oauth_client_secret = Some("must-not-leak".into());
+        let dbg = format!("{profile:?}");
+        assert!(!dbg.contains("must-not-leak"), "secret leaked: {dbg}");
+        assert!(!dbg.contains("redacted-too"), "access_token leaked: {dbg}");
+        assert!(
+            !dbg.contains("also-redacted"),
+            "refresh_token leaked: {dbg}"
+        );
     }
 }

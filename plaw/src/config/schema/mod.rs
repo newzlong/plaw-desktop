@@ -551,14 +551,20 @@ pub enum McpTransport {
     /// sibling `command` / `args` / `env` fields on
     /// [`McpServerConfig`] (kept flat so legacy TOML works unchanged).
     Stdio,
-    /// Streamable HTTP transport per MCP spec 2025-06-18, Phase 0
-    /// subset. POSTs JSON-RPC envelopes to a single URL; rejects
-    /// `text/event-stream` response bodies. Static `bearer_token`
-    /// reaches self-hosted servers; full OAuth 2.1 is Phase 1.
+    /// Streamable HTTP transport per MCP spec 2025-06-18. POSTs
+    /// JSON-RPC envelopes to a single URL. Static `bearer_token`
+    /// reaches self-hosted servers; the new `oauth` block (PR #79
+    /// foundations, ceremony PR #80+) handles the OAuth 2.1 + PKCE
+    /// dance for ecosystem MCP servers (GitHub, Linear, Notion).
+    ///
+    /// **Mutual exclusion**: setting BOTH `bearer_token` AND `oauth`
+    /// is a config validation error — the OAuth-managed access token
+    /// would silently shadow the static bearer. See
+    /// [`McpServerConfig::validate_transport_mutual_exclusivity`].
     Http {
         /// Server endpoint URL. Required for the HTTP transport.
         url: String,
-        /// Optional bearer token. Stored as
+        /// Optional static bearer token. Stored as
         /// [`crate::security::Secret`] so it never lands in
         /// `tracing` events in plaintext.
         #[serde(default)]
@@ -570,12 +576,81 @@ pub enum McpTransport {
         /// concern.)
         #[serde(default)]
         headers: HashMap<String, String>,
+        /// PR #79 foundations: OAuth 2.1 + PKCE configuration. When
+        /// present, plaw runs the discovery + ceremony flow (PR #80)
+        /// on first 401 from the MCP server and persists tokens via
+        /// [`crate::auth::profiles::AuthProfilesStore`]. Mutually
+        /// exclusive with `bearer_token`. `client_id` /
+        /// `client_secret` only need to be set when the AS does not
+        /// support RFC 7591 DCR (currently: GitHub).
+        #[serde(default)]
+        oauth: Option<McpOAuthConfig>,
     },
+}
+
+/// OAuth 2.1 + PKCE configuration for one MCP server.
+///
+/// All fields optional — the smallest valid config is an empty
+/// `[mcp.servers.<name>.transport.oauth] = {}` block, which triggers
+/// the OAuth dance using PRM discovery + RFC 7591 Dynamic Client
+/// Registration. `client_id` + `client_secret` are required only
+/// when the AS does NOT advertise a `registration_endpoint` (GitHub).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct McpOAuthConfig {
+    /// Pre-registered OAuth App `client_id`. Required when the AS
+    /// does not support RFC 7591 DCR. Plaintext per RFC 7591 §2 —
+    /// the client_id is a public identifier.
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// Pre-registered OAuth App `client_secret`. Required by GitHub's
+    /// MCP server (its OAuth Apps require client_secret even on
+    /// loopback flows). Encrypted at rest via the
+    /// [`crate::security::Secret`] newtype.
+    #[serde(default)]
+    pub client_secret: Option<crate::security::Secret>,
+    /// OAuth scope list to request. When empty, the ceremony pulls
+    /// the AS's `scopes_supported` list from PRM and requests all
+    /// of them.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// Override the loopback listener port. Default: try 47830-47839
+    /// in order. Some users with strict firewalls need a specific
+    /// port pinned in their OAuth App configuration.
+    #[serde(default)]
+    pub loopback_port: Option<u16>,
 }
 
 impl Default for McpTransport {
     fn default() -> Self {
         Self::Stdio
+    }
+}
+
+impl McpServerConfig {
+    /// PR #79 foundations: reject configs that set BOTH `bearer_token`
+    /// AND `oauth` on the same HTTP transport. Returns an error
+    /// string describing the conflict; callers (config loader / `plaw
+    /// config validate`) bubble it up to the user.
+    ///
+    /// Rationale: a stale `bearer_token` left in TOML when a user
+    /// rotates to OAuth would silently shadow the freshly-obtained
+    /// access token. Fail loudly so the user notices the dead config.
+    pub fn validate_transport_mutual_exclusivity(&self) -> Result<(), String> {
+        if let McpTransport::Http {
+            bearer_token,
+            oauth,
+            ..
+        } = &self.transport
+        {
+            if bearer_token.is_some() && oauth.is_some() {
+                return Err(format!(
+                    "MCP server '{}': `bearer_token` and `oauth` are mutually exclusive on the same HTTP transport. \
+                     Remove `bearer_token` to use OAuth, or remove `oauth` to keep the static bearer.",
+                    self.name
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -9795,5 +9870,130 @@ root = "/tmp/my-project"
         assert!(parsed.enabled);
         assert_eq!(parsed.max_tokens, 1024);
         assert!(parsed.root.is_none());
+    }
+
+    // ── PR #79 MCP OAuth Phase 1 foundations ─────────────────────────
+
+    fn http_server(
+        name: &str,
+        bearer_token: Option<crate::security::Secret>,
+        oauth: Option<McpOAuthConfig>,
+    ) -> McpServerConfig {
+        McpServerConfig {
+            name: name.into(),
+            transport: McpTransport::Http {
+                url: "https://mcp.example.com/v1".into(),
+                bearer_token,
+                headers: HashMap::new(),
+                oauth,
+            },
+            command: String::new(),
+            args: vec![],
+            env: HashMap::new(),
+            allowed_tools: vec!["*".into()],
+            startup_timeout_ms: 1000,
+            request_timeout_ms: 5000,
+        }
+    }
+
+    /// Setting BOTH `bearer_token` AND `oauth` on the same HTTP
+    /// transport MUST fail — a stale static bearer would silently
+    /// shadow the OAuth-managed access token, which is the canonical
+    /// "ship green, break invisibly" bug class.
+    #[test]
+    async fn mcp_http_bearer_and_oauth_both_set_rejects() {
+        let cfg = http_server(
+            "shadow_risk",
+            Some(crate::security::Secret::from_wire(String::from(
+                "static-bearer-value",
+            ))),
+            Some(McpOAuthConfig::default()),
+        );
+        let err = cfg
+            .validate_transport_mutual_exclusivity()
+            .expect_err("mutual exclusivity must reject");
+        assert!(err.contains("shadow_risk"));
+        assert!(err.contains("mutually exclusive"));
+    }
+
+    /// Bearer alone is fine — the PR #76 wire path.
+    #[test]
+    async fn mcp_http_bearer_alone_passes() {
+        let cfg = http_server(
+            "bearer_only",
+            Some(crate::security::Secret::from_wire(String::from("static"))),
+            None,
+        );
+        assert!(cfg.validate_transport_mutual_exclusivity().is_ok());
+    }
+
+    /// OAuth alone is fine — PR #80 onwards.
+    #[test]
+    async fn mcp_http_oauth_alone_passes() {
+        let cfg = http_server("oauth_only", None, Some(McpOAuthConfig::default()));
+        assert!(cfg.validate_transport_mutual_exclusivity().is_ok());
+    }
+
+    /// Neither set is fine — anonymous HTTP MCP servers exist.
+    #[test]
+    async fn mcp_http_neither_passes() {
+        let cfg = http_server("anon", None, None);
+        assert!(cfg.validate_transport_mutual_exclusivity().is_ok());
+    }
+
+    /// Mutual exclusivity is HTTP-only — stdio transports skip the
+    /// check entirely (the fields don't exist on stdio).
+    #[test]
+    async fn mcp_stdio_skips_mutual_exclusivity_check() {
+        let cfg = McpServerConfig {
+            name: "stdio_only".into(),
+            transport: McpTransport::Stdio,
+            command: "npx".into(),
+            args: vec!["@modelcontextprotocol/server-filesystem".into()],
+            env: HashMap::new(),
+            allowed_tools: vec!["*".into()],
+            startup_timeout_ms: 10_000,
+            request_timeout_ms: 60_000,
+        };
+        assert!(cfg.validate_transport_mutual_exclusivity().is_ok());
+    }
+
+    /// Legacy TOML without the `oauth` field MUST deserialize cleanly
+    /// because the new field is `#[serde(default)]`. Regression test
+    /// for PR #76 configs that were written before PR #79 existed.
+    #[test]
+    async fn mcp_http_config_without_oauth_field_deserializes() {
+        let toml_src = r#"
+            kind = "http"
+            url = "https://example.com/mcp"
+        "#;
+        let transport: McpTransport = toml::from_str(toml_src).expect("legacy TOML must parse");
+        match transport {
+            McpTransport::Http { oauth, .. } => assert!(oauth.is_none()),
+            _ => panic!("expected Http variant"),
+        }
+    }
+
+    /// New-style TOML with an empty `[oauth]` block parses to a
+    /// default McpOAuthConfig — all fields None / empty.
+    #[test]
+    async fn mcp_http_config_with_empty_oauth_block_parses_to_default() {
+        let toml_src = r#"
+            kind = "http"
+            url = "https://example.com/mcp"
+            [oauth]
+        "#;
+        let transport: McpTransport = toml::from_str(toml_src).expect("empty oauth block parses");
+        match transport {
+            McpTransport::Http {
+                oauth: Some(oauth), ..
+            } => {
+                assert!(oauth.client_id.is_none());
+                assert!(oauth.client_secret.is_none());
+                assert!(oauth.scopes.is_empty());
+                assert!(oauth.loopback_port.is_none());
+            }
+            _ => panic!("expected Http variant with oauth present"),
+        }
     }
 }
