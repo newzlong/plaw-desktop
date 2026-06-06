@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 pub(crate) mod http;
+pub(crate) mod sse;
 pub(crate) mod stdio;
 
 #[cfg(test)]
