@@ -671,123 +671,14 @@ fn truncate(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::tools::mcp::client::McpProtocolError;
-    use axum::{
-        extract::State,
-        http::{HeaderMap, StatusCode},
-        response::IntoResponse,
-        routing::post,
-        Router,
+    // PR #85a: mock harness lifted into the sibling `test_util::http_mock`
+    // submodule so PR #85b's GET-listener tests can share it without
+    // inline duplication. Pure import-path change here.
+    use crate::tools::mcp::transport::test_util::http_mock::{
+        spawn_mock, MockServerState, ScriptedResponse,
     };
+    use axum::http::StatusCode;
     use serde_json::json;
-    use std::sync::{Arc, Mutex as StdMutex};
-    use tokio::net::TcpListener;
-
-    /// Per-server request inspector. Tests can read what the HTTP
-    /// transport ACTUALLY put on the wire — headers + body — to assert
-    /// spec compliance and rule out secret leakage.
-    #[derive(Default, Clone)]
-    struct RequestRecorder(Arc<StdMutex<Vec<RecordedRequest>>>);
-
-    #[derive(Clone, Debug)]
-    struct RecordedRequest {
-        headers: Vec<(String, String)>,
-        body: String,
-    }
-
-    impl RequestRecorder {
-        fn snapshot(&self) -> Vec<RecordedRequest> {
-            self.0.lock().unwrap().clone()
-        }
-    }
-
-    /// Captures the request, then returns whatever the test queued via
-    /// `MockServerState::next_response`. Each request consumes one
-    /// scripted response in FIFO order; if the queue runs out the
-    /// server returns a 500.
-    #[derive(Clone, Default)]
-    struct MockServerState {
-        recorder: RequestRecorder,
-        responses: Arc<StdMutex<Vec<ScriptedResponse>>>,
-    }
-
-    #[derive(Clone)]
-    struct ScriptedResponse {
-        status: StatusCode,
-        content_type: &'static str,
-        body: String,
-        extra_headers: Vec<(&'static str, String)>,
-    }
-
-    impl MockServerState {
-        fn push(&self, r: ScriptedResponse) {
-            self.responses.lock().unwrap().push(r);
-        }
-
-        fn json_ok(body: serde_json::Value) -> ScriptedResponse {
-            ScriptedResponse {
-                status: StatusCode::OK,
-                content_type: "application/json",
-                body: body.to_string(),
-                extra_headers: Vec::new(),
-            }
-        }
-    }
-
-    async fn mock_handler(
-        State(state): State<MockServerState>,
-        headers: HeaderMap,
-        body: axum::body::Bytes,
-    ) -> impl IntoResponse {
-        let hdrs: Vec<(String, String)> = headers
-            .iter()
-            .map(|(k, v)| {
-                (
-                    k.as_str().to_lowercase(),
-                    v.to_str().unwrap_or_default().to_string(),
-                )
-            })
-            .collect();
-        let body_str = String::from_utf8_lossy(&body).to_string();
-        state.recorder.0.lock().unwrap().push(RecordedRequest {
-            headers: hdrs,
-            body: body_str,
-        });
-
-        let resp = {
-            let mut queue = state.responses.lock().unwrap();
-            if queue.is_empty() {
-                ScriptedResponse {
-                    status: StatusCode::INTERNAL_SERVER_ERROR,
-                    content_type: "text/plain",
-                    body: "no scripted response".into(),
-                    extra_headers: Vec::new(),
-                }
-            } else {
-                queue.remove(0)
-            }
-        };
-
-        let mut response = axum::http::Response::builder()
-            .status(resp.status)
-            .header("Content-Type", resp.content_type);
-        for (k, v) in &resp.extra_headers {
-            response = response.header(*k, v);
-        }
-        response.body(axum::body::Body::from(resp.body)).unwrap()
-    }
-
-    async fn spawn_mock(state: MockServerState) -> (String, RequestRecorder) {
-        let recorder = state.recorder.clone();
-        let app = Router::new()
-            .route("/", post(mock_handler))
-            .with_state(state);
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        (format!("http://{addr}/"), recorder)
-    }
 
     fn empty_secret_store() -> SecretStore {
         SecretStore::new(std::path::Path::new(""), false)
