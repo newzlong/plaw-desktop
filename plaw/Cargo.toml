@@ -202,11 +202,14 @@ windows-sys = { version = "0.61", features = [
     # PR #88 (Phase 1a-1 Token IL observation primitives) —
     # OpenProcessToken, GetTokenInformation, TOKEN_MANDATORY_LABEL,
     # SID_AND_ATTRIBUTES, and the integrity-level SID well-known
-    # values. Sibling spawn primitives (CreateProcessAsUserW,
-    # DuplicateTokenEx, SetTokenInformation) and the
-    # Win32_Security_Authorization feature ride PR #88b once the
-    # observation API is locked in.
+    # values.
     "Win32_Security",
+    # PR #88b (Phase 1a-2 Token IL spawn primitives) — DuplicateTokenEx,
+    # SetTokenInformation, CreateProcessAsUserW. Brings in the
+    # CREATE_NEW_CONSOLE / impersonation / primary-token flags + the
+    # SECURITY_MANDATORY_LABEL_AUTHORITY constant for building the
+    # TOKEN_MANDATORY_LABEL we lower the child to.
+    "Win32_Security_Authorization",
 ] }
 
 # USB device enumeration (hardware discovery) — only on platforms nusb supports
