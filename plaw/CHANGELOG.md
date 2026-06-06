@@ -8,6 +8,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- **Audit #11 Phase 1 — Windows kernel-level isolation, end-to-end** (PRs #77/#82/#87–#91):
+  - **Phase 0 (PR #77)**: `WindowsJobObjectSandbox` ships `KILL_ON_JOB_CLOSE` + 4 kernel-enforced
+    resource caps (`JOB_OBJECT_LIMIT_ACTIVE_PROCESS` / `JOB_OBJECT_LIMIT_PROCESS_MEMORY` /
+    `JOB_OBJECT_LIMIT_PROCESS_TIME` / `JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION`) +
+    UI restrictions (`HANDLES` + `SYSTEMPARAMETERS`).
+  - **Phase 0.5 (PR #82)**: `plaw sandbox status` CLI surfaces the active backend, its honest
+    capability description, and the per-platform resource caps for operator inspection.
+  - **Prereq (PR #87)**: Browser (3 spawn sites) and MCP stdio (1 spawn site) routed through
+    the `Sandbox` trait — previously bypassed it on Windows + Linux/macOS.
+  - **Phase 1a-1 (PR #88)**: `IntegrityLevel { Default, Medium, Low, Untrusted }` enum +
+    `current_process_integrity()` + `validate_lowerable()` observation primitives. Dormant.
+  - **Phase 1a-2 (PR #89)**: `spawn_with_lowered_token` + `LoweredChild { id, wait, kill }`
+    + `plaw-il-probe` test binary. End-to-end pipeline validated on real Windows host
+    (`DuplicateTokenEx` + `SetTokenInformation` + `CreateProcessAsUserW`). Dormant.
+  - **Phase 1b (PR #90)**: `Sandbox::spawn_with_integrity(cmd, level) -> SandboxedChild`
+    trait extension. Default impl mirrors today's `wrap_command + spawn + after_spawn` flow
+    byte-identically; `WindowsJobObjectSandbox` overrides to route non-`Default` IL through
+    the Token IL spawn primitives.
+  - **Phase 1c (PR #91)**: `[security.sandbox.integrity]` config block exposes per-tool
+    Token IL preferences to operators. **Default OFF** per Lens C Gatekeeper failure mode.
+    `ShellTool::execute` routes through `spawn_with_integrity` — byte-identical at
+    `Default`, returns a clear deferred-feature error at non-`Default` until Phase 1c.2
+    ships piped stdio for `CreateProcessAsUserW`. See `docs/config-reference.md` for the
+    `[security.sandbox]` and `[security.sandbox.integrity]` reference.
 - **Legacy XOR cipher migration**: The `enc:` prefix (XOR cipher) is now deprecated. 
   Secrets using this format will be automatically migrated to `enc2:` (ChaCha20-Poly1305 AEAD)
   when decrypted via `decrypt_and_migrate()`. A `tracing::warn!` is emitted when legacy
