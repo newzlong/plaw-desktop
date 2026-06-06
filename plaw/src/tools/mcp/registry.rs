@@ -51,21 +51,47 @@ impl McpRegistry {
     /// MCP server has a typo in its `command`. The proxy tool's
     /// description surfaces the failed status so the LLM doesn't
     /// blindly retry.
-    pub async fn connect_all(configs: &[McpServerConfig]) -> Self {
+    pub async fn connect_all(
+        configs: &[McpServerConfig],
+        secret_store: Arc<crate::security::SecretStore>,
+    ) -> Self {
         let mut futures = Vec::with_capacity(configs.len());
         for cfg in configs {
             let cfg = cfg.clone();
+            let secret_store = secret_store.clone();
             futures.push(tokio::spawn(async move {
                 let allowed = compute_allow_set(&cfg.allowed_tools);
-                let result = McpClient::connect(
-                    &cfg.name,
-                    &cfg.command,
-                    &cfg.args,
-                    &cfg.env,
-                    Duration::from_millis(cfg.startup_timeout_ms),
-                    Duration::from_millis(cfg.request_timeout_ms),
-                )
-                .await;
+                let startup_timeout = Duration::from_millis(cfg.startup_timeout_ms);
+                let request_timeout = Duration::from_millis(cfg.request_timeout_ms);
+                let result = match &cfg.transport {
+                    crate::config::McpTransport::Stdio => {
+                        McpClient::connect(
+                            &cfg.name,
+                            &cfg.command,
+                            &cfg.args,
+                            &cfg.env,
+                            startup_timeout,
+                            request_timeout,
+                        )
+                        .await
+                    }
+                    crate::config::McpTransport::Http {
+                        url,
+                        bearer_token,
+                        headers,
+                    } => {
+                        McpClient::connect_http(
+                            &cfg.name,
+                            url,
+                            bearer_token.as_ref(),
+                            headers,
+                            startup_timeout,
+                            request_timeout,
+                            secret_store.as_ref(),
+                        )
+                        .await
+                    }
+                };
                 (cfg.name, result, allowed)
             }));
         }
@@ -195,9 +221,16 @@ mod tests {
         assert!(set.is_empty());
     }
 
+    fn test_secret_store() -> Arc<crate::security::SecretStore> {
+        Arc::new(crate::security::SecretStore::new(
+            std::path::Path::new(""),
+            false,
+        ))
+    }
+
     #[tokio::test]
     async fn connect_all_with_no_configs_yields_empty_registry() {
-        let reg = McpRegistry::connect_all(&[]).await;
+        let reg = McpRegistry::connect_all(&[], test_secret_store()).await;
         assert_eq!(reg.connected_count(), 0);
         assert_eq!(reg.configured_count(), 0);
         assert!(reg.connected_names().is_empty());
@@ -209,6 +242,7 @@ mod tests {
         // without poisoning the rest of startup.
         let cfg = McpServerConfig {
             name: "ghost".into(),
+            transport: crate::config::McpTransport::Stdio,
             command: "this-binary-does-not-exist-xyz123".into(),
             args: vec![],
             env: HashMap::new(),
@@ -216,7 +250,7 @@ mod tests {
             startup_timeout_ms: 200,
             request_timeout_ms: 1000,
         };
-        let reg = McpRegistry::connect_all(&[cfg]).await;
+        let reg = McpRegistry::connect_all(&[cfg], test_secret_store()).await;
         assert_eq!(reg.connected_count(), 0);
         assert_eq!(reg.configured_count(), 1);
         match reg.status("ghost").expect("status present") {
@@ -229,8 +263,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn connect_all_with_http_unreachable_url_records_failed_status() {
+        // PR #76: HTTP transport — point at a guaranteed-unreachable
+        // URL; entry must bucket as Failed without poisoning startup
+        // and without crashing the registry.
+        let cfg = McpServerConfig {
+            name: "remote-ghost".into(),
+            transport: crate::config::McpTransport::Http {
+                url: "http://127.0.0.1:1/this-port-should-never-listen".into(),
+                bearer_token: None,
+                headers: HashMap::new(),
+            },
+            command: String::new(),
+            args: vec![],
+            env: HashMap::new(),
+            allowed_tools: vec!["*".into()],
+            startup_timeout_ms: 300,
+            request_timeout_ms: 500,
+        };
+        let reg = McpRegistry::connect_all(&[cfg], test_secret_store()).await;
+        assert_eq!(reg.connected_count(), 0);
+        assert_eq!(reg.configured_count(), 1);
+        assert!(matches!(
+            reg.status("remote-ghost").expect("status present"),
+            ServerStatus::Failed { .. }
+        ));
+    }
+
+    #[tokio::test]
     async fn is_tool_allowed_returns_false_for_unknown_server() {
-        let reg = McpRegistry::connect_all(&[]).await;
+        let reg = McpRegistry::connect_all(&[], test_secret_store()).await;
         assert!(!reg.is_tool_allowed("ghost", "any_tool"));
     }
 }
