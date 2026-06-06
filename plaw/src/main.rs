@@ -587,12 +587,50 @@ Examples:
         #[arg(value_enum)]
         shell: CompletionShell,
     },
+
+    /// Inspect the active OS-level sandbox backend and applied limits
+    #[command(long_about = "\
+Inspect the active OS-level sandbox backend and applied limits.
+
+Reports:
+  - which backend was selected (configured / auto-detected)
+  - whether the backend is available on this host
+  - configured resource limits (Windows: process memory, CPU time, active processes)
+  - the backend's honest description of what it does and does NOT cover
+
+Useful for verifying that `[security.sandbox]` config edits actually
+took effect, and for answering 'is the Windows Job Object sandbox
+limiting my tool subprocesses?' without grepping logs.
+
+Examples:
+  plaw sandbox status
+  plaw sandbox status --format json")]
+    Sandbox {
+        #[command(subcommand)]
+        sandbox_command: SandboxCommands,
+    },
 }
 
 #[derive(Subcommand, Debug)]
 enum ConfigCommands {
     /// Dump the full configuration JSON Schema to stdout
     Schema,
+}
+
+#[derive(Subcommand, Debug)]
+enum SandboxCommands {
+    /// Print the active sandbox backend, configured limits, and availability
+    Status {
+        /// Output format: `text` (human-readable) or `json` (machine-parseable)
+        #[arg(long, default_value = "text")]
+        format: SandboxStatusFormat,
+    },
+}
+
+#[derive(Clone, Debug, clap::ValueEnum)]
+enum SandboxStatusFormat {
+    Text,
+    Json,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1237,7 +1275,174 @@ async fn main() -> Result<()> {
                 Ok(())
             }
         },
+
+        Commands::Sandbox { sandbox_command } => match sandbox_command {
+            SandboxCommands::Status { format } => {
+                let report = sandbox_status_report(&config);
+                match format {
+                    SandboxStatusFormat::Text => {
+                        println!("{}", render_sandbox_status_text(&report))
+                    }
+                    SandboxStatusFormat::Json => println!(
+                        "{}",
+                        serde_json::to_string_pretty(&report).expect("status report serializes")
+                    ),
+                }
+                Ok(())
+            }
+        },
     }
+}
+
+/// PR #82: machine-parseable + human-readable sandbox status report.
+/// Surfaces what was configured, what's actually wired, and what is
+/// honestly NOT covered (per the `Sandbox::description()` contract).
+#[derive(Debug, Serialize)]
+struct SandboxStatusReport {
+    /// Whether sandboxing is enabled at all (`[security.sandbox].enabled`).
+    /// `None` = auto-detect (the default).
+    enabled: Option<bool>,
+    /// The backend the user configured. `"auto"` means plaw picks
+    /// platform-best at startup; an explicit name pins the choice.
+    configured_backend: String,
+    /// The backend that would actually fire on this host right now —
+    /// the result of `security::detect::create_sandbox`. Matches
+    /// `configured_backend` for explicit choices; resolves `"auto"`.
+    active_backend: String,
+    /// Whether the active backend reports `is_available()`. `false`
+    /// for `NoopSandbox` fallbacks.
+    available: bool,
+    /// The backend's own `Sandbox::description()` text — kept honest
+    /// per PR #77 (Windows description explicitly lists what it does
+    /// NOT cover).
+    description: String,
+    /// Windows-only kernel-enforced limits (`Some` when active backend is
+    /// `windows-job-object` on Windows builds; `None` otherwise).
+    windows_limits: Option<WindowsSandboxLimitsReport>,
+    /// The non-Windows resource limits config block, surfaced unchanged
+    /// so users can see what `[security.resource_limits]` applies on
+    /// the shell-tool-side timeout path.
+    resource_limits: ResourceLimitsReport,
+}
+
+#[derive(Debug, Serialize)]
+struct WindowsSandboxLimitsReport {
+    max_processes: u32,
+    process_memory_mb: u64,
+    process_cpu_time_secs: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct ResourceLimitsReport {
+    max_memory_mb: u32,
+    max_cpu_time_seconds: u64,
+    max_subprocesses: u32,
+}
+
+fn sandbox_status_report(config: &Config) -> SandboxStatusReport {
+    let configured_backend = format_sandbox_backend(&config.security.sandbox.backend);
+    let active_sandbox = security::detect::create_sandbox(&config.security);
+    let active_backend = active_sandbox.name().to_string();
+    let description = active_sandbox.description().to_string();
+    let available = active_sandbox.is_available();
+
+    // Surface Windows kernel-enforced limits only when the active
+    // backend is windows-job-object (i.e. only on Windows hosts).
+    #[cfg(target_os = "windows")]
+    let windows_limits = if active_backend == "windows-job-object" {
+        let limits = security::windows_job::WindowsJobLimits::from_config(&config.security.sandbox);
+        Some(WindowsSandboxLimitsReport {
+            max_processes: limits.max_processes,
+            process_memory_mb: limits.process_memory_bytes / (1024 * 1024),
+            process_cpu_time_secs: limits.process_cpu_time_100ns / 10_000_000,
+        })
+    } else {
+        None
+    };
+    #[cfg(not(target_os = "windows"))]
+    let windows_limits = None;
+
+    SandboxStatusReport {
+        enabled: config.security.sandbox.enabled,
+        configured_backend,
+        active_backend,
+        available,
+        description,
+        windows_limits,
+        resource_limits: ResourceLimitsReport {
+            max_memory_mb: config.security.resources.max_memory_mb,
+            max_cpu_time_seconds: config.security.resources.max_cpu_time_seconds,
+            max_subprocesses: config.security.resources.max_subprocesses,
+        },
+    }
+}
+
+/// Render `SandboxBackend` in the same kebab-case form users see in
+/// TOML (`"windows-job-object"`, `"auto"`, etc.). Plain `Debug` would
+/// surface `WindowsJobObject` — inconsistent with the wire format.
+fn format_sandbox_backend(backend: &config::SandboxBackend) -> String {
+    use config::SandboxBackend;
+    match backend {
+        SandboxBackend::Auto => "auto",
+        SandboxBackend::Landlock => "landlock",
+        SandboxBackend::Firejail => "firejail",
+        SandboxBackend::Bubblewrap => "bubblewrap",
+        SandboxBackend::Docker => "docker",
+        SandboxBackend::WindowsJobObject => "windows-job-object",
+        SandboxBackend::None => "none",
+    }
+    .to_string()
+}
+
+fn render_sandbox_status_text(report: &SandboxStatusReport) -> String {
+    let mut out = String::new();
+    out.push_str("plaw sandbox status\n");
+    out.push_str("===================\n\n");
+    let enabled_str = match report.enabled {
+        Some(true) => "true (explicit)",
+        Some(false) => "false (explicit)",
+        None => "auto-detect (default)",
+    };
+    out.push_str(&format!("enabled            : {enabled_str}\n"));
+    out.push_str(&format!(
+        "configured backend : {}\n",
+        report.configured_backend
+    ));
+    out.push_str(&format!("active backend     : {}\n", report.active_backend));
+    out.push_str(&format!("available          : {}\n", report.available));
+    out.push_str(&format!("description        : {}\n\n", report.description));
+
+    if let Some(limits) = &report.windows_limits {
+        out.push_str("Windows Job Object kernel-enforced limits:\n");
+        out.push_str(&format!(
+            "  max processes (ACTIVE_PROCESS)        : {}\n",
+            limits.max_processes
+        ));
+        out.push_str(&format!(
+            "  per-process memory cap (PROCESS_MEMORY): {} MiB\n",
+            limits.process_memory_mb
+        ));
+        out.push_str(&format!(
+            "  per-process CPU time (PROCESS_TIME)   : {} s (CUMULATIVE CPU TIME — not wall-clock)\n",
+            limits.process_cpu_time_secs
+        ));
+        out.push('\n');
+    }
+
+    out.push_str("Shell-tool subprocess wall-clock limits (security.resource_limits):\n");
+    out.push_str(&format!(
+        "  max memory                            : {} MiB\n",
+        report.resource_limits.max_memory_mb
+    ));
+    out.push_str(&format!(
+        "  max cpu time                          : {} s (wall-clock)\n",
+        report.resource_limits.max_cpu_time_seconds
+    ));
+    out.push_str(&format!(
+        "  max subprocesses                      : {}\n",
+        report.resource_limits.max_subprocesses
+    ));
+    out
 }
 
 fn handle_estop_command(
@@ -2261,5 +2466,135 @@ mod tests {
             } => assert_eq!(domains, vec!["*.chase.com".to_string()]),
             other => panic!("expected estop resume command, got {other:?}"),
         }
+    }
+
+    // ── PR #82: `plaw sandbox status` ─────────────────────────────────
+
+    #[test]
+    fn sandbox_command_parses_with_default_text_format() {
+        let cli =
+            Cli::try_parse_from(["plaw", "sandbox", "status"]).expect("sandbox status parses");
+        match cli.command {
+            Commands::Sandbox {
+                sandbox_command: SandboxCommands::Status { format },
+            } => assert!(matches!(format, SandboxStatusFormat::Text)),
+            other => panic!("expected sandbox status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sandbox_command_parses_json_format() {
+        let cli = Cli::try_parse_from(["plaw", "sandbox", "status", "--format", "json"])
+            .expect("--format json parses");
+        match cli.command {
+            Commands::Sandbox {
+                sandbox_command: SandboxCommands::Status { format },
+            } => assert!(matches!(format, SandboxStatusFormat::Json)),
+            other => panic!("expected sandbox status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn format_sandbox_backend_renders_kebab_case() {
+        use config::SandboxBackend;
+        // Match the wire-format users see in TOML / config.json.
+        assert_eq!(format_sandbox_backend(&SandboxBackend::Auto), "auto");
+        assert_eq!(
+            format_sandbox_backend(&SandboxBackend::WindowsJobObject),
+            "windows-job-object"
+        );
+        assert_eq!(
+            format_sandbox_backend(&SandboxBackend::Landlock),
+            "landlock"
+        );
+        assert_eq!(format_sandbox_backend(&SandboxBackend::None), "none");
+    }
+
+    #[test]
+    fn render_sandbox_status_text_includes_honest_description() {
+        let report = SandboxStatusReport {
+            enabled: None,
+            configured_backend: "auto".into(),
+            active_backend: "windows-job-object".into(),
+            available: true,
+            description:
+                "Windows Job Object (KILL_ON_JOB_CLOSE + ...; no FS/network/token-IL isolation)"
+                    .into(),
+            windows_limits: Some(WindowsSandboxLimitsReport {
+                max_processes: 256,
+                process_memory_mb: 2048,
+                process_cpu_time_secs: 600,
+            }),
+            resource_limits: ResourceLimitsReport {
+                max_memory_mb: 512,
+                max_cpu_time_seconds: 60,
+                max_subprocesses: 10,
+            },
+        };
+        let text = render_sandbox_status_text(&report);
+        // PR #77 honesty contract: the description text MUST surface
+        // the "what we do NOT cover" disclaimer.
+        assert!(
+            text.contains("no FS/network/token-IL isolation"),
+            "description should preserve the honesty disclaimer"
+        );
+        // Windows kernel limits are surfaced when active backend is
+        // windows-job-object.
+        assert!(text.contains("ACTIVE_PROCESS"));
+        assert!(text.contains("PROCESS_MEMORY"));
+        assert!(text.contains("PROCESS_TIME"));
+        assert!(text.contains("CUMULATIVE CPU TIME"));
+        // The shell-tool resource_limits block also appears.
+        assert!(text.contains("Shell-tool subprocess"));
+    }
+
+    #[test]
+    fn render_sandbox_status_text_omits_windows_block_when_not_active() {
+        let report = SandboxStatusReport {
+            enabled: Some(true),
+            configured_backend: "landlock".into(),
+            active_backend: "landlock".into(),
+            available: true,
+            description: "Landlock (Linux kernel)".into(),
+            windows_limits: None,
+            resource_limits: ResourceLimitsReport {
+                max_memory_mb: 512,
+                max_cpu_time_seconds: 60,
+                max_subprocesses: 10,
+            },
+        };
+        let text = render_sandbox_status_text(&report);
+        assert!(!text.contains("Windows Job Object"));
+        assert!(!text.contains("ACTIVE_PROCESS"));
+        // But the shared resource_limits block still appears.
+        assert!(text.contains("Shell-tool subprocess"));
+    }
+
+    #[test]
+    fn sandbox_status_report_json_roundtrip_is_stable() {
+        let report = SandboxStatusReport {
+            enabled: None,
+            configured_backend: "auto".into(),
+            active_backend: "windows-job-object".into(),
+            available: true,
+            description: "ok".into(),
+            windows_limits: Some(WindowsSandboxLimitsReport {
+                max_processes: 256,
+                process_memory_mb: 2048,
+                process_cpu_time_secs: 600,
+            }),
+            resource_limits: ResourceLimitsReport {
+                max_memory_mb: 512,
+                max_cpu_time_seconds: 60,
+                max_subprocesses: 10,
+            },
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        // Field names match what scripts will grep for; stable wire
+        // format is the contract of this CLI.
+        assert!(json.contains("\"active_backend\":\"windows-job-object\""));
+        assert!(json.contains("\"windows_limits\":{"));
+        assert!(json.contains("\"resource_limits\":{"));
+        assert!(json.contains("\"process_memory_mb\":2048"));
     }
 }
