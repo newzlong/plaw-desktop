@@ -43,6 +43,7 @@
 //! All items pub(crate) — no public API surface escapes the crate.
 //! Matches `tools/mcp/transport/mod.rs:13-15` Rule-of-Three guidance.
 
+pub(crate) mod ceremony;
 pub(crate) mod dcr;
 pub(crate) mod discovery;
 pub(crate) mod pkce;
