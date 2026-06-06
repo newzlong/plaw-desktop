@@ -199,6 +199,14 @@ windows-sys = { version = "0.61", features = [
     # and SetInformationJobObject. win32job 2.0 does not expose these
     # constants or the Basic UI Restrictions info class.
     "Win32_System_JobObjects",
+    # PR #88 (Phase 1a-1 Token IL observation primitives) —
+    # OpenProcessToken, GetTokenInformation, TOKEN_MANDATORY_LABEL,
+    # SID_AND_ATTRIBUTES, and the integrity-level SID well-known
+    # values. Sibling spawn primitives (CreateProcessAsUserW,
+    # DuplicateTokenEx, SetTokenInformation) and the
+    # Win32_Security_Authorization feature ride PR #88b once the
+    # observation API is locked in.
+    "Win32_Security",
 ] }
 
 # USB device enumeration (hardware discovery) — only on platforms nusb supports
