@@ -340,8 +340,11 @@ impl Provider for OpenRouterProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<String> {
-        let credential = self.credential.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("OpenRouter API key not set. Run `plaw onboard` or set OPENROUTER_API_KEY env var."))?;
+        let credential = self.credential.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "OpenRouter API key not set. Run `plaw onboard` or set OPENROUTER_API_KEY env var."
+            )
+        })?;
 
         let mut messages = Vec::new();
 
@@ -368,10 +371,7 @@ impl Provider for OpenRouterProvider {
             .http_client()
             .post("https://openrouter.ai/api/v1/chat/completions")
             .header("Authorization", format!("Bearer {credential}"))
-            .header(
-                "HTTP-Referer",
-                "https://github.com/theonlyhennygod/plaw",
-            )
+            .header("HTTP-Referer", "https://github.com/theonlyhennygod/plaw")
             .header("X-Title", "Plaw")
             .json(&request)
             .send()
@@ -397,8 +397,11 @@ impl Provider for OpenRouterProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<String> {
-        let credential = self.credential.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("OpenRouter API key not set. Run `plaw onboard` or set OPENROUTER_API_KEY env var."))?;
+        let credential = self.credential.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "OpenRouter API key not set. Run `plaw onboard` or set OPENROUTER_API_KEY env var."
+            )
+        })?;
 
         let api_messages: Vec<Message> = messages
             .iter()
@@ -419,10 +422,7 @@ impl Provider for OpenRouterProvider {
             .http_client()
             .post("https://openrouter.ai/api/v1/chat/completions")
             .header("Authorization", format!("Bearer {credential}"))
-            .header(
-                "HTTP-Referer",
-                "https://github.com/theonlyhennygod/plaw",
-            )
+            .header("HTTP-Referer", "https://github.com/theonlyhennygod/plaw")
             .header("X-Title", "Plaw")
             .json(&request)
             .send()
@@ -450,8 +450,8 @@ impl Provider for OpenRouterProvider {
     ) -> anyhow::Result<ProviderChatResponse> {
         let credential = self.credential.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
-            "OpenRouter API key not set. Run `plaw onboard` or set OPENROUTER_API_KEY env var."
-        )
+                "OpenRouter API key not set. Run `plaw onboard` or set OPENROUTER_API_KEY env var."
+            )
         })?;
 
         let tools = Self::convert_tools(request.tools);
@@ -468,10 +468,7 @@ impl Provider for OpenRouterProvider {
             .http_client()
             .post("https://openrouter.ai/api/v1/chat/completions")
             .header("Authorization", format!("Bearer {credential}"))
-            .header(
-                "HTTP-Referer",
-                "https://github.com/theonlyhennygod/plaw",
-            )
+            .header("HTTP-Referer", "https://github.com/theonlyhennygod/plaw")
             .header("X-Title", "Plaw")
             .json(&native_request)
             .send()
@@ -485,6 +482,7 @@ impl Provider for OpenRouterProvider {
         let usage = native_response.usage.map(|u| TokenUsage {
             input_tokens: u.prompt_tokens,
             output_tokens: u.completion_tokens,
+            ..Default::default()
         });
         let message = native_response
             .choices
@@ -563,10 +561,7 @@ impl Provider for OpenRouterProvider {
             .http_client()
             .post("https://openrouter.ai/api/v1/chat/completions")
             .header("Authorization", format!("Bearer {credential}"))
-            .header(
-                "HTTP-Referer",
-                "https://github.com/theonlyhennygod/plaw",
-            )
+            .header("HTTP-Referer", "https://github.com/theonlyhennygod/plaw")
             .header("X-Title", "Plaw")
             .json(&native_request)
             .send()
@@ -580,6 +575,7 @@ impl Provider for OpenRouterProvider {
         let usage = native_response.usage.map(|u| TokenUsage {
             input_tokens: u.prompt_tokens,
             output_tokens: u.completion_tokens,
+            ..Default::default()
         });
         let message = native_response
             .choices

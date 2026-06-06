@@ -416,6 +416,14 @@ struct BedrockUsage {
     input_tokens: Option<u64>,
     #[serde(default)]
     output_tokens: Option<u64>,
+    /// Bedrock Converse API surfaces the Anthropic prefix-cache breakdown
+    /// on Claude models as `cacheReadInputTokens` /
+    /// `cacheCreationInputTokens` (camelCase via the serde rename above).
+    /// Always `None` for non-Claude Bedrock model families.
+    #[serde(default)]
+    cache_creation_input_tokens: Option<u64>,
+    #[serde(default)]
+    cache_read_input_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -850,6 +858,8 @@ impl BedrockProvider {
         let usage = response.usage.map(|u| TokenUsage {
             input_tokens: u.input_tokens,
             output_tokens: u.output_tokens,
+            cache_creation_input_tokens: u.cache_creation_input_tokens,
+            cache_read_input_tokens: u.cache_read_input_tokens,
         });
 
         if let Some(output) = response.output {
