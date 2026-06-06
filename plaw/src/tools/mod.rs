@@ -73,7 +73,7 @@ pub mod web_fetch;
 pub mod web_search_tool;
 
 pub use apply_patch::ApplyPatchTool;
-pub use browser::{BrowserTool, ComputerUseConfig, cleanup_browser_processes};
+pub use browser::{cleanup_browser_processes, BrowserTool, ComputerUseConfig};
 pub use browser_open::BrowserOpenTool;
 pub use capsule::{CapsuleRecallTool, CapsuleSearchTool};
 pub use composio::ComposioTool;
@@ -260,8 +260,22 @@ pub fn all_tools_with_runtime(
     fallback_api_key: Option<&str>,
     root_config: &crate::config::Config,
 ) -> Vec<Box<dyn Tool>> {
-    all_tools_impl(config, security, runtime, memory, composio_key, composio_entity_id,
-        browser_config, http_config, web_fetch_config, workspace_dir, agents, fallback_api_key, root_config, false)
+    all_tools_impl(
+        config,
+        security,
+        runtime,
+        memory,
+        composio_key,
+        composio_entity_id,
+        browser_config,
+        http_config,
+        web_fetch_config,
+        workspace_dir,
+        agents,
+        fallback_api_key,
+        root_config,
+        false,
+    )
 }
 
 /// Same as `all_tools_with_runtime` but with config modification tools in read-only mode.
@@ -281,8 +295,22 @@ pub fn all_tools_with_runtime_readonly(
     fallback_api_key: Option<&str>,
     root_config: &crate::config::Config,
 ) -> Vec<Box<dyn Tool>> {
-    all_tools_impl(config, security, runtime, memory, composio_key, composio_entity_id,
-        browser_config, http_config, web_fetch_config, workspace_dir, agents, fallback_api_key, root_config, true)
+    all_tools_impl(
+        config,
+        security,
+        runtime,
+        memory,
+        composio_key,
+        composio_entity_id,
+        browser_config,
+        http_config,
+        web_fetch_config,
+        workspace_dir,
+        agents,
+        fallback_api_key,
+        root_config,
+        true,
+    )
 }
 
 fn all_tools_impl(
@@ -330,10 +358,11 @@ fn all_tools_impl(
         Arc::new(MemoryForgetTool::new(memory, security.clone())),
         Arc::new(ScheduleTool::new(security.clone(), root_config.clone())),
         Arc::new(TaskPlanTool::new(security.clone())),
-        Arc::new(ModelRoutingConfigTool::new(
-            config.clone(),
-            security.clone(),
-        ).set_config_readonly(config_readonly).with_live_agents(live_agents.clone())),
+        Arc::new(
+            ModelRoutingConfigTool::new(config.clone(), security.clone())
+                .set_config_readonly(config_readonly)
+                .with_live_agents(live_agents.clone()),
+        ),
         Arc::new(ProxyConfigTool::new(config.clone(), security.clone())),
         Arc::new(PushoverTool::new(
             security.clone(),
@@ -351,12 +380,27 @@ fn all_tools_impl(
     );
 
     if has_shell_access {
-        tool_arcs.push(Arc::new(ShellTool::new_with_syscall_detector(
-            security.clone(),
-            runtime.clone(),
-            sandbox.clone(),
-            Some(syscall_detector.clone()),
-        )));
+        // PR #91 Phase 1c: resolve per-tool Token IL from the
+        // `[security.sandbox.integrity]` block. Default = no lowering
+        // (byte-identical to pre-#91). Only the production
+        // all_tools_impl path opts in; the simpler
+        // `default_tools_with_runtime` (used by tests + portable mode)
+        // keeps the constructor default.
+        let shell_integrity = root_config
+            .security
+            .sandbox
+            .integrity
+            .resolve("shell")
+            .to_runtime();
+        tool_arcs.push(Arc::new(
+            ShellTool::new_with_syscall_detector(
+                security.clone(),
+                runtime.clone(),
+                sandbox.clone(),
+                Some(syscall_detector.clone()),
+            )
+            .with_integrity_level(shell_integrity),
+        ));
         tool_arcs.push(Arc::new(ProcessTool::new_with_syscall_detector(
             security.clone(),
             runtime.clone(),
@@ -507,11 +551,10 @@ fn all_tools_impl(
             security.clone(),
             root_config.default_provider.clone().unwrap_or_default(),
             root_config.default_model.clone().unwrap_or_default(),
-            fallback_api_key
-                .and_then(|v| {
-                    let t = v.trim();
-                    (!t.is_empty()).then(|| t.to_owned())
-                }),
+            fallback_api_key.and_then(|v| {
+                let t = v.trim();
+                (!t.is_empty()).then(|| t.to_owned())
+            }),
             provider_runtime_options_pd,
             parent_tools_pd,
             root_config.multimodal.clone(),
@@ -718,11 +761,8 @@ mod tests {
         let security = Arc::new(SecurityPolicy::default());
         let runtime: Arc<dyn RuntimeAdapter> =
             Arc::new(WasmRuntime::new(WasmRuntimeConfig::default()));
-        let tools = default_tools_with_runtime(
-            security,
-            runtime,
-            Arc::new(crate::security::NoopSandbox),
-        );
+        let tools =
+            default_tools_with_runtime(security, runtime, Arc::new(crate::security::NoopSandbox));
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"wasm_module"));
     }
@@ -732,11 +772,8 @@ mod tests {
         let security = Arc::new(SecurityPolicy::default());
         let runtime: Arc<dyn RuntimeAdapter> =
             Arc::new(WasmRuntime::new(WasmRuntimeConfig::default()));
-        let tools = default_tools_with_runtime(
-            security,
-            runtime,
-            Arc::new(crate::security::NoopSandbox),
-        );
+        let tools =
+            default_tools_with_runtime(security, runtime, Arc::new(crate::security::NoopSandbox));
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(!names.contains(&"shell"));
         assert!(!names.contains(&"file_read"));

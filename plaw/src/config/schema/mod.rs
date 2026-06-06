@@ -4197,6 +4197,122 @@ pub struct SandboxConfig {
     /// duration. Default: 600 (10 minutes of busy work per child).
     #[serde(default)]
     pub windows_process_cpu_time_secs: Option<u64>,
+
+    /// PR #91 Phase 1c: per-tool Mandatory Integrity Level drop on
+    /// Windows. **Default OFF** per Lens C — a default-on workspace-
+    /// wide Low IL would break first-run `cargo build` / `npm install`
+    /// and users would disable sandboxing entirely (the Gatekeeper
+    /// failure mode). Opt-in only.
+    #[serde(default)]
+    pub integrity: SandboxIntegrityConfig,
+}
+
+/// PR #91 Phase 1c: per-tool Token IL config. Windows-only behavior
+/// (the IL concept doesn't exist on Linux / macOS) but the struct is
+/// cross-platform so config TOML schemas parse uniformly.
+///
+/// Resolution order: per-tool override (e.g. `shell`) wins; otherwise
+/// `default_level` applies; otherwise `IntegrityLevel::Default`
+/// (no lowering — byte-identical to pre-PR #91 behavior).
+///
+/// **Phase 1c.2 (future)** is needed before non-Default values affect
+/// shell output. The current `spawn_with_lowered_token` (PR #89) does
+/// NOT support piped stdio capture — children inherit the parent's
+/// console. `ShellTool::execute` therefore RETURNS A CLEAR ERROR when
+/// the resolved level is non-Default until Phase 1c.2 ships stdio
+/// piping. The config knob is reserved here so users can already
+/// plan their TOML; flipping the runtime gate is a one-line change
+/// in Phase 1c.2.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct SandboxIntegrityConfig {
+    /// Fallback IL applied to any tool that doesn't have an explicit
+    /// override. `None` = no lowering (current behavior).
+    #[serde(default)]
+    pub default_level: Option<SandboxIntegrityLevel>,
+
+    /// Override for `ShellTool`. Set to `"low"` to run `shell` /
+    /// `git_operations` at Low IL — kernel-enforces write-deny on the
+    /// user profile + most filesystem. **Requires Phase 1c.2** before
+    /// shell output capture works at lowered IL; until then a non-
+    /// `None` value here makes shell return an explicit deferred-
+    /// feature error rather than silently disabling output capture.
+    #[serde(default)]
+    pub shell: Option<SandboxIntegrityLevel>,
+}
+
+impl SandboxIntegrityConfig {
+    /// Resolved IL for a given tool name. Per-tool override wins;
+    /// otherwise `default_level`; otherwise
+    /// [`SandboxIntegrityLevel::Default`] (= no lowering).
+    pub fn resolve(&self, tool: &str) -> SandboxIntegrityLevel {
+        let per_tool = match tool {
+            "shell" => self.shell,
+            _ => None,
+        };
+        per_tool
+            .or(self.default_level)
+            .unwrap_or(SandboxIntegrityLevel::Default)
+    }
+}
+
+/// PR #91 Phase 1c: serializable mirror of `IntegrityLevel` for TOML
+/// parsing.
+///
+/// We keep this distinct from
+/// `crate::security::traits::IntegrityLevel` because:
+/// 1. The schema layer must not depend on the security module's
+///    Windows-specific re-export (config compiles + serializes
+///    cross-platform; the security `IntegrityLevel` is Windows-only
+///    in its full 4-variant form).
+/// 2. Wire format stability is a separate concern from the runtime
+///    enum's evolution — pinning the lowercase serde rename here
+///    means a future runtime refactor can rename variants without
+///    breaking config TOML.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxIntegrityLevel {
+    /// No lowering — use whatever IL the plaw process is at. Default.
+    #[default]
+    Default,
+    /// Medium IL. Same as Default for a typical unelevated plaw
+    /// process; provided so users can explicitly state "do not lower"
+    /// distinct from "leave at parent's level".
+    Medium,
+    /// Low IL. Kernel-enforces write-deny on user profile + most
+    /// filesystem.
+    Low,
+    /// Untrusted IL. Most restrictive; PR #89 confirmed empirically
+    /// this breaks the Rust C runtime DLL load on Windows MSVC
+    /// targets — kept for completeness but not generally usable.
+    Untrusted,
+}
+
+#[cfg(target_os = "windows")]
+impl SandboxIntegrityLevel {
+    /// Bridge from the schema enum to the runtime
+    /// `crate::security::traits::IntegrityLevel`. Windows-only because
+    /// the runtime enum's non-`Default` variants only exist on
+    /// Windows.
+    pub fn to_runtime(self) -> crate::security::traits::IntegrityLevel {
+        use crate::security::traits::IntegrityLevel as Rt;
+        match self {
+            Self::Default => Rt::Default,
+            Self::Medium => Rt::Medium,
+            Self::Low => Rt::Low,
+            Self::Untrusted => Rt::Untrusted,
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+impl SandboxIntegrityLevel {
+    /// Bridge from the schema enum to the runtime
+    /// `crate::security::traits::IntegrityLevel`. Non-Windows targets
+    /// only have `Default` — every config value collapses to it
+    /// because Linux / macOS have no Token IL concept.
+    pub fn to_runtime(self) -> crate::security::traits::IntegrityLevel {
+        crate::security::traits::IntegrityLevel::Default
+    }
 }
 
 impl Default for SandboxConfig {
@@ -4208,6 +4324,7 @@ impl Default for SandboxConfig {
             windows_max_processes: None,
             windows_process_memory_mb: None,
             windows_process_cpu_time_secs: None,
+            integrity: SandboxIntegrityConfig::default(),
         }
     }
 }
@@ -10015,6 +10132,147 @@ root = "/tmp/my-project"
                 assert!(oauth.loopback_port.is_none());
             }
             _ => panic!("expected Http variant with oauth present"),
+        }
+    }
+
+    // ─── PR #91 Phase 1c: SandboxIntegrityConfig ─────────────────
+
+    /// SandboxConfig::default() must have an empty integrity block —
+    /// no per-tool overrides + no default_level. This is the "DEFAULT
+    /// OFF" half of Lens C's Gatekeeper safeguard: anyone who upgrades
+    /// to plaw with PR #91 sees zero behavior change unless they
+    /// explicitly add `[security.sandbox.integrity]` to their TOML.
+    #[test]
+    async fn sandbox_config_default_integrity_block_is_empty() {
+        let cfg = SandboxConfig::default();
+        assert!(cfg.integrity.default_level.is_none());
+        assert!(cfg.integrity.shell.is_none());
+    }
+
+    /// Resolve("shell") returns Default when neither override nor
+    /// default_level is set. Pins the "no config means no IL change"
+    /// contract that PR #91's docs sell to operators.
+    #[test]
+    async fn sandbox_integrity_resolve_default_returns_default_level() {
+        let cfg = SandboxIntegrityConfig::default();
+        assert_eq!(
+            cfg.resolve("shell"),
+            SandboxIntegrityLevel::Default,
+            "empty config must resolve to Default — Lens C Gatekeeper guarantee"
+        );
+        assert_eq!(cfg.resolve("unknown_tool"), SandboxIntegrityLevel::Default);
+    }
+
+    /// Per-tool override beats default_level. Pins the resolution
+    /// precedence so future contributors don't reorder it.
+    #[test]
+    async fn sandbox_integrity_per_tool_override_wins_over_default_level() {
+        let cfg = SandboxIntegrityConfig {
+            default_level: Some(SandboxIntegrityLevel::Medium),
+            shell: Some(SandboxIntegrityLevel::Low),
+        };
+        assert_eq!(cfg.resolve("shell"), SandboxIntegrityLevel::Low);
+        // A tool name not in the per-tool map falls through to
+        // default_level.
+        assert_eq!(cfg.resolve("other_tool"), SandboxIntegrityLevel::Medium);
+    }
+
+    /// default_level applies when there's no per-tool override.
+    #[test]
+    async fn sandbox_integrity_default_level_applies_without_override() {
+        let cfg = SandboxIntegrityConfig {
+            default_level: Some(SandboxIntegrityLevel::Low),
+            shell: None,
+        };
+        assert_eq!(cfg.resolve("shell"), SandboxIntegrityLevel::Low);
+    }
+
+    /// TOML wire format pinned: lowercase variants for forward-compat
+    /// with future renames at the runtime layer. Without this test, a
+    /// future serde-rename refactor could silently break every user's
+    /// `[security.sandbox.integrity]` TOML.
+    #[test]
+    async fn sandbox_integrity_level_serde_uses_lowercase_wire_format() {
+        let toml_in = r#"
+            default_level = "low"
+            shell = "untrusted"
+        "#;
+        let cfg: SandboxIntegrityConfig =
+            toml::from_str(toml_in).expect("lowercase variants must deserialize");
+        assert_eq!(cfg.default_level, Some(SandboxIntegrityLevel::Low));
+        assert_eq!(cfg.shell, Some(SandboxIntegrityLevel::Untrusted));
+
+        // Round-trip back to TOML must also use lowercase.
+        let toml_out = toml::to_string(&cfg).unwrap();
+        assert!(
+            toml_out.contains("\"low\""),
+            "expected lowercase 'low' in: {toml_out}"
+        );
+        assert!(
+            toml_out.contains("\"untrusted\""),
+            "expected lowercase 'untrusted' in: {toml_out}"
+        );
+    }
+
+    /// Empty TOML must parse to a default SandboxConfig — zero
+    /// regression for users who never added the new block. This pins
+    /// the `#[serde(default)]` discipline on the `integrity` field.
+    #[test]
+    async fn sandbox_config_omitted_integrity_block_parses_as_default() {
+        // Realistic operator TOML: configures the older Phase 0
+        // Job Object knobs but omits PR #91's integrity block.
+        let toml_in = r#"
+            backend = "auto"
+            windows_max_processes = 128
+        "#;
+        let cfg: SandboxConfig =
+            toml::from_str(toml_in).expect("PR #91 must not break pre-#91 TOML");
+        assert_eq!(cfg.windows_max_processes, Some(128));
+        // The omitted integrity block resolves to the empty default
+        // (no overrides, no default_level) — exact same shape as
+        // SandboxConfig::default().integrity.
+        assert!(cfg.integrity.default_level.is_none());
+        assert!(cfg.integrity.shell.is_none());
+        assert_eq!(
+            cfg.integrity.resolve("shell"),
+            SandboxIntegrityLevel::Default
+        );
+    }
+
+    /// Bridge from the schema enum to the runtime IntegrityLevel.
+    /// Both directions must produce the same enum value so the
+    /// config → runtime crossing doesn't silently lose info.
+    #[cfg(target_os = "windows")]
+    #[test]
+    async fn sandbox_integrity_to_runtime_maps_all_windows_variants() {
+        use crate::security::traits::IntegrityLevel as Rt;
+        assert_eq!(SandboxIntegrityLevel::Default.to_runtime(), Rt::Default);
+        assert_eq!(SandboxIntegrityLevel::Medium.to_runtime(), Rt::Medium);
+        assert_eq!(SandboxIntegrityLevel::Low.to_runtime(), Rt::Low);
+        assert_eq!(SandboxIntegrityLevel::Untrusted.to_runtime(), Rt::Untrusted);
+    }
+
+    /// On non-Windows targets every schema variant must collapse to
+    /// the runtime's `Default` — Linux / macOS have no Token IL
+    /// concept and silently turning a `Low` config into a real
+    /// lowering would be a security-relevant lie. Pin the fail-safe
+    /// collapse.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    async fn sandbox_integrity_to_runtime_collapses_on_non_windows() {
+        use crate::security::traits::IntegrityLevel as Rt;
+        for level in [
+            SandboxIntegrityLevel::Default,
+            SandboxIntegrityLevel::Medium,
+            SandboxIntegrityLevel::Low,
+            SandboxIntegrityLevel::Untrusted,
+        ] {
+            assert_eq!(
+                level.to_runtime(),
+                Rt::Default,
+                "non-Windows must collapse {level:?} to Default — \
+                 Linux/macOS have no Token IL concept"
+            );
         }
     }
 }
