@@ -149,32 +149,66 @@ const MAX_OUTPUT_BYTES: usize = 1_048_576;
 /// for basic program execution (PowerShell, cmd.exe, crypto subsystem).
 const SAFE_ENV_VARS: &[&str] = &[
     // Cross-platform essentials
-    "PATH", "HOME", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "USER", "SHELL", "TMPDIR",
+    "PATH",
+    "HOME",
+    "TERM",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "USER",
+    "SHELL",
+    "TMPDIR",
     // Windows-essential: without these, PowerShell/cmd fail with cryptic errors
-    "SystemRoot", "SYSTEMDRIVE", "WINDIR",
-    "TEMP", "TMP",
-    "USERPROFILE", "APPDATA", "LOCALAPPDATA",
-    "ProgramFiles", "ProgramFiles(x86)", "CommonProgramFiles",
-    "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "OS",
+    "SystemRoot",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "CommonProgramFiles",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "OS",
     "CHCP",
     // PATHEXT is critical: without it, Windows/PowerShell cannot resolve
     // `python` → `python.exe` (or any extension-less command name).
     "PATHEXT",
     // Development tools — paths, not secrets
-    "JAVA_HOME", "JRE_HOME",
-    "GOPATH", "GOROOT",
-    "CARGO_HOME", "RUSTUP_HOME",
-    "NVM_DIR", "NODE_PATH", "NPM_CONFIG_PREFIX",
-    "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "CONDA_DEFAULT_ENV",
-    "PYTHONIOENCODING", "PYTHONUTF8",
-    "ANDROID_HOME", "ANDROID_SDK_ROOT",
+    "JAVA_HOME",
+    "JRE_HOME",
+    "GOPATH",
+    "GOROOT",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "NVM_DIR",
+    "NODE_PATH",
+    "NPM_CONFIG_PREFIX",
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "VIRTUAL_ENV",
+    "CONDA_DEFAULT_ENV",
+    "PYTHONIOENCODING",
+    "PYTHONUTF8",
+    "ANDROID_HOME",
+    "ANDROID_SDK_ROOT",
     "DOTNET_ROOT",
-    "GRADLE_HOME", "MAVEN_HOME",
-    "RUBY_HOME", "GEM_HOME", "GEM_PATH",
+    "GRADLE_HOME",
+    "MAVEN_HOME",
+    "RUBY_HOME",
+    "GEM_HOME",
+    "GEM_PATH",
     // macOS
-    "HOMEBREW_PREFIX", "HOMEBREW_CELLAR",
+    "HOMEBREW_PREFIX",
+    "HOMEBREW_CELLAR",
     // XDG (Linux/macOS)
-    "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_RUNTIME_DIR",
 ];
 
 /// Shell command execution tool with sandboxing
@@ -183,6 +217,13 @@ pub struct ShellTool {
     runtime: Arc<dyn RuntimeAdapter>,
     sandbox: Arc<dyn crate::security::Sandbox>,
     syscall_detector: Option<Arc<SyscallAnomalyDetector>>,
+    /// PR #91 Phase 1c: Token IL applied to spawned children. Default
+    /// = no lowering (byte-identical to pre-#91 behavior). Set via
+    /// [`Self::with_integrity_level`] from the
+    /// `[security.sandbox.integrity]` config — populated only by
+    /// `tools::all_tools_impl`; test callers stick with the
+    /// constructor default and never need to change.
+    integrity_level: crate::security::traits::IntegrityLevel,
 }
 
 impl ShellTool {
@@ -205,7 +246,19 @@ impl ShellTool {
             runtime,
             sandbox,
             syscall_detector,
+            integrity_level: crate::security::traits::IntegrityLevel::Default,
         }
+    }
+
+    /// PR #91 Phase 1c: builder method opting this `ShellTool` into a
+    /// non-`Default` mandatory integrity level for spawned children.
+    /// Defaulting via a builder (rather than a 5th positional ctor
+    /// parameter) means the existing ~20 `ShellTool::new` test
+    /// callers stay unchanged — only the production wiring in
+    /// `tools::all_tools_impl` needs to opt in.
+    pub fn with_integrity_level(mut self, level: crate::security::traits::IntegrityLevel) -> Self {
+        self.integrity_level = level;
+        self
     }
 }
 
@@ -384,21 +437,15 @@ impl Tool for ShellTool {
             }
         };
 
-        // Apply sandbox wrapping (e.g. firejail, bubblewrap, landlock) before
-        // we touch env or stdio. The trait operates on `std::process::Command`;
-        // `tokio::process::Command::as_std_mut()` exposes the inner std handle.
-        // NoopSandbox (the default on every platform until backend wiring is
-        // chosen) is a no-op; real backends prepend wrapper args / set env.
-        if let Err(e) = self.sandbox.wrap_command(cmd.as_std_mut()) {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!(
-                    "Failed to apply sandbox '{}': {e}",
-                    self.sandbox.name()
-                )),
-            });
-        }
+        // PR #91 Phase 1c: sandbox wrapping (firejail / bubblewrap /
+        // landlock / Windows Job Object) now runs INSIDE
+        // `Sandbox::spawn_with_integrity` below, alongside the spawn
+        // itself + the post-spawn Job Object assignment. Calling
+        // `wrap_command` here would double-prepend wrapper args for
+        // firejail-style backends — the trait owns the choreography
+        // now. NoopSandbox's wrap_command (the default until backend
+        // wiring is chosen) is a no-op so this change is byte-
+        // identical for the common case.
 
         cmd.env_clear();
 
@@ -472,7 +519,10 @@ impl Tool for ShellTool {
                             }
                         }
                         // LibreOffice has a nested path
-                        let lo = data_root.join("libreoffice").join("libreoffice").join("program");
+                        let lo = data_root
+                            .join("libreoffice")
+                            .join("libreoffice")
+                            .join("program");
                         if lo.is_dir() {
                             let s = lo.to_string_lossy().to_string();
                             if !current_path.contains(&s) {
@@ -504,7 +554,10 @@ impl Tool for ShellTool {
                         }
                     }
                 }
-                let lo = home_path.join("libreoffice").join("libreoffice").join("program");
+                let lo = home_path
+                    .join("libreoffice")
+                    .join("libreoffice")
+                    .join("program");
                 if lo.is_dir() {
                     let s = lo.to_string_lossy().to_string();
                     if !current_path.contains(&s) && !extra_dirs.contains(&s) {
@@ -514,7 +567,10 @@ impl Tool for ShellTool {
             }
 
             if !extra_dirs.is_empty() {
-                cmd.env("PATH", format!("{}{sep}{current_path}", extra_dirs.join(sep)));
+                cmd.env(
+                    "PATH",
+                    format!("{}{sep}{current_path}", extra_dirs.join(sep)),
+                );
             }
 
             // Also set NODE_PATH for bundled node_modules if available,
@@ -577,36 +633,66 @@ impl Tool for ShellTool {
             .stderr(std::process::Stdio::piped())
             .stdin(std::process::Stdio::null());
 
-        let child = match cmd.spawn() {
-            Ok(c) => c,
+        // PR #91 Phase 1c: route the spawn through the trait method
+        // shipped in PR #90. The default impl handles wrap_command +
+        // tokio spawn + after_spawn in one call; WindowsJobObjectSandbox
+        // additionally routes non-`Default` integrity levels through
+        // PR #89's Token IL spawn primitives.
+        //
+        // At `integrity_level = Default` (everyone today, by default),
+        // the call sequence is byte-identical to pre-#91:
+        // wrap_command → cmd.spawn → after_spawn(pid).
+        //
+        // At a non-`Default` level: WindowsJobObjectSandbox returns
+        // `SandboxedChild::Lowered`. Stdio piping does NOT work on the
+        // Lowered path yet — `spawn_with_lowered_token` (PR #89)
+        // inherits parent stdio; piping requires Phase 1c.2's
+        // CreateProcessAsUserW stdio-handle plumbing. ShellTool
+        // therefore returns a CLEAR deferred-feature error in that
+        // case so users opting in via TOML config see exactly why
+        // their output capture broke. This matches §3.5 fail-fast
+        // (no silent broken-feature degradation).
+        let sandboxed = match self
+            .sandbox
+            .spawn_with_integrity(cmd, self.integrity_level)
+            .await
+        {
+            Ok(s) => s,
             Err(e) => {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!("Failed to execute command: {e}")),
+                    error: Some(format!(
+                        "Failed to spawn under sandbox '{}': {e}",
+                        self.sandbox.name()
+                    )),
+                });
+            }
+        };
+        let child = match sandboxed {
+            crate::security::traits::SandboxedChild::Tokio(c) => c,
+            #[cfg(target_os = "windows")]
+            crate::security::traits::SandboxedChild::Lowered(_) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(
+                        "Token IL lowered shell does not yet support output capture. \
+                         Remove `[security.sandbox.integrity] shell = \"...\"` from \
+                         your config (or set it to `\"default\"`) until Phase 1c.2 \
+                         ships piped stdio for CreateProcessAsUserW. The Phase 0 \
+                         Job Object caps + Lens C's Gatekeeper warning together \
+                         make this the right deferral — see PR #91 description \
+                         + project_token_il_pr89 memo for the empirical IL \
+                         compatibility envelope."
+                            .to_string(),
+                    ),
                 });
             }
         };
 
-        if let Some(pid) = child.id() {
-            if let Err(e) = self.sandbox.after_spawn(pid) {
-                // Fail-soft: the child is already running. Aborting the
-                // tool because sandbox attachment failed would surprise
-                // users; logging tells operators isolation didn't take.
-                tracing::warn!(
-                    sandbox = self.sandbox.name(),
-                    pid,
-                    error = %e,
-                    "post-spawn sandbox hook failed; child runs unrestricted"
-                );
-            }
-        }
-
-        let result = tokio::time::timeout(
-            Duration::from_secs(timeout_secs),
-            child.wait_with_output(),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await;
 
         match result {
             Ok(Ok(output)) => {
@@ -706,7 +792,11 @@ mod tests {
 
     #[test]
     fn shell_tool_name() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime(), test_sandbox());
+        let tool = ShellTool::new(
+            test_security(AutonomyLevel::Supervised),
+            test_runtime(),
+            test_sandbox(),
+        );
         assert_eq!(tool.name(), "shell");
     }
 
@@ -719,10 +809,7 @@ mod tests {
         }
 
         impl crate::security::Sandbox for CountingSandbox {
-            fn wrap_command(
-                &self,
-                _cmd: &mut std::process::Command,
-            ) -> std::io::Result<()> {
+            fn wrap_command(&self, _cmd: &mut std::process::Command) -> std::io::Result<()> {
                 self.count.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             }
@@ -763,13 +850,21 @@ mod tests {
 
     #[test]
     fn shell_tool_description() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime(), test_sandbox());
+        let tool = ShellTool::new(
+            test_security(AutonomyLevel::Supervised),
+            test_runtime(),
+            test_sandbox(),
+        );
         assert!(!tool.description().is_empty());
     }
 
     #[test]
     fn shell_tool_schema_has_command() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime(), test_sandbox());
+        let tool = ShellTool::new(
+            test_security(AutonomyLevel::Supervised),
+            test_runtime(),
+            test_sandbox(),
+        );
         let schema = tool.parameters_schema();
         assert!(schema["properties"]["command"].is_object());
         assert!(schema["required"]
@@ -797,7 +892,11 @@ mod tests {
 
     #[tokio::test]
     async fn shell_executes_allowed_command() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime(), test_sandbox());
+        let tool = ShellTool::new(
+            test_security(AutonomyLevel::Supervised),
+            test_runtime(),
+            test_sandbox(),
+        );
         let result = tool
             .execute(json!({"command": "echo hello"}))
             .await
@@ -809,7 +908,11 @@ mod tests {
 
     #[tokio::test]
     async fn shell_executes_command_from_cmd_alias() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime(), test_sandbox());
+        let tool = ShellTool::new(
+            test_security(AutonomyLevel::Supervised),
+            test_runtime(),
+            test_sandbox(),
+        );
         let result = tool
             .execute(json!({"cmd": "echo alias"}))
             .await
@@ -820,7 +923,11 @@ mod tests {
 
     #[tokio::test]
     async fn shell_blocks_disallowed_command() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime(), test_sandbox());
+        let tool = ShellTool::new(
+            test_security(AutonomyLevel::Supervised),
+            test_runtime(),
+            test_sandbox(),
+        );
         let result = tool
             .execute(json!({"command": "rm -rf /"}))
             .await
@@ -832,7 +939,11 @@ mod tests {
 
     #[tokio::test]
     async fn shell_blocks_readonly() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::ReadOnly), test_runtime(), test_sandbox());
+        let tool = ShellTool::new(
+            test_security(AutonomyLevel::ReadOnly),
+            test_runtime(),
+            test_sandbox(),
+        );
         let result = tool
             .execute(json!({"command": "ls"}))
             .await
@@ -847,7 +958,11 @@ mod tests {
 
     #[tokio::test]
     async fn shell_missing_command_param() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime(), test_sandbox());
+        let tool = ShellTool::new(
+            test_security(AutonomyLevel::Supervised),
+            test_runtime(),
+            test_sandbox(),
+        );
         let result = tool.execute(json!({})).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("command"));
@@ -855,14 +970,22 @@ mod tests {
 
     #[tokio::test]
     async fn shell_wrong_type_param() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime(), test_sandbox());
+        let tool = ShellTool::new(
+            test_security(AutonomyLevel::Supervised),
+            test_runtime(),
+            test_sandbox(),
+        );
         let result = tool.execute(json!({"command": 123})).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn shell_captures_exit_code() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime(), test_sandbox());
+        let tool = ShellTool::new(
+            test_security(AutonomyLevel::Supervised),
+            test_runtime(),
+            test_sandbox(),
+        );
         let result = tool
             .execute(json!({"command": "ls /nonexistent_dir_xyz"}))
             .await
@@ -872,7 +995,11 @@ mod tests {
 
     #[tokio::test]
     async fn shell_blocks_absolute_path_argument() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime(), test_sandbox());
+        let tool = ShellTool::new(
+            test_security(AutonomyLevel::Supervised),
+            test_runtime(),
+            test_sandbox(),
+        );
         let result = tool
             .execute(json!({"command": "cat /etc/passwd"}))
             .await
@@ -887,7 +1014,11 @@ mod tests {
 
     #[tokio::test]
     async fn shell_blocks_option_assignment_path_argument() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime(), test_sandbox());
+        let tool = ShellTool::new(
+            test_security(AutonomyLevel::Supervised),
+            test_runtime(),
+            test_sandbox(),
+        );
         let result = tool
             .execute(json!({"command": "grep --file=/etc/passwd root ./src"}))
             .await
@@ -902,7 +1033,11 @@ mod tests {
 
     #[tokio::test]
     async fn shell_blocks_short_option_attached_path_argument() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime(), test_sandbox());
+        let tool = ShellTool::new(
+            test_security(AutonomyLevel::Supervised),
+            test_runtime(),
+            test_sandbox(),
+        );
         let result = tool
             .execute(json!({"command": "grep -f/etc/passwd root ./src"}))
             .await
@@ -917,7 +1052,11 @@ mod tests {
 
     #[tokio::test]
     async fn shell_blocks_tilde_user_path_argument() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime(), test_sandbox());
+        let tool = ShellTool::new(
+            test_security(AutonomyLevel::Supervised),
+            test_runtime(),
+            test_sandbox(),
+        );
         let result = tool
             .execute(json!({"command": "cat ~root/.ssh/id_rsa"}))
             .await
@@ -932,7 +1071,11 @@ mod tests {
 
     #[tokio::test]
     async fn shell_blocks_input_redirection_path_bypass() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime(), test_sandbox());
+        let tool = ShellTool::new(
+            test_security(AutonomyLevel::Supervised),
+            test_runtime(),
+            test_sandbox(),
+        );
         let result = tool
             .execute(json!({"command": "cat </etc/passwd"}))
             .await
@@ -1117,8 +1260,7 @@ mod tests {
             .expect("approved command execution should succeed");
         assert!(allowed.success);
 
-        let _ =
-            tokio::fs::remove_file(std::env::temp_dir().join("plaw_shell_approval_test")).await;
+        let _ = tokio::fs::remove_file(std::env::temp_dir().join("plaw_shell_approval_test")).await;
     }
 
     // ── §5.2 Shell timeout enforcement tests ─────────────────
@@ -1199,7 +1341,11 @@ mod tests {
 
     #[tokio::test]
     async fn shell_captures_stderr_output() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Full), test_runtime(), test_sandbox());
+        let tool = ShellTool::new(
+            test_security(AutonomyLevel::Full),
+            test_runtime(),
+            test_sandbox(),
+        );
         let result = tool
             .execute(json!({"command": "echo error_msg >&2"}))
             .await
@@ -1258,5 +1404,208 @@ mod tests {
             .expect("syscall anomaly log should be written");
         assert!(log.contains("\"kind\":\"unknown_syscall\""));
         assert!(log.contains("\"syscall\":\"openat\""));
+    }
+
+    // ─── PR #91 Phase 1c: integrity_level wiring on ShellTool ────
+
+    /// New ShellTool defaults to `IntegrityLevel::Default` —
+    /// byte-identical behavior to pre-#91. All ~20 existing
+    /// `ShellTool::new` test callers (and the simpler
+    /// `default_tools_with_runtime` factory) inherit this.
+    #[test]
+    fn shell_tool_default_integrity_level_is_default() {
+        let tool = ShellTool::new(
+            test_security(AutonomyLevel::Supervised),
+            test_runtime(),
+            test_sandbox(),
+        );
+        assert_eq!(
+            tool.integrity_level,
+            crate::security::traits::IntegrityLevel::Default,
+            "ShellTool::new must keep the no-IL-lowering default"
+        );
+    }
+
+    /// Builder method opts in to a specific level. Pins the
+    /// `with_integrity_level` surface that `tools::all_tools_impl`
+    /// reaches via the config bridge.
+    #[test]
+    fn shell_tool_with_integrity_level_stores_requested_level() {
+        let tool = ShellTool::new(
+            test_security(AutonomyLevel::Supervised),
+            test_runtime(),
+            test_sandbox(),
+        );
+        // Default → Default — no-op
+        let same = tool.with_integrity_level(crate::security::traits::IntegrityLevel::Default);
+        assert_eq!(
+            same.integrity_level,
+            crate::security::traits::IntegrityLevel::Default
+        );
+        // Default → Medium — explicit no-op (Phase 1c.2 won't change
+        // anything because the runtime treats Medium == parent IL on
+        // an unelevated Medium plaw process — but pin the storage)
+        #[cfg(target_os = "windows")]
+        {
+            let lowered =
+                same.with_integrity_level(crate::security::traits::IntegrityLevel::Medium);
+            assert_eq!(
+                lowered.integrity_level,
+                crate::security::traits::IntegrityLevel::Medium
+            );
+        }
+    }
+
+    /// At Default IL, ShellTool's execute path is byte-identical to
+    /// pre-#91 — same wrap_command + spawn + after_spawn flow,
+    /// routed through `spawn_with_integrity`'s default trait impl.
+    /// We verify by piping through `CountingSandbox` and asserting
+    /// the existing wrap_command + after_spawn invariants still
+    /// hold.
+    #[tokio::test]
+    async fn shell_tool_at_default_integrity_preserves_spawn_flow() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct CountingSandbox {
+            wrap_count: Arc<AtomicU32>,
+            after_count: Arc<AtomicU32>,
+        }
+
+        impl crate::security::Sandbox for CountingSandbox {
+            fn wrap_command(&self, _cmd: &mut std::process::Command) -> std::io::Result<()> {
+                self.wrap_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            fn after_spawn(&self, _pid: u32) -> std::io::Result<()> {
+                self.after_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn name(&self) -> &str {
+                "counting"
+            }
+            fn description(&self) -> &str {
+                "test"
+            }
+        }
+
+        let wrap_count = Arc::new(AtomicU32::new(0));
+        let after_count = Arc::new(AtomicU32::new(0));
+        let sandbox: Arc<dyn crate::security::Sandbox> = Arc::new(CountingSandbox {
+            wrap_count: wrap_count.clone(),
+            after_count: after_count.clone(),
+        });
+        let tool = ShellTool::new(
+            test_security(AutonomyLevel::Supervised),
+            test_runtime(),
+            sandbox,
+        );
+        // Default integrity → spawn_with_integrity default impl →
+        // wrap_command + spawn + after_spawn.
+        let _ = tool
+            .execute(json!({"command": "echo phase-1c-default-flow-smoke"}))
+            .await;
+
+        assert_eq!(
+            wrap_count.load(Ordering::SeqCst),
+            1,
+            "wrap_command must fire EXACTLY once via spawn_with_integrity default impl"
+        );
+        assert_eq!(
+            after_count.load(Ordering::SeqCst),
+            1,
+            "after_spawn must fire EXACTLY once via spawn_with_integrity default impl"
+        );
+    }
+
+    /// At a non-Default IL, the WindowsJobObjectSandbox override
+    /// returns `SandboxedChild::Lowered` — but
+    /// `spawn_with_lowered_token` (PR #89) doesn't yet support piped
+    /// stdio, so ShellTool returns a clear deferred-feature error
+    /// instead of silently dropping output. Verify both the error
+    /// message format and that it names the config key the user
+    /// should remove.
+    ///
+    /// `MockLoweredSandbox` returns `SandboxedChild::Lowered` for any
+    /// non-Default level so we can exercise the bail without
+    /// depending on real Win32 token machinery. The real
+    /// `WindowsJobObjectSandbox` path is already pinned by
+    /// `windows_job::tests::spawn_with_integrity_at_low_returns_lowered_child`.
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn shell_tool_at_low_integrity_returns_deferred_feature_error() {
+        struct MockLoweredSandbox;
+        #[async_trait::async_trait]
+        impl crate::security::Sandbox for MockLoweredSandbox {
+            fn wrap_command(&self, _cmd: &mut std::process::Command) -> std::io::Result<()> {
+                Ok(())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn name(&self) -> &str {
+                "mock-lowered"
+            }
+            fn description(&self) -> &str {
+                "test mock that always returns Lowered for any non-Default level"
+            }
+
+            async fn spawn_with_integrity(
+                &self,
+                _cmd: tokio::process::Command,
+                level: crate::security::traits::IntegrityLevel,
+            ) -> std::io::Result<crate::security::traits::SandboxedChild> {
+                use crate::security::traits::{IntegrityLevel, SandboxedChild};
+                if matches!(level, IntegrityLevel::Default) {
+                    panic!("test sandbox should only see non-Default IL");
+                }
+                // Spawn a real cmd.exe at the requested IL via the
+                // production primitive. Test runner is at Medium so
+                // Low is always reachable.
+                let cmd_exe = std::env::var_os("ComSpec")
+                    .unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows\System32\cmd.exe"));
+                let child = crate::security::windows_token_il::spawn_with_lowered_token(
+                    std::path::Path::new(&cmd_exe),
+                    &["/C".to_string(), "exit 0".to_string()],
+                    level,
+                )?;
+                Ok(SandboxedChild::Lowered(child))
+            }
+        }
+
+        let sandbox: Arc<dyn crate::security::Sandbox> = Arc::new(MockLoweredSandbox);
+        let tool = ShellTool::new(
+            test_security(AutonomyLevel::Supervised),
+            test_runtime(),
+            sandbox,
+        )
+        .with_integrity_level(crate::security::traits::IntegrityLevel::Low);
+
+        let result = tool
+            .execute(json!({"command": "echo would-not-be-captured-anyway"}))
+            .await
+            .expect("execute must Ok-wrap the ToolResult");
+
+        assert!(
+            !result.success,
+            "Lowered IL shell must fail with deferred-feature error"
+        );
+        let err = result
+            .error
+            .expect("Lowered-IL execute must populate the error field");
+        assert!(
+            err.contains("Token IL"),
+            "error must name the Token IL feature: {err}"
+        );
+        assert!(
+            err.contains("Phase 1c.2"),
+            "error must point at the deferred-feature phase: {err}"
+        );
+        assert!(
+            err.contains("security.sandbox.integrity"),
+            "error must name the config key to remove: {err}"
+        );
     }
 }
