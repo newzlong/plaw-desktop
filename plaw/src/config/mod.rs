@@ -12,7 +12,7 @@ pub use schema::{
     DockerRuntimeConfig, EditLinterConfig, EditLinterMode, EmbeddingRouteConfig, EstopConfig, FeishuConfig, GatewayConfig,
     GroupReplyConfig, GroupReplyMode, HardwareConfig, HardwareTransport, HeartbeatConfig,
     HooksConfig, HttpRequestConfig, IMessageConfig, IdentityConfig, LarkConfig, MatrixConfig,
-    McpConfig, McpServerConfig, McpTransport, MemoryConfig, ModelRouteConfig, MultimodalConfig,
+    McpConfig, McpOAuthConfig, McpServerConfig, McpTransport, MemoryConfig, ModelRouteConfig, MultimodalConfig,
     NextcloudTalkConfig,
     NonCliNaturalLanguageApprovalMode, ObservabilityConfig, OtpConfig, OtpMethod,
     PeripheralBoardConfig, PeripheralsConfig, PipelineConfig, PipelineErrorPolicy,
