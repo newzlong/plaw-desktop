@@ -1,6 +1,6 @@
-//! Streamable HTTP transport (MCP spec 2025-06-18, Phase 0 subset).
+//! Streamable HTTP transport (MCP spec 2025-06-18).
 //!
-//! Phase 0 capability matrix:
+//! Capability matrix:
 //!
 //! - ✅ Sync request/response via JSON POST.
 //! - ✅ Static bearer token via `Authorization: Bearer ...` header.
@@ -9,18 +9,27 @@
 //!   initial handshake.
 //! - ✅ Server-issued `Mcp-Session-Id` captured on initialize, echoed
 //!   on subsequent calls.
-//! - ❌ `text/event-stream` response bodies — REJECTED with a clear
-//!   error pointing to PR #77. Silent hangs would be worse.
+//! - ✅ OAuth 2.1 (PR #79–#81): PRM + AS metadata + DCR + PKCE +
+//!   401-retry via `AuthService::get_valid_mcp_access_token`.
+//! - ✅ `text/event-stream` response bodies (PR #83): when the server
+//!   replies with SSE we stream `reqwest::Response::bytes_stream()`
+//!   into [`super::sse::SseParser`], collect intermediate
+//!   notifications/requests (logged at debug, not yet routed), and
+//!   return on the first JSON-RPC response whose `id` matches.
+//!   Multi-event streams (server progress notifications before the
+//!   final response) are supported. `Last-Event-ID` is CAPTURED into
+//!   `last_event_id` for future Phase 3 reconnect-resend, but Phase
+//!   2a does NOT retransmit it.
 //! - ❌ Standalone `GET` notification stream — `subscribe_notifications`
-//!   is intentionally absent from the trait in Phase 0.
-//! - ❌ OAuth 2.1 / PKCE / `WWW-Authenticate` / RFC 8414 / RFC 9728 /
-//!   RFC 7591 / RFC 8707. 401 / 403 surface as synthetic
-//!   `JsonRpcError -32001` with a clear `Phase 0 plaw does not implement
-//!   OAuth` message so users see actionable feedback rather than a hang.
-//! - ❌ `Last-Event-ID` resumability (not needed without SSE).
+//!   is intentionally absent from the trait. Deferred to its own PR.
+//! - ❌ `Last-Event-ID` resend on reconnect — field captured, no
+//!   reconnect logic yet.
+//! - ❌ `retry:` field honoring (reconnect timing). Deferred with
+//!   the GET listener.
+//! - ❌ Server-to-client *request* handling (sampling/createMessage,
+//!   roots/list, elicitation/createMessage). Plaw cannot fulfill
+//!   any of these — needs agent-loop integration design first.
 //! - ❌ DELETE on shutdown (no persistent server-side state to clean).
-//!
-//! All of the ❌ items have explicit landing spots in Phase 1 (PR #77).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -28,14 +37,31 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use serde_json::Value;
 
+use super::sse::SseParser;
 use super::McpTransport;
 use crate::security::{Secret, SecretStore};
 use crate::tools::mcp::client::McpProtocolError;
 use crate::tools::mcp::protocol::{
     JsonRpcError, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, PROTOCOL_VERSION,
 };
+
+/// Hard cap on bytes we will buffer for one SSE response stream. 4 MiB
+/// is large enough for any reasonable JSON-RPC response (the largest
+/// MCP responses we've seen are tools/list at ~80 KiB) and small
+/// enough that a hung/malicious server cannot exhaust memory.
+const SSE_BUFFER_BYTE_CAP: usize = 4 * 1024 * 1024;
+
+/// Wall-clock deadline for completing an SSE response. `reqwest`'s
+/// per-request `.timeout()` only covers headers + buffered body, NOT
+/// live-streamed body — without this, a server that opens an SSE
+/// stream then never writes hangs the agent loop. 120 s matches the
+/// existing `request_timeout_ms` default in `[mcp.servers].
+/// request_timeout_ms`; a future PR could plumb the per-server
+/// override.
+const SSE_STREAM_DEADLINE: Duration = Duration::from_secs(120);
 
 /// HTTP transport state. `reqwest::Client` is cheap to clone and pools
 /// connections internally, so we keep one per server and let `Drop`
@@ -76,6 +102,13 @@ pub(crate) struct HttpTransport {
     /// `Some` iff `auth_service` is also `Some`. Set at construction time
     /// from `[[mcp.servers]] name`.
     oauth_server_name: Option<String>,
+    /// PR #83: most recent `id:` field observed on a dispatched SSE
+    /// event. Captured for future Phase 3 reconnect-resend (the spec
+    /// expects the client to send `Last-Event-ID: <id>` on
+    /// reconnect); Phase 2a does NOT retransmit. Hot-path-free:
+    /// only written by the SSE response reader at most once per
+    /// stream; never on the JSON path.
+    last_event_id: tokio::sync::Mutex<Option<String>>,
 }
 
 impl HttpTransport {
@@ -139,6 +172,7 @@ impl HttpTransport {
             next_id: std::sync::atomic::AtomicU64::new(1),
             session_id: Mutex::new(None),
             handshake_complete: std::sync::atomic::AtomicBool::new(false),
+            last_event_id: tokio::sync::Mutex::new(None),
             oauth_bearer: tokio::sync::Mutex::new(None),
             auth_service,
             oauth_server_name,
@@ -284,6 +318,176 @@ impl HttpTransport {
             }
         }
     }
+
+    /// PR #83: drive an SSE response stream until we either find a
+    /// JSON-RPC response matching `request_id` or hit one of the
+    /// failure modes (stream EOF without a matching response,
+    /// JSON-RPC error envelope, parser error, byte cap, wall-clock
+    /// deadline, server-side error inside an event's data field).
+    ///
+    /// Intermediate events that decode as JSON-RPC notifications
+    /// (`progress`, `message`, etc.) or server→client requests
+    /// (`sampling/createMessage`, `roots/list`,
+    /// `elicitation/createMessage`) are logged at `tracing::debug!`
+    /// and discarded — wiring them into the agent loop is a Phase 3
+    /// concern. Events whose `event:` field is set to anything other
+    /// than `message` (or absent — spec default is `message`) are
+    /// ignored entirely (e.g. `event: ping` keepalives).
+    ///
+    /// Errors NEVER set `handshake_complete`; the caller flips that
+    /// flag only after `Ok(value)` returns.
+    async fn read_sse_response(
+        &self,
+        response: reqwest::Response,
+        method: &str,
+        request_id: u64,
+    ) -> Result<Value> {
+        tokio::time::timeout(
+            SSE_STREAM_DEADLINE,
+            self.read_sse_response_inner(response, method, request_id),
+        )
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "MCP HTTP server '{}': SSE stream for {method} did not produce a matching JSON-RPC response within {}s",
+                self.server_name,
+                SSE_STREAM_DEADLINE.as_secs()
+            )
+        })?
+    }
+
+    async fn read_sse_response_inner(
+        &self,
+        response: reqwest::Response,
+        method: &str,
+        request_id: u64,
+    ) -> Result<Value> {
+        use serde_json::Value as JsonValue;
+
+        let mut parser = SseParser::new(SSE_BUFFER_BYTE_CAP);
+        let mut byte_stream = response.bytes_stream();
+        let request_id_value = JsonValue::from(request_id);
+
+        loop {
+            // Try to pull the next chunk. If the stream ends, run
+            // parser.finish() to flush any bare-CR-pending event,
+            // then bail because we never matched the request.
+            let chunk = match byte_stream.next().await {
+                Some(item) => item.with_context(|| {
+                    format!(
+                        "MCP HTTP server '{}': SSE stream read error",
+                        self.server_name
+                    )
+                })?,
+                None => {
+                    let final_events = parser.finish().with_context(|| {
+                        format!(
+                            "MCP HTTP server '{}': SSE stream ended with malformed final event",
+                            self.server_name
+                        )
+                    })?;
+                    if let Some(value) =
+                        self.match_sse_events(&final_events, &request_id_value, method)?
+                    {
+                        return Ok(value);
+                    }
+                    bail!(
+                        "MCP HTTP server '{}': SSE stream ended before a JSON-RPC response with id={request_id} arrived for {method}",
+                        self.server_name
+                    );
+                }
+            };
+
+            let events = parser.feed(&chunk).with_context(|| {
+                format!("MCP HTTP server '{}': SSE parse error", self.server_name)
+            })?;
+            if let Some(value) = self.match_sse_events(&events, &request_id_value, method)? {
+                // Capture last_event_id for future Phase 3 reconnect
+                // resend BEFORE returning. Synchronous tokio::Mutex
+                // lock is cheap — single-write-per-stream pattern.
+                if let Some(id) = parser.last_event_id() {
+                    let mut guard = self.last_event_id.lock().await;
+                    *guard = Some(id.to_string());
+                }
+                return Ok(value);
+            }
+        }
+    }
+
+    /// Scan a batch of dispatched SSE events for a JSON-RPC response
+    /// matching `request_id`. Returns:
+    /// - `Ok(Some(value))` — matching response found; caller returns.
+    /// - `Ok(None)` — no match yet; caller pulls more bytes.
+    /// - `Err(_)` — a matching response carried a JSON-RPC error
+    ///   envelope (`McpProtocolError`), or an event's `data:` field
+    ///   was not valid JSON.
+    fn match_sse_events(
+        &self,
+        events: &[super::sse::SseEvent],
+        request_id_value: &Value,
+        method: &str,
+    ) -> Result<Option<Value>> {
+        for event in events {
+            // Filter on event name. Spec default is `message` when
+            // the `event:` field is absent.
+            let kind = event.event.as_deref().unwrap_or("message");
+            if kind != "message" {
+                // Keepalives, progress hints carried via custom
+                // event names, etc. Log and skip.
+                tracing::debug!(
+                    server = %self.server_name,
+                    method,
+                    sse_event = kind,
+                    "skipping non-message SSE event"
+                );
+                continue;
+            }
+            // Parse data as JSON-RPC. Malformed data here is fatal
+            // — a spec-compliant server MUST send valid JSON-RPC
+            // inside `data:` for `event: message`.
+            let msg: JsonRpcMessage = match serde_json::from_str(&event.data) {
+                Ok(m) => m,
+                Err(e) => bail!(
+                    "MCP HTTP server '{}': SSE event data was not a JSON-RPC message: {e}; data: {}",
+                    self.server_name,
+                    truncate(&event.data, 200)
+                ),
+            };
+
+            // Determine kind:
+            // - id == request_id → matching response
+            // - id == null/absent → notification (log, skip)
+            // - id == something else → server→client request
+            //   (sampling/roots/elicitation — log, skip)
+            let id_match = msg
+                .id
+                .as_ref()
+                .map(|got| got == request_id_value)
+                .unwrap_or(false);
+            if id_match {
+                if let Some(err) = msg.error {
+                    return Err(McpProtocolError::from(err).into());
+                }
+                return Ok(Some(msg.result.unwrap_or(Value::Null)));
+            }
+            if msg.id.is_none() {
+                tracing::debug!(
+                    server = %self.server_name,
+                    method,
+                    notification_method = ?msg.method,
+                    "SSE intermediate JSON-RPC notification (Phase 2a logs+discards; Phase 3 will route)"
+                );
+            } else {
+                tracing::debug!(
+                    server = %self.server_name,
+                    method,
+                    server_request_method = ?msg.method,
+                    "SSE server-to-client request (sampling/roots/elicitation deferred to Phase 3)"
+                );
+            }
+        }
+        Ok(None)
+    }
 }
 
 #[async_trait]
@@ -325,6 +529,25 @@ impl McpTransport for HttpTransport {
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("")
                 .to_lowercase();
+
+            // PR #83: SSE response body. Fork BEFORE `.bytes().await`
+            // so we stream incrementally. Gated on `status.is_success()`
+            // so a 401 with text/event-stream content-type still flows
+            // through the OAuth-recovery path below (defensive: spec
+            // doesn't say the AS error page is required to be JSON).
+            if status.is_success() && content_type.starts_with("text/event-stream") {
+                let value = self.read_sse_response(response, method, id).await?;
+                // PR #83: handshake_complete is set ONLY after a
+                // successful JSON-RPC parse from the stream. A
+                // malformed SSE stream returns Err above and leaves
+                // handshake_complete=false so subsequent POSTs don't
+                // start sending MCP-Protocol-Version against a server
+                // that may not be in a valid handshake state.
+                self.handshake_complete
+                    .store(true, std::sync::atomic::Ordering::Release);
+                return Ok(value);
+            }
+
             let body_bytes = response.bytes().await.with_context(|| {
                 format!("MCP HTTP server '{}': read body failed", self.server_name)
             })?;
@@ -369,13 +592,6 @@ impl McpTransport for HttpTransport {
                     Self::http_status_to_error(status.as_u16(), body_str.as_ref())
                 };
                 return Err(McpProtocolError::from(synthetic).into());
-            }
-
-            if content_type.starts_with("text/event-stream") {
-                bail!(
-                    "MCP HTTP server '{}' returned text/event-stream; Phase 0 only supports application/json responses. SSE response bodies are deferred.",
-                    self.server_name
-                );
             }
 
             let msg: JsonRpcMessage = serde_json::from_slice(&body_bytes).with_context(|| {
@@ -651,13 +867,136 @@ mod tests {
         assert_eq!(proto.0.code, -32003);
     }
 
+    // ── PR #83: SSE response body parsing ──────────────────────────
+
+    /// Canonical single-event SSE response. Server sends ONE
+    /// `event: message` whose `data:` field is the full JSON-RPC
+    /// response — exactly the shape produced by the official MCP SDKs
+    /// with `enableJsonResponse=false` (the default for Notion,
+    /// Linear, GitHub remote MCP). The transport must successfully
+    /// decode and return the result value.
     #[tokio::test]
-    async fn http_text_event_stream_response_is_rejected_with_phase1_hint() {
+    async fn http_sse_response_single_message_event_returns_result() {
         let state = MockServerState::default();
         state.push(ScriptedResponse {
             status: StatusCode::OK,
             content_type: "text/event-stream",
-            body: "event: message\ndata: {}\n\n".into(),
+            body: format!(
+                "event: message\ndata: {}\n\n",
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {"tools": [{"name": "shell"}]}
+                })
+            ),
+            extra_headers: Vec::new(),
+        });
+        let (url, _) = spawn_mock(state).await;
+
+        let t = make_transport(&url);
+        let result = t.request("tools/list", None).await.unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!({"tools": [{"name": "shell"}]}),
+            "SSE-wrapped result must decode identically to JSON path"
+        );
+    }
+
+    /// Server may send progress notifications BEFORE the response
+    /// per MCP spec 2025-06-18. The transport must skip them and
+    /// return only on the matching response.
+    #[tokio::test]
+    async fn http_sse_response_progress_then_response_extracts_response() {
+        let state = MockServerState::default();
+        let body = format!(
+            "event: message\ndata: {}\n\nevent: message\ndata: {}\n\n",
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/progress",
+                "params": {"progressToken": "tok-1", "progress": 0.5}
+            }),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"ok": true}
+            }),
+        );
+        state.push(ScriptedResponse {
+            status: StatusCode::OK,
+            content_type: "text/event-stream",
+            body,
+            extra_headers: Vec::new(),
+        });
+        let (url, _) = spawn_mock(state).await;
+
+        let t = make_transport(&url);
+        let result = t.request("tools/call", None).await.unwrap();
+        assert_eq!(result, serde_json::json!({"ok": true}));
+    }
+
+    /// `event: ping` keepalives (or any non-`message` event name)
+    /// are not JSON-RPC payloads and must be ignored without
+    /// affecting parse state.
+    #[tokio::test]
+    async fn http_sse_response_non_message_event_ignored() {
+        let state = MockServerState::default();
+        let body = format!(
+            "event: ping\ndata: keepalive\n\nevent: message\ndata: {}\n\n",
+            serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": "pong"})
+        );
+        state.push(ScriptedResponse {
+            status: StatusCode::OK,
+            content_type: "text/event-stream",
+            body,
+            extra_headers: Vec::new(),
+        });
+        let (url, _) = spawn_mock(state).await;
+
+        let t = make_transport(&url);
+        let result = t.request("ping", None).await.unwrap();
+        assert_eq!(result, serde_json::json!("pong"));
+    }
+
+    /// Malformed JSON inside an `event: message` data field surfaces
+    /// as a clean error (NOT a silent hang, NOT a panic).
+    #[tokio::test]
+    async fn http_sse_response_malformed_data_field_returns_error() {
+        let state = MockServerState::default();
+        state.push(ScriptedResponse {
+            status: StatusCode::OK,
+            content_type: "text/event-stream",
+            body: "event: message\ndata: {not-valid-json\n\n".into(),
+            extra_headers: Vec::new(),
+        });
+        let (url, _) = spawn_mock(state).await;
+
+        let t = make_transport(&url);
+        let err = t.request("anything", None).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("not a JSON-RPC message"),
+            "malformed SSE data must surface a JSON-RPC parse error; got: {msg}"
+        );
+    }
+
+    /// Stream ending with only notifications and no response event
+    /// must error (NOT hang, NOT return Null). Validates the EOF
+    /// branch.
+    #[tokio::test]
+    async fn http_sse_response_stream_ends_before_matching_response_errors() {
+        let state = MockServerState::default();
+        let body = format!(
+            "event: message\ndata: {}\n\n",
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/log",
+                "params": {"level": "info"}
+            })
+        );
+        state.push(ScriptedResponse {
+            status: StatusCode::OK,
+            content_type: "text/event-stream",
+            body,
             extra_headers: Vec::new(),
         });
         let (url, _) = spawn_mock(state).await;
@@ -665,13 +1004,86 @@ mod tests {
         let t = make_transport(&url);
         let err = t.request("tools/list", None).await.unwrap_err();
         let msg = format!("{err:#}");
-        // PR #81 updated the SSE rejection wording (dropped the
-        // "PR #77" reference now that the rest of audit #12 has
-        // shipped). The body MUST still surface the content-type so
-        // operators know why the request failed.
         assert!(
-            msg.contains("text/event-stream") && msg.to_lowercase().contains("deferred"),
-            "SSE rejection must mention text/event-stream + deferral; got: {msg}"
+            msg.contains("SSE stream ended"),
+            "stream-end-without-response must error explicitly; got: {msg}"
+        );
+    }
+
+    /// `Mcp-Session-Id` header on an SSE response must round-trip
+    /// identically to the JSON branch.
+    #[tokio::test]
+    async fn http_sse_response_session_id_round_trips() {
+        let state = MockServerState::default();
+        state.push(ScriptedResponse {
+            status: StatusCode::OK,
+            content_type: "text/event-stream",
+            body: format!(
+                "event: message\ndata: {}\n\n",
+                serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": "ok"})
+            ),
+            extra_headers: vec![("Mcp-Session-Id".into(), "session-from-sse-42".into())],
+        });
+        // Second request: must echo the captured session id.
+        state.push(MockServerState::json_ok(serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "result": "ok"
+        })));
+        let (url, recorder) = spawn_mock(state).await;
+
+        let t = make_transport(&url);
+        t.request("initialize", None).await.unwrap();
+        t.request("ping", None).await.unwrap();
+
+        let snap = recorder.snapshot();
+        let sid = snap[1]
+            .headers
+            .iter()
+            .find(|(k, _)| k == "mcp-session-id")
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("");
+        assert_eq!(
+            sid, "session-from-sse-42",
+            "session id captured from SSE response must echo on subsequent POST"
+        );
+    }
+
+    /// `handshake_complete` MUST NOT be set if the SSE response
+    /// errors out. Subsequent POSTs would otherwise send
+    /// `MCP-Protocol-Version` against a server that may not be in
+    /// a valid handshake state.
+    #[tokio::test]
+    async fn http_sse_response_handshake_complete_set_only_after_success() {
+        let state = MockServerState::default();
+        // First response: malformed JSON-RPC inside SSE → error.
+        state.push(ScriptedResponse {
+            status: StatusCode::OK,
+            content_type: "text/event-stream",
+            body: "event: message\ndata: not-valid-json\n\n".into(),
+            extra_headers: Vec::new(),
+        });
+        // Second response: well-formed.
+        state.push(MockServerState::json_ok(serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "result": "ok"
+        })));
+        let (url, recorder) = spawn_mock(state).await;
+
+        let t = make_transport(&url);
+        let _ = t.request("initialize", None).await.unwrap_err();
+        let _ = t.request("ping", None).await.unwrap();
+
+        let snap = recorder.snapshot();
+        // After the FIRST (failed) request, handshake_complete is
+        // still false → the SECOND request must NOT carry
+        // MCP-Protocol-Version. This validates the lens A risk #4
+        // invariant.
+        let pv = snap[1]
+            .headers
+            .iter()
+            .find(|(k, _)| k == "mcp-protocol-version")
+            .map(|(_, v)| v.as_str());
+        assert!(
+            pv.is_none(),
+            "MCP-Protocol-Version must NOT be sent after a failed first request; got: {pv:?}"
         );
     }
 
