@@ -9,9 +9,7 @@
 //! with a clear message so the LLM can retry intelligently.
 
 use super::registry::{McpRegistry, ServerStatus};
-use crate::tools::traits::{
-    SideEffectClass, Tool, ToolResult, ToolResultValue, TypedToolResult,
-};
+use crate::tools::traits::{SideEffectClass, Tool, ToolResult, ToolResultValue, TypedToolResult};
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -189,7 +187,9 @@ impl Tool for McpTool {
                     Ok(ToolResult {
                         success: false,
                         output: String::new(),
-                        error: Some(format!("MCP tool '{server}.{tool_name}' returned error: {body}")),
+                        error: Some(format!(
+                            "MCP tool '{server}.{tool_name}' returned error: {body}"
+                        )),
                     })
                 } else {
                     Ok(ToolResult {
@@ -205,10 +205,7 @@ impl Tool for McpTool {
         }
     }
 
-    async fn execute_typed(
-        &self,
-        args: serde_json::Value,
-    ) -> anyhow::Result<TypedToolResult> {
+    async fn execute_typed(&self, args: serde_json::Value) -> anyhow::Result<TypedToolResult> {
         let server = args
             .get("server")
             .and_then(|v| v.as_str())
@@ -305,7 +302,7 @@ mod tests {
     }
 
     async fn empty_registry() -> Arc<McpRegistry> {
-        Arc::new(McpRegistry::connect_all(&[], test_secret_store()).await)
+        Arc::new(McpRegistry::connect_all(&[], test_secret_store(), None).await)
     }
 
     #[tokio::test]
@@ -357,7 +354,7 @@ mod tests {
             startup_timeout_ms: 100,
             request_timeout_ms: 500,
         };
-        let registry = Arc::new(McpRegistry::connect_all(&[cfg], test_secret_store()).await);
+        let registry = Arc::new(McpRegistry::connect_all(&[cfg], test_secret_store(), None).await);
         let tool = McpTool::new(registry);
         let desc = tool.build_description();
         assert!(desc.contains("No MCP servers are currently connected"));

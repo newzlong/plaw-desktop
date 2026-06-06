@@ -483,9 +483,18 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     // are non-fatal — the registry reports them via `statuses()` and
     // the proxy tool's description surfaces availability to the LLM.
     if config.mcp.enabled {
+        // PR #81: thread the AuthService into McpRegistry so HttpTransport
+        // can refresh OAuth tokens on 401. The service is constructed
+        // fresh — AuthProfilesStore is cheap (PathBuf + bool) and the
+        // OpenAI / Gemini paths build their own copy too.
+        let mcp_auth_service = std::sync::Arc::new(crate::auth::AuthService::from_config(&config));
         let mcp_registry = std::sync::Arc::new(
-            crate::tools::mcp::McpRegistry::connect_all(&config.mcp.servers, secret_store.clone())
-                .await,
+            crate::tools::mcp::McpRegistry::connect_all(
+                &config.mcp.servers,
+                secret_store.clone(),
+                Some(mcp_auth_service),
+            )
+            .await,
         );
         let connected = mcp_registry.connected_count();
         let configured = mcp_registry.configured_count();

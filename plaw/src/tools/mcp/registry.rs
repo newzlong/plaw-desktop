@@ -54,11 +54,13 @@ impl McpRegistry {
     pub async fn connect_all(
         configs: &[McpServerConfig],
         secret_store: Arc<crate::security::SecretStore>,
+        auth_service: Option<Arc<crate::auth::AuthService>>,
     ) -> Self {
         let mut futures = Vec::with_capacity(configs.len());
         for cfg in configs {
             let cfg = cfg.clone();
             let secret_store = secret_store.clone();
+            let auth_service = auth_service.clone();
             futures.push(tokio::spawn(async move {
                 let allowed = compute_allow_set(&cfg.allowed_tools);
                 let startup_timeout = Duration::from_millis(cfg.startup_timeout_ms);
@@ -79,12 +81,17 @@ impl McpRegistry {
                         url,
                         bearer_token,
                         headers,
-                        // PR #79 foundations: `oauth` is parsed but
-                        // not yet consumed at the registry layer. The
-                        // ceremony lives in PR #80; transport-level
-                        // 401-recovery wiring lives in PR #81.
-                        oauth: _,
+                        oauth,
                     } => {
+                        // PR #81: when `[oauth]` is configured AND an
+                        // AuthService is available, thread both into
+                        // the transport so its 401 path can refresh
+                        // tokens via `get_valid_mcp_access_token`.
+                        let (oauth_svc, oauth_name) = if oauth.is_some() {
+                            (auth_service.clone(), Some(cfg.name.clone()))
+                        } else {
+                            (None, None)
+                        };
                         McpClient::connect_http(
                             &cfg.name,
                             url,
@@ -93,6 +100,8 @@ impl McpRegistry {
                             startup_timeout,
                             request_timeout,
                             secret_store.as_ref(),
+                            oauth_svc,
+                            oauth_name,
                         )
                         .await
                     }
@@ -235,7 +244,7 @@ mod tests {
 
     #[tokio::test]
     async fn connect_all_with_no_configs_yields_empty_registry() {
-        let reg = McpRegistry::connect_all(&[], test_secret_store()).await;
+        let reg = McpRegistry::connect_all(&[], test_secret_store(), None).await;
         assert_eq!(reg.connected_count(), 0);
         assert_eq!(reg.configured_count(), 0);
         assert!(reg.connected_names().is_empty());
@@ -255,7 +264,7 @@ mod tests {
             startup_timeout_ms: 200,
             request_timeout_ms: 1000,
         };
-        let reg = McpRegistry::connect_all(&[cfg], test_secret_store()).await;
+        let reg = McpRegistry::connect_all(&[cfg], test_secret_store(), None).await;
         assert_eq!(reg.connected_count(), 0);
         assert_eq!(reg.configured_count(), 1);
         match reg.status("ghost").expect("status present") {
@@ -287,7 +296,7 @@ mod tests {
             startup_timeout_ms: 300,
             request_timeout_ms: 500,
         };
-        let reg = McpRegistry::connect_all(&[cfg], test_secret_store()).await;
+        let reg = McpRegistry::connect_all(&[cfg], test_secret_store(), None).await;
         assert_eq!(reg.connected_count(), 0);
         assert_eq!(reg.configured_count(), 1);
         assert!(matches!(
@@ -298,7 +307,7 @@ mod tests {
 
     #[tokio::test]
     async fn is_tool_allowed_returns_false_for_unknown_server() {
-        let reg = McpRegistry::connect_all(&[], test_secret_store()).await;
+        let reg = McpRegistry::connect_all(&[], test_secret_store(), None).await;
         assert!(!reg.is_tool_allowed("ghost", "any_tool"));
     }
 }

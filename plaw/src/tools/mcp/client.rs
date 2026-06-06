@@ -73,6 +73,8 @@ impl McpClient {
         startup_timeout: Duration,
         request_timeout: Duration,
         secret_store: &SecretStore,
+        auth_service: Option<std::sync::Arc<crate::auth::AuthService>>,
+        oauth_server_name: Option<String>,
     ) -> Result<Self> {
         let server_name = server_name.into();
         let transport = HttpTransport::connect(
@@ -82,6 +84,8 @@ impl McpClient {
             headers,
             request_timeout,
             secret_store,
+            auth_service,
+            oauth_server_name,
         )?;
         Self::with_transport(
             server_name,
