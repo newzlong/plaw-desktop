@@ -55,18 +55,27 @@ impl McpRegistry {
         configs: &[McpServerConfig],
         secret_store: Arc<crate::security::SecretStore>,
         auth_service: Option<Arc<crate::auth::AuthService>>,
+        sandbox: Arc<dyn crate::security::Sandbox>,
     ) -> Self {
         let mut futures = Vec::with_capacity(configs.len());
         for cfg in configs {
             let cfg = cfg.clone();
             let secret_store = secret_store.clone();
             let auth_service = auth_service.clone();
+            let sandbox = sandbox.clone();
             futures.push(tokio::spawn(async move {
                 let allowed = compute_allow_set(&cfg.allowed_tools);
                 let startup_timeout = Duration::from_millis(cfg.startup_timeout_ms);
                 let request_timeout = Duration::from_millis(cfg.request_timeout_ms);
                 let result = match &cfg.transport {
                     crate::config::McpTransport::Stdio => {
+                        // PR #87: stdio MCP server subprocesses now flow
+                        // through the same Sandbox the gateway hands to
+                        // ShellTool / BrowserTool. On Windows that means
+                        // the MCP child is born into the WindowsJobObject's
+                        // Job Object — same KILL_ON_JOB_CLOSE +
+                        // PROCESS_MEMORY + PROCESS_TIME limits as shell
+                        // tool subprocesses (PR #77).
                         McpClient::connect(
                             &cfg.name,
                             &cfg.command,
@@ -74,6 +83,7 @@ impl McpRegistry {
                             &cfg.env,
                             startup_timeout,
                             request_timeout,
+                            sandbox.clone(),
                         )
                         .await
                     }
@@ -243,9 +253,16 @@ mod tests {
         ))
     }
 
+    /// PR #87: NoopSandbox helper for the new `sandbox` parameter on
+    /// `connect_all`. Tests that exercise the spawn path with a real
+    /// WindowsJobObjectSandbox live in a separate cfg-gated module.
+    fn test_sandbox() -> Arc<dyn crate::security::Sandbox> {
+        Arc::new(crate::security::NoopSandbox)
+    }
+
     #[tokio::test]
     async fn connect_all_with_no_configs_yields_empty_registry() {
-        let reg = McpRegistry::connect_all(&[], test_secret_store(), None).await;
+        let reg = McpRegistry::connect_all(&[], test_secret_store(), None, test_sandbox()).await;
         assert_eq!(reg.connected_count(), 0);
         assert_eq!(reg.configured_count(), 0);
         assert!(reg.connected_names().is_empty());
@@ -266,7 +283,7 @@ mod tests {
             request_timeout_ms: 1000,
             enable_notifications: false,
         };
-        let reg = McpRegistry::connect_all(&[cfg], test_secret_store(), None).await;
+        let reg = McpRegistry::connect_all(&[cfg], test_secret_store(), None, test_sandbox()).await;
         assert_eq!(reg.connected_count(), 0);
         assert_eq!(reg.configured_count(), 1);
         match reg.status("ghost").expect("status present") {
@@ -299,7 +316,7 @@ mod tests {
             request_timeout_ms: 500,
             enable_notifications: false,
         };
-        let reg = McpRegistry::connect_all(&[cfg], test_secret_store(), None).await;
+        let reg = McpRegistry::connect_all(&[cfg], test_secret_store(), None, test_sandbox()).await;
         assert_eq!(reg.connected_count(), 0);
         assert_eq!(reg.configured_count(), 1);
         assert!(matches!(
@@ -310,7 +327,7 @@ mod tests {
 
     #[tokio::test]
     async fn is_tool_allowed_returns_false_for_unknown_server() {
-        let reg = McpRegistry::connect_all(&[], test_secret_store(), None).await;
+        let reg = McpRegistry::connect_all(&[], test_secret_store(), None, test_sandbox()).await;
         assert!(!reg.is_tool_allowed("ghost", "any_tool"));
     }
 }

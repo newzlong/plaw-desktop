@@ -302,7 +302,15 @@ mod tests {
     }
 
     async fn empty_registry() -> Arc<McpRegistry> {
-        Arc::new(McpRegistry::connect_all(&[], test_secret_store(), None).await)
+        Arc::new(
+            McpRegistry::connect_all(
+                &[],
+                test_secret_store(),
+                None,
+                Arc::new(crate::security::NoopSandbox),
+            )
+            .await,
+        )
     }
 
     #[tokio::test]
@@ -353,8 +361,17 @@ mod tests {
             allowed_tools: vec!["*".into()],
             startup_timeout_ms: 100,
             request_timeout_ms: 500,
+            enable_notifications: false,
         };
-        let registry = Arc::new(McpRegistry::connect_all(&[cfg], test_secret_store(), None).await);
+        let registry = Arc::new(
+            McpRegistry::connect_all(
+                &[cfg],
+                test_secret_store(),
+                None,
+                Arc::new(crate::security::NoopSandbox),
+            )
+            .await,
+        );
         let tool = McpTool::new(registry);
         let desc = tool.build_description();
         assert!(desc.contains("No MCP servers are currently connected"));

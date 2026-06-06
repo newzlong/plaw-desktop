@@ -1681,6 +1681,11 @@ async fn mcp_test_run(config: &Config, name: &str) -> Result<()> {
     let request_timeout = std::time::Duration::from_millis(cfg.request_timeout_ms);
 
     println!("Connecting to MCP server '{name}' ...");
+    // PR #87: `plaw mcp test` builds its own one-shot sandbox so the
+    // diagnostic probe spawns the MCP server through the same Sandbox
+    // trait the gateway uses — exposing config mistakes (e.g. Job Object
+    // limits too tight) the same way a real run would.
+    let test_sandbox = crate::security::create_sandbox(&config.security);
     let client = match &cfg.transport {
         crate::config::McpTransport::Stdio => crate::tools::mcp::client::McpClient::connect(
             &cfg.name,
@@ -1689,6 +1694,7 @@ async fn mcp_test_run(config: &Config, name: &str) -> Result<()> {
             &cfg.env,
             startup_timeout,
             request_timeout,
+            test_sandbox.clone(),
         )
         .await
         .with_context(|| format!("connect failed for stdio server '{name}'"))?,

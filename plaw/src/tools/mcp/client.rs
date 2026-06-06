@@ -51,9 +51,11 @@ impl McpClient {
         env: &HashMap<String, String>,
         startup_timeout: Duration,
         request_timeout: Duration,
+        sandbox: std::sync::Arc<dyn crate::security::Sandbox>,
     ) -> Result<Self> {
         let server_name = server_name.into();
-        let transport = StdioTransport::spawn(server_name.clone(), command, args, env).await?;
+        let transport =
+            StdioTransport::spawn(server_name.clone(), command, args, env, sandbox).await?;
         Self::with_transport(
             server_name,
             Box::new(transport),
