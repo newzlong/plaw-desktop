@@ -594,6 +594,17 @@ impl BrowserTool {
         // output() waits for all pipe handles to close, but the daemon
         // (grandchild) inherits the CLI's pipe handles on Windows and
         // never closes them, causing output() to hang indefinitely.
+        //
+        // C-1.5 invariant (L-2): stdio MUST be set AFTER wrap_command.
+        // The Linux backends (bwrap/firejail/docker) do `*cmd =
+        // wrapper_cmd` inside wrap_command — any stdio configured on
+        // the original `cmd` BEFORE that swap is silently discarded.
+        // The PR #99 hotfix added a piped default inside those
+        // backends as a safety net for ShellTool + MCP stdio callers,
+        // but the right pattern is what this site already does: set
+        // stdio after wrap_command. Future contributors must NOT
+        // hoist stdio setup next to env setup at line 562 — doing so
+        // would silently revert this site to the C-1.5 bug shape.
         let mut child = cmd
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
