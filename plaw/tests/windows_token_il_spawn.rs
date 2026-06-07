@@ -14,7 +14,7 @@
 
 #![cfg(target_os = "windows")]
 
-use plaw::windows_token_il::{spawn_with_lowered_token, IntegrityLevel};
+use plaw::windows_token_il::{current_process_integrity, spawn_with_lowered_token, IntegrityLevel};
 
 fn probe_path() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_plaw-il-probe"))
@@ -123,8 +123,26 @@ fn spawn_probe_at_untrusted_applies_untrusted_il() {
 /// works at the same-level boundary — a sentinel against future
 /// refactors that accidentally optimize "level == current" into a
 /// short-circuit but break the spawn path.
+///
+/// PR #93 (audit #11 self-review M-5) added the parent-IL guard
+/// below. The test runner is normally at Medium IL on a typical
+/// developer workstation, but CI runners can run elevated (High)
+/// or under AppContainer / Win Sandbox (Low / Untrusted). In those
+/// cases the test would either false-fail (probe sees High and
+/// doesn't match Medium) or hang (Untrusted DLL init). The guard
+/// skips with a clear stderr message rather than appearing flaky.
 #[test]
 fn spawn_probe_at_medium_writes_medium_sid() {
+    let parent_il = current_process_integrity().expect("OpenProcessToken on self must succeed");
+    if parent_il != IntegrityLevel::Medium {
+        eprintln!(
+            "Skipping spawn_probe_at_medium_writes_medium_sid: \
+             parent IL is {parent_il:?}, test requires Medium. \
+             (Elevated session / AppContainer / Win Sandbox CI runner?)"
+        );
+        return;
+    }
+
     let tmp = tempfile::tempdir().expect("create tempdir");
     let out = tmp.path().join("probe-medium.txt");
 

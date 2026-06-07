@@ -10384,4 +10384,52 @@ root = "/tmp/my-project"
         }
         .is_empty());
     }
+
+    /// PR #93 (audit #11 self-review M-4): compile-time pin against
+    /// schema↔runtime enum drift.
+    ///
+    /// `SandboxIntegrityLevel` (this module) and
+    /// `crate::security::traits::IntegrityLevel` (the runtime
+    /// re-export of `windows_token_il::IntegrityLevel` on Windows)
+    /// MUST stay one-to-one in sync. The `to_runtime()` bridge is
+    /// the forward direction. This test pins the REVERSE direction
+    /// via an EXHAUSTIVE match — if a future contributor adds a 5th
+    /// variant to the runtime enum (e.g. `High` for elevated
+    /// processes), this match no longer compiles until they also
+    /// grow `SandboxIntegrityLevel` and update `to_runtime()`.
+    ///
+    /// Without this pin, schema/runtime drift goes unnoticed until
+    /// a downstream `match` somewhere panics with "non-exhaustive
+    /// patterns" in production. The whole point of this test is the
+    /// `match` body — the runtime assertions are belt-and-suspenders.
+    #[cfg(target_os = "windows")]
+    #[test]
+    async fn schema_enum_covers_every_runtime_variant() {
+        use crate::security::traits::IntegrityLevel as Rt;
+
+        // The compile-time pin: an exhaustive match on Rt. If a new
+        // Rt variant is added without a matching SandboxIntegrityLevel
+        // variant, this stops compiling.
+        fn schema_for(rt: Rt) -> SandboxIntegrityLevel {
+            match rt {
+                Rt::Default => SandboxIntegrityLevel::Default,
+                Rt::Medium => SandboxIntegrityLevel::Medium,
+                Rt::Low => SandboxIntegrityLevel::Low,
+                Rt::Untrusted => SandboxIntegrityLevel::Untrusted,
+            }
+        }
+
+        // Runtime confirm-the-mirror direction: every runtime variant
+        // round-trips through schema_for + to_runtime() to itself.
+        for rt in [Rt::Default, Rt::Medium, Rt::Low, Rt::Untrusted] {
+            let round_tripped = schema_for(rt).to_runtime();
+            assert_eq!(
+                round_tripped,
+                rt,
+                "runtime↔schema mirror broken for {rt:?}: \
+                 schema_for({rt:?}) → {:?} → to_runtime() → {round_tripped:?}",
+                schema_for(rt)
+            );
+        }
+    }
 }
