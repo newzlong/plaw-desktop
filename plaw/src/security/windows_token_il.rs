@@ -284,16 +284,48 @@ pub fn current_process_integrity() -> io::Result<IntegrityLevel> {
     let il_value: u32 = unsafe { *GetSidSubAuthority(sid, (sub_count - 1) as u32) };
 
     // 5. Map raw IL value → IntegrityLevel variant. Microsoft defines
-    //    these as SECURITY_MANDATORY_*_RID in winnt.h. Values that
-    //    don't match any well-known constant are treated as
-    //    "unrecognized — treat as Medium" because mapping to a
-    //    more-restrictive level would surface as a privilege error
-    //    that isn't the real issue.
+    //    these as SECURITY_MANDATORY_*_RID in winnt.h:
+    //    - 0x0000 SECURITY_MANDATORY_UNTRUSTED_RID
+    //    - 0x1000 SECURITY_MANDATORY_LOW_RID
+    //    - 0x2000 SECURITY_MANDATORY_MEDIUM_RID
+    //    - 0x3000 SECURITY_MANDATORY_HIGH_RID  (elevated)
+    //    - 0x4000 SECURITY_MANDATORY_SYSTEM_RID  (SYSTEM account)
+    //    - 0x5000 SECURITY_MANDATORY_PROTECTED_PROCESS_RID
+    //
+    //    Plaw doesn't model High/System/ProtectedProcess distinctly
+    //    because no lowering path uses them as a "from" level —
+    //    plaw-desktop runs unelevated by design. We downgrade them
+    //    to Medium with a `warn!` log so the operator sees the
+    //    elevation without silently broadening capabilities
+    //    (§3.5 fail-fast: a silent "we're Medium" lie when actually
+    //    High would mask a real elevation footgun).
+    //
+    //    True unknown values (0x6000+ or anything not in winnt.h)
+    //    surface as `io::Error` so the caller can decide. This was
+    //    previously a silent `_ => Medium` fallback fixed in audit #11
+    //    self-review M-2.
     let level = match il_value {
         0x0000 => IntegrityLevel::Untrusted,
         0x1000 => IntegrityLevel::Low,
         0x2000 => IntegrityLevel::Medium,
-        _ => IntegrityLevel::Medium,
+        0x3000 | 0x4000 | 0x5000 => {
+            tracing::warn!(
+                il_value = format_args!("0x{il_value:04X}"),
+                "process IL is elevated (High/System/ProtectedProcess); \
+                 reporting as Medium because plaw doesn't model elevated IL as a distinct variant. \
+                 If you intended to run plaw elevated, verify that any \
+                 `[security.sandbox.integrity]` lowering targets are correct."
+            );
+            IntegrityLevel::Medium
+        }
+        other => {
+            return Err(io::Error::other(format!(
+                "TOKEN_MANDATORY_LABEL returned unrecognized integrity level 0x{other:04X}; \
+                 expected one of 0x0000 (Untrusted) / 0x1000 (Low) / 0x2000 (Medium) / \
+                 0x3000 (High) / 0x4000 (System) / 0x5000 (ProtectedProcess) per winnt.h. \
+                 If this is a new Windows IL value, plaw needs an explicit mapping here."
+            )));
+        }
     };
     Ok(level)
 }
@@ -772,17 +804,24 @@ mod tests {
 
     #[test]
     fn current_process_integrity_returns_at_least_low() {
-        // The test runner is plaw's cargo-test binary running
-        // unelevated on a normal desktop session. It MUST observe
-        // at least Low IL (cargo wouldn't be able to read its own
-        // build cache otherwise). We don't pin to exactly Medium
-        // because CI runners + AppContainer + UAC-elevated dev
-        // shells produce different baselines.
+        // The test runner is plaw's cargo-test binary running on a
+        // normal desktop session. It MUST observe at least Low IL
+        // (cargo wouldn't be able to read its own build cache
+        // otherwise).
+        //
+        // Per audit #11 self-review M-2 (§3.5 fix): High / System /
+        // ProtectedProcess parents downgrade to Medium with a
+        // tracing::warn! log instead of silently lying about being
+        // Medium. So an elevated test runner now observes Medium +
+        // a log entry rather than a silent misreport. The `matches!`
+        // below still covers it because the downgrade lands on
+        // Medium.
         let observed =
             current_process_integrity().expect("OpenProcessToken on self should always succeed");
         assert!(
             matches!(observed, IntegrityLevel::Low | IntegrityLevel::Medium),
-            "expected Low or Medium IL for test runner, got {observed:?}"
+            "expected Low or Medium IL for test runner (High/System/ProtectedProcess \
+             downgrade to Medium per M-2), got {observed:?}"
         );
     }
 
