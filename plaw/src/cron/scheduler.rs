@@ -1,4 +1,3 @@
-use anyhow::Context as _;
 use crate::channels::{
     Channel, DiscordChannel, EmailChannel, MattermostChannel, QQChannel, SendMessage, SlackChannel,
     TelegramChannel,
@@ -9,6 +8,7 @@ use crate::cron::{
     update_job, CronJob, CronJobPatch, DeliveryConfig, JobType, Schedule, SessionTarget,
 };
 use crate::security::SecurityPolicy;
+use anyhow::Context as _;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures_util::{stream, StreamExt};
@@ -54,7 +54,14 @@ pub async fn run_with_notifier(
             }
         };
 
-        process_due_jobs(&config, &security, jobs, SCHEDULER_COMPONENT, notifier.as_deref()).await;
+        process_due_jobs(
+            &config,
+            &security,
+            jobs,
+            SCHEDULER_COMPONENT,
+            notifier.as_deref(),
+        )
+        .await;
     }
 }
 
@@ -388,12 +395,9 @@ pub(crate) async fn deliver_announcement(
                 .bot_token
                 .reveal(&secret_store)
                 .context("decrypt channels.telegram.bot_token for cron telegram send")?;
-            let channel = TelegramChannel::new(
-                bot_token,
-                tg.allowed_users.clone(),
-                tg.mention_only,
-            )
-            .with_workspace_dir(config.workspace_dir.clone());
+            let channel =
+                TelegramChannel::new(bot_token, tg.allowed_users.clone(), tg.mention_only)
+                    .with_workspace_dir(config.workspace_dir.clone());
             channel.send(&SendMessage::new(output, target)).await?;
         }
         "discord" => {
@@ -428,11 +432,8 @@ pub(crate) async fn deliver_announcement(
                 .bot_token
                 .reveal(&secret_store)
                 .context("decrypt channels.slack.bot_token for cron slack send")?;
-            let channel = SlackChannel::new(
-                bot_token,
-                sl.channel_id.clone(),
-                sl.allowed_users.clone(),
-            );
+            let channel =
+                SlackChannel::new(bot_token, sl.channel_id.clone(), sl.allowed_users.clone());
             channel.send(&SendMessage::new(output, target)).await?;
         }
         "mattermost" => {
@@ -467,11 +468,7 @@ pub(crate) async fn deliver_announcement(
                 .app_secret
                 .reveal(&secret_store)
                 .context("decrypt channels.qq.app_secret for cron qq send")?;
-            let channel = QQChannel::new(
-                qq.app_id.clone(),
-                app_secret,
-                qq.allowed_users.clone(),
-            );
+            let channel = QQChannel::new(qq.app_id.clone(), app_secret, qq.allowed_users.clone());
             channel.send(&SendMessage::new(output, target)).await?;
         }
         "email" => {
@@ -547,19 +544,55 @@ async fn run_job_command_with_timeout(
         );
     }
 
-    let child = match Command::new("sh")
-        .arg("-lc")
+    let mut cmd = Command::new("sh");
+    cmd.arg("-lc")
         .arg(&job.command)
         .current_dir(&config.workspace_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-    {
+        .kill_on_drop(true);
+
+    // CRIT-2 fix (workflow `w4cs72fjo`): cron's `sh -lc` spawn
+    // previously bypassed Sandbox::wrap_command entirely, despite
+    // SecurityPolicy already gating allowed commands above. An
+    // operator with `[security.sandbox] backend = "windows-job-object"
+    // | "bubblewrap" | "firejail" | "docker"` got the sandbox on
+    // interactive `shell` invocations (ShellTool PR #91) but NOT
+    // on scheduled cron jobs — which is worse because cron runs
+    // unattended without the interactive approval gate.
+    //
+    // Build the sandbox locally rather than threading through 21
+    // call sites: cron jobs are independent, so each gets its own
+    // Job Object lifetime (KILL_ON_JOB_CLOSE fires when this fn
+    // returns and the Arc drops). This matches the existing
+    // `kill_on_drop(true)` invariant above + resource caps still
+    // apply per child via the wrapper. Sandbox construction cost is
+    // ~μs; cron poll cadence is seconds-to-minutes so negligible.
+    let sandbox = crate::security::create_sandbox(&config.security);
+    if let Err(e) = sandbox.wrap_command(cmd.as_std_mut()) {
+        return (false, format!("sandbox wrap error: {e}"));
+    }
+
+    let child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => return (false, format!("spawn error: {e}")),
     };
+
+    // Post-spawn Job Object assignment on Windows (no-op elsewhere).
+    // Fail-soft per the shell.rs:592 + PR #87 pattern — log but let
+    // the child run rather than aborting an already-spawned job.
+    if let Some(pid) = child.id() {
+        if let Err(e) = sandbox.after_spawn(pid) {
+            tracing::warn!(
+                sandbox = sandbox.name(),
+                job_id = ?job.id,
+                pid,
+                error = %e,
+                "cron: post-spawn sandbox hook failed; child runs unrestricted"
+            );
+        }
+    }
 
     match time::timeout(timeout, child.wait_with_output()).await {
         Ok(Ok(output)) => {

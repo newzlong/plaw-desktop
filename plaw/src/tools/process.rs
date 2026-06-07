@@ -46,16 +46,32 @@ pub struct ProcessTool {
     syscall_detector: Option<Arc<SyscallAnomalyDetector>>,
     processes: Arc<RwLock<HashMap<usize, ProcessEntry>>>,
     next_id: Mutex<usize>,
+    /// CRIT-1 fix (workflow `w4cs72fjo`): ProcessTool is a sibling of
+    /// ShellTool with identical threat model (agent-supplied command
+    /// string reaches `Command::spawn`). ShellTool routes through
+    /// `Sandbox::spawn_with_integrity` per PR #91; ProcessTool
+    /// previously did not, so operators with
+    /// `[security.sandbox] backend = "windows-job-object"|"firejail"|
+    /// "bubblewrap"|"docker"` got Job Object / namespace isolation
+    /// on `shell` invocations but silent escape on background
+    /// `process` invocations. This field now plumbs the same sandbox.
+    sandbox: Arc<dyn crate::security::Sandbox>,
 }
 
 impl ProcessTool {
     pub fn new(security: Arc<SecurityPolicy>, runtime: Arc<dyn RuntimeAdapter>) -> Self {
-        Self::new_with_syscall_detector(security, runtime, None)
+        Self::new_with_syscall_detector(
+            security,
+            runtime,
+            Arc::new(crate::security::NoopSandbox),
+            None,
+        )
     }
 
     pub fn new_with_syscall_detector(
         security: Arc<SecurityPolicy>,
         runtime: Arc<dyn RuntimeAdapter>,
+        sandbox: Arc<dyn crate::security::Sandbox>,
         syscall_detector: Option<Arc<SyscallAnomalyDetector>>,
     ) -> Self {
         Self {
@@ -64,6 +80,7 @@ impl ProcessTool {
             syscall_detector,
             processes: Arc::new(RwLock::new(HashMap::new())),
             next_id: Mutex::new(0),
+            sandbox,
         }
     }
 
@@ -168,6 +185,26 @@ impl ProcessTool {
             }
         }
 
+        // CRIT-1 fix (workflow `w4cs72fjo`): route through Sandbox
+        // BEFORE spawn. Same pattern as PR #87
+        // (`tools/mcp/transport/stdio.rs:80` + `tools/browser.rs:585`)
+        // and PR #91 (`tools/shell.rs:657`). The synchronous form
+        // (wrap_command + spawn + after_spawn) is used here instead of
+        // the async `spawn_with_integrity` because handle_spawn is
+        // non-async and the background process is detached after
+        // spawn — the integrity-level wiring isn't needed here today
+        // (Phase 1c is opt-in for `shell` only per PR #91).
+        if let Err(e) = self.sandbox.wrap_command(cmd.as_std_mut()) {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!(
+                    "Failed to apply sandbox '{}' to process: {e}",
+                    self.sandbox.name()
+                )),
+            });
+        }
+
         let mut child = match cmd.spawn() {
             Ok(child) => child,
             Err(e) => {
@@ -180,6 +217,20 @@ impl ProcessTool {
         };
 
         let pid = child.id().unwrap_or(0);
+
+        // Post-spawn Job Object assignment on Windows (no-op on
+        // other backends). Fail-soft per the shell.rs:592 +
+        // PR #87 pattern — log a warning but let the child run.
+        if pid > 0 {
+            if let Err(e) = self.sandbox.after_spawn(pid) {
+                tracing::warn!(
+                    sandbox = self.sandbox.name(),
+                    pid,
+                    error = %e,
+                    "process tool: post-spawn sandbox hook failed; child runs unrestricted"
+                );
+            }
+        }
 
         // Set up background output readers.
         let stdout_buf = Arc::new(Mutex::new(OutputBuffer::default()));
@@ -861,6 +912,7 @@ mod tests {
         let tool = ProcessTool::new_with_syscall_detector(
             test_security(),
             test_runtime(),
+            Arc::new(crate::security::NoopSandbox),
             Some(test_syscall_detector(&tmp)),
         );
 
@@ -906,6 +958,78 @@ mod tests {
         assert_eq!(
             second_lines, first_lines,
             "incremental offsets should prevent duplicate detector emissions for unchanged output"
+        );
+    }
+
+    /// CRIT-1 regression (workflow `w4cs72fjo`): ProcessTool must
+    /// invoke `Sandbox::wrap_command` AND `Sandbox::after_spawn`
+    /// exactly once per `spawn` action, mirroring PR #87's
+    /// `shell_invokes_sandbox_wrap_command_on_execute` test for
+    /// ShellTool. Without this, operators with
+    /// `[security.sandbox] backend = "..."` silently escape the
+    /// sandbox on the `process` action while `shell` is honored —
+    /// the bug class workflow `w4cs72fjo` was launched to find.
+    #[tokio::test]
+    async fn process_invokes_sandbox_wrap_and_after_spawn_on_spawn() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct CountingSandbox {
+            wrap_count: Arc<AtomicU32>,
+            after_count: Arc<AtomicU32>,
+        }
+
+        impl crate::security::Sandbox for CountingSandbox {
+            fn wrap_command(&self, _cmd: &mut std::process::Command) -> std::io::Result<()> {
+                self.wrap_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            fn after_spawn(&self, _pid: u32) -> std::io::Result<()> {
+                self.after_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn name(&self) -> &str {
+                "counting"
+            }
+            fn description(&self) -> &str {
+                "test"
+            }
+        }
+
+        let wrap_count = Arc::new(AtomicU32::new(0));
+        let after_count = Arc::new(AtomicU32::new(0));
+        let sandbox: Arc<dyn crate::security::Sandbox> = Arc::new(CountingSandbox {
+            wrap_count: wrap_count.clone(),
+            after_count: after_count.clone(),
+        });
+        let tool =
+            ProcessTool::new_with_syscall_detector(test_security(), test_runtime(), sandbox, None);
+
+        // Spawn a short-lived process. action=spawn returns
+        // immediately with a process id; cleanup happens via tool
+        // drop / runtime kill_on_drop semantics.
+        // `echo` works on every platform's NativeRuntime adapter +
+        // is allowed under AutonomyLevel::Full (mirrors the existing
+        // `process_spawn_*` test commands at lines 657 / 672 / 691).
+        let _ = tool
+            .execute(json!({
+                "action": "spawn",
+                "command": "echo sandbox_wire_smoke"
+            }))
+            .await;
+
+        assert_eq!(
+            wrap_count.load(Ordering::SeqCst),
+            1,
+            "ProcessTool spawn must invoke sandbox.wrap_command EXACTLY once"
+        );
+        assert_eq!(
+            after_count.load(Ordering::SeqCst),
+            1,
+            "ProcessTool spawn must invoke sandbox.after_spawn EXACTLY once \
+             (fail-soft on error per shell.rs:592 pattern)"
         );
     }
 }

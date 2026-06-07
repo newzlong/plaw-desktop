@@ -404,6 +404,13 @@ fn all_tools_impl(
         tool_arcs.push(Arc::new(ProcessTool::new_with_syscall_detector(
             security.clone(),
             runtime.clone(),
+            // CRIT-1 fix (workflow `w4cs72fjo`): pass the same
+            // sandbox instance ShellTool already uses. Without
+            // this, ProcessTool's background spawn bypassed the
+            // sandbox entirely while ShellTool's foreground spawn
+            // honored it — silent inconsistency for operators with
+            // `[security.sandbox] backend = "..."`.
+            sandbox.clone(),
             Some(syscall_detector),
         )));
         tool_arcs.push(Arc::new(GitOperationsTool::new(
