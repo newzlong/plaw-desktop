@@ -280,11 +280,21 @@ impl Tool for ContentSearchTool {
             )
         };
 
-        // Security: clear environment, keep only safe variables
+        // Security: clear environment, keep only safe variables.
+        //
+        // H-1 fix (workflow `wcgdm48q5`): previously this site
+        // hardcoded ["PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE"]
+        // which (a) diverged from `ShellTool`'s allowlist + user
+        // `security.shell_env_passthrough` config, and (b) missed
+        // `PYTHONUTF8` / `PYTHONIOENCODING` / `CHCP` etc. that operators
+        // typically opt in to fix CJK mojibake on Windows consoles.
+        // Reusing `collect_allowed_shell_env_vars` keeps the two grep
+        // paths (shell `grep` invocation + this built-in fallback)
+        // consistent — operator config now reaches BOTH.
         cmd.env_clear();
-        for key in &["PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE"] {
-            if let Ok(val) = std::env::var(key) {
-                cmd.env(key, val);
+        for key in crate::tools::shell::collect_allowed_shell_env_vars(&self.security) {
+            if let Ok(val) = std::env::var(&key) {
+                cmd.env(&key, val);
             }
         }
 
