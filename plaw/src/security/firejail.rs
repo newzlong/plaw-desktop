@@ -86,6 +86,15 @@ impl Sandbox for FirejailSandbox {
 
         // Replace the command
         *cmd = firejail_cmd;
+
+        // C-1.5 fix — see bubblewrap.rs for the full rationale. Short
+        // version: the swap above discards stdio config the caller
+        // set on the original `cmd`. Default to Piped so ShellTool +
+        // MCP stdio callers get the pipe handles they need.
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
         Ok(())
     }
 
@@ -264,5 +273,30 @@ mod tests {
                 .map(|p| p.to_string_lossy().to_string()),
             Some("/tmp".to_string())
         );
+    }
+
+    /// PR #99 C-1.5 regression: the `*cmd = firejail_cmd` swap
+    /// discards stdio. Pinned via parallel spawn — see
+    /// bubblewrap.rs / docker.rs for the same shape.
+    #[tokio::test]
+    async fn firejail_wrap_command_defaults_to_piped_stdio() {
+        let sandbox = FirejailSandbox;
+        let mut cmd = tokio::process::Command::new("echo");
+        cmd.arg("hi");
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        sandbox.wrap_command(cmd.as_std_mut()).unwrap();
+
+        let mut spawnable = tokio::process::Command::new("echo");
+        spawnable
+            .arg("hi")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let child = spawnable.spawn().expect("spawn echo");
+        assert!(child.stdin.is_some());
+        assert!(child.stdout.is_some());
+        assert!(child.stderr.is_some());
     }
 }

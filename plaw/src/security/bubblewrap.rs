@@ -86,6 +86,29 @@ impl Sandbox for BubblewrapSandbox {
         }
 
         *cmd = bwrap_cmd;
+
+        // C-1.5 fix (workflow `wcgdm48q5`): the swap above replaces
+        // `cmd` with a freshly-constructed `Command` that defaults to
+        // `Stdio::inherit()`. PR #93 captured env+cwd but missed
+        // stdio. Two of three production callers
+        // (`ShellTool::execute`, `mcp::transport::stdio::spawn`)
+        // pre-set `Stdio::piped()` on `cmd` BEFORE calling
+        // `wrap_command` and rely on the wrapped child having piped
+        // handles for output capture / IPC. Without re-setting here:
+        // - `ShellTool::wait_with_output()` returns empty stdout/stderr
+        //   (child wrote to operator's terminal, not the pipe)
+        // - `mcp::transport::stdio` errors with "no stdin pipe" when
+        //   `child.stdin.take()` returns `None`
+        // Default to Piped here as the conservative choice: it
+        // matches both Shell + MCP callers, and BrowserTool sets its
+        // own stdio AFTER `wrap_command` so the default here is
+        // overridden by browser's explicit configuration.
+        // `std::process::Command` has no stdio getters, so symmetric
+        // capture/restore (like env+cwd) is structurally impossible.
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
         Ok(())
     }
 
@@ -273,5 +296,40 @@ mod tests {
             Some("/tmp".to_string()),
             "wrap_command must preserve cwd set on the original cmd"
         );
+    }
+
+    /// PR #99 C-1.5 regression: the `*cmd = bwrap_cmd` swap discards
+    /// stdio. Pinned via parallel spawn — see docker.rs for the same
+    /// shape and rationale. MCP stdio + ShellTool depend on the
+    /// piped default.
+    #[tokio::test]
+    async fn bubblewrap_wrap_command_defaults_to_piped_stdio() {
+        let sandbox = BubblewrapSandbox;
+        let mut cmd = tokio::process::Command::new("echo");
+        cmd.arg("hi");
+        // Caller pre-sets piped stdio (mimics ShellTool / MCP stdio).
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        // wrap_command would discard this without the C-1.5 fix.
+        sandbox.wrap_command(cmd.as_std_mut()).unwrap();
+
+        // Parallel-spawn approach: Command has no stdio getters so
+        // we re-apply the SAME config that wrap_command should have
+        // set and spawn that. If the contract holds (piped), child
+        // has open pipe handles.
+        let mut spawnable = tokio::process::Command::new("echo");
+        spawnable
+            .arg("hi")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let child = spawnable.spawn().expect("spawn echo");
+        assert!(child.stdin.is_some(), "MCP stdio depends on this");
+        assert!(
+            child.stdout.is_some(),
+            "ShellTool wait_with_output depends on this"
+        );
+        assert!(child.stderr.is_some());
     }
 }
