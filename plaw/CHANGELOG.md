@@ -32,6 +32,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `Default`, returns a clear deferred-feature error at non-`Default` until Phase 1c.2
     ships piped stdio for `CreateProcessAsUserW`. See `docs/config-reference.md` for the
     `[security.sandbox]` and `[security.sandbox.integrity]` reference.
+  - **Audit #11 self-review hotfix (PR #93)**: adversarial 4-lens self-review of the
+    Phase 1 stack surfaced 1 CRITICAL + 3 HIGH bugs, all addressed:
+    - **CRITICAL**: PR #91's trait refactor moved `Sandbox::wrap_command` from BEFORE
+      `ShellTool`'s `env_clear + env(SAFE_VARS)` block to AFTER it (inside
+      `Sandbox::spawn_with_integrity`'s default impl). Each Linux backend's
+      `*cmd = wrapper_cmd` swap then silently DISCARDED the carefully-built `PATH` /
+      `PYTHONUTF8` / `NODE_PATH` / `PLAYWRIGHT_BROWSERS_PATH` / etc. Users with
+      `[security.sandbox] backend = "bubblewrap"|"firejail"|"docker"` saw "bundled
+      python not found"-class breakage. Hotfix: each backend's `wrap_command` now
+      captures `get_envs() + get_current_dir()` BEFORE the swap and re-applies after.
+      Docker forwards via explicit `-e KEY=VALUE` flags (containers don't propagate
+      host env without them). Pinned by 3 regression tests.
+    - **HIGH**: `SandboxConfig::default()` emitted an empty `[integrity]` block on
+      `toml::to_string` round-trip — polluting user config diffs after upgrade. Fix:
+      `skip_serializing_if = "SandboxIntegrityConfig::is_empty"` on the field +
+      `Option::is_none` on inner fields.
+    - **HIGH**: PR #91 docstring promised `git_operations = "low"` worked but
+      `resolve()` only matched `"shell"` — silent operator intent drop. Fix:
+      `#[serde(deny_unknown_fields)]` on `SandboxIntegrityConfig` (typo'd or
+      unsupported per-tool keys now hard-error at parse) + docstring corrected to
+      "Override for `ShellTool` only".
+  - **Audit #11 defense-in-depth pins (PR #94)**: tests-only follow-up adding 3
+    regression pins surfaced by the same self-review:
+    - **H-1**: `IsProcessInJob` kernel-level assertion that Lowered-IL children are
+      actually assigned to the Job Object. Without this, a silent `after_spawn`
+      failure would leave the child UNRESTRAINED by KILL_ON_JOB_CLOSE + resource
+      caps + UI restrictions and the existing variant-only test stayed green.
+    - **M-4**: compile-time exhaustive `match` against schema↔runtime enum drift.
+      A future 5th runtime `IntegrityLevel` variant without a schema mirror stops
+      the build instead of silently mismatching production `match` patterns.
+    - **M-5**: parent-IL guard on `spawn_probe_at_medium_writes_medium_sid`.
+      Skips with a clear `eprintln!` on elevated or AppContainer CI runners
+      instead of false-failing or hanging.
+  - **Audit #11 docs (PR #92, #95)**:
+    - PR #92: `[security.sandbox]` + `[security.sandbox.integrity]` reference added
+      to `docs/config-reference.md` with default-OFF + Phase 1c.2 deferred-feature
+      note + per-level wire/behavior/usability table.
+    - PR #95: `docs/sandboxing.md` rewritten from stale "Proposal / Roadmap"
+      pseudocode to a Phase-0+1-shipped status doc with architecture diagram,
+      backend matrix, IL compatibility envelope, and explicit Phase 1c.2 + future
+      roadmap deferrals.
 - **Legacy XOR cipher migration**: The `enc:` prefix (XOR cipher) is now deprecated. 
   Secrets using this format will be automatically migrated to `enc2:` (ChaCha20-Poly1305 AEAD)
   when decrypted via `decrypt_and_migrate()`. A `tracing::warn!` is emitted when legacy
