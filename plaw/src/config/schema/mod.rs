@@ -4203,7 +4203,12 @@ pub struct SandboxConfig {
     /// wide Low IL would break first-run `cargo build` / `npm install`
     /// and users would disable sandboxing entirely (the Gatekeeper
     /// failure mode). Opt-in only.
-    #[serde(default)]
+    ///
+    /// `skip_serializing_if`: a default `SandboxIntegrityConfig` emits
+    /// nothing — keeps `toml::to_string(&SandboxConfig::default())`
+    /// round-trip clean for users who export their config back to
+    /// disk after a plaw upgrade.
+    #[serde(default, skip_serializing_if = "SandboxIntegrityConfig::is_empty")]
     pub integrity: SandboxIntegrityConfig,
 }
 
@@ -4224,19 +4229,31 @@ pub struct SandboxConfig {
 /// plan their TOML; flipping the runtime gate is a one-line change
 /// in Phase 1c.2.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SandboxIntegrityConfig {
     /// Fallback IL applied to any tool that doesn't have an explicit
     /// override. `None` = no lowering (current behavior).
-    #[serde(default)]
+    ///
+    /// `skip_serializing_if`: a `None` value emits nothing — paired
+    /// with the parent's `is_empty()` check this keeps the round-trip
+    /// of a default config byte-clean.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_level: Option<SandboxIntegrityLevel>,
 
-    /// Override for `ShellTool`. Set to `"low"` to run `shell` /
-    /// `git_operations` at Low IL — kernel-enforces write-deny on the
+    /// Override for `ShellTool` only. Set to `"low"` to run the
+    /// `shell` tool at Low IL — kernel-enforces write-deny on the
     /// user profile + most filesystem. **Requires Phase 1c.2** before
     /// shell output capture works at lowered IL; until then a non-
     /// `None` value here makes shell return an explicit deferred-
     /// feature error rather than silently disabling output capture.
-    #[serde(default)]
+    ///
+    /// Other tools currently ignore per-tool IL overrides. The
+    /// `git_operations`, `file_*`, and `browser` tools inherit
+    /// `default_level` only. `deny_unknown_fields` on this struct
+    /// makes typos like `git_operations = "low"` parse-fail loudly
+    /// instead of silently dropping the operator's intent — §3.5
+    /// fail-fast.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell: Option<SandboxIntegrityLevel>,
 }
 
@@ -4252,6 +4269,16 @@ impl SandboxIntegrityConfig {
         per_tool
             .or(self.default_level)
             .unwrap_or(SandboxIntegrityLevel::Default)
+    }
+
+    /// `true` when no per-tool override and no default_level is set —
+    /// i.e. the block resolves to `Default` for every tool. Used by
+    /// `SandboxConfig::integrity`'s `skip_serializing_if` to keep
+    /// `toml::to_string(&SandboxConfig::default())` from emitting an
+    /// empty `[integrity]` block that pollutes user config diffs after
+    /// a plaw upgrade.
+    pub fn is_empty(&self) -> bool {
+        self.default_level.is_none() && self.shell.is_none()
     }
 }
 
@@ -10274,5 +10301,87 @@ root = "/tmp/my-project"
                  Linux/macOS have no Token IL concept"
             );
         }
+    }
+
+    // ─── PR #91 hotfix: H-2 + H-3 regression pins ────────────────
+
+    /// H-2 regression: `SandboxConfig::default()` must round-trip
+    /// through `toml::to_string` WITHOUT emitting an empty
+    /// `[integrity]` block. Without this, every user who exports
+    /// their config back to disk after upgrading through PR #91 sees
+    /// surprise diff churn + snapshot-test breakage.
+    #[test]
+    async fn sandbox_config_default_round_trips_without_integrity_block() {
+        let emitted = toml::to_string(&SandboxConfig::default()).unwrap();
+        assert!(
+            !emitted.contains("[integrity]"),
+            "default SandboxConfig must not emit an empty [integrity] table; \
+             skip_serializing_if was missing. Got: {emitted}"
+        );
+        assert!(
+            !emitted.contains("integrity"),
+            "default SandboxConfig must not mention `integrity` at all. \
+             Got: {emitted}"
+        );
+    }
+
+    /// H-2 regression: a config that DOES set per-tool overrides
+    /// must still round-trip cleanly (only-non-empty fields emit).
+    #[test]
+    async fn sandbox_integrity_serializes_only_non_none_overrides() {
+        let cfg = SandboxIntegrityConfig {
+            default_level: None,
+            shell: Some(SandboxIntegrityLevel::Low),
+        };
+        let emitted = toml::to_string(&cfg).unwrap();
+        assert!(emitted.contains("shell"));
+        assert!(emitted.contains("low"));
+        // default_level = None must NOT serialize as `default_level = ...`.
+        assert!(
+            !emitted.contains("default_level"),
+            "None field must skip-serialize. Got: {emitted}"
+        );
+    }
+
+    /// H-3 regression: a typo'd or unsupported per-tool key (e.g.
+    /// `git_operations = "low"`) must hard-error at parse time
+    /// instead of silently dropping the operator's intent. §3.5
+    /// fail-fast. The PR #91 docstring promised support for
+    /// `git_operations`; that wasn't wired and operators would not
+    /// notice.
+    #[test]
+    async fn sandbox_integrity_rejects_unknown_per_tool_keys() {
+        let toml_in = r#"
+            shell = "low"
+            git_operations = "low"
+        "#;
+        let result: Result<SandboxIntegrityConfig, _> = toml::from_str(toml_in);
+        assert!(
+            result.is_err(),
+            "unknown per-tool key must hard-error, not silently drop. \
+             Got: {result:?}"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("git_operations") || err_msg.contains("unknown field"),
+            "error must name the offending key. Got: {err_msg}"
+        );
+    }
+
+    /// `is_empty()` returns true for a default, false when any field
+    /// is set. Pins the predicate that backs `skip_serializing_if`.
+    #[test]
+    async fn sandbox_integrity_is_empty_pins_skip_serializing_predicate() {
+        assert!(SandboxIntegrityConfig::default().is_empty());
+        assert!(!SandboxIntegrityConfig {
+            default_level: Some(SandboxIntegrityLevel::Low),
+            shell: None,
+        }
+        .is_empty());
+        assert!(!SandboxIntegrityConfig {
+            default_level: None,
+            shell: Some(SandboxIntegrityLevel::Low),
+        }
+        .is_empty());
     }
 }
