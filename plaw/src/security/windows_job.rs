@@ -182,7 +182,13 @@ impl WindowsJobObjectSandbox {
         // drop-kills-children contract is unchanged.
         let mut limit_info = ExtendedLimitInfo::new();
         limit_info.limit_kill_on_job_close();
-        let job = Job::create_with_limit_info(&mut limit_info)
+        // win32job 2.0's `Job::create_with_limit_info` reads but never
+        // mutates the ExtendedLimitInfo argument. The mut here was a
+        // clippy nit (needless_pass_by_ref_mut) flagged after PR #77 —
+        // safe to pass by shared reference. limit_info still needs to
+        // be `mut` above because `limit_kill_on_job_close()` itself
+        // does mutate.
+        let job = Job::create_with_limit_info(&limit_info)
             .map_err(|e| io::Error::other(format!("CreateJobObject failed: {e}")))?;
 
         // Step 2: apply the four PR-#77 extended limits via a direct

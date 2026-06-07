@@ -145,7 +145,11 @@ impl IntegrityLevel {
     /// Ordering by restrictiveness — higher values are MORE permissive.
     /// `Untrusted` < `Low` < `Medium`. `Default` panics because it is
     /// not orderable until resolved against the parent's IL.
-    fn rank(&self) -> u32 {
+    ///
+    /// Takes `self` by value because `IntegrityLevel` is `Copy` and
+    /// 1 byte. Clippy `trivially_copy_pass_by_ref` flagged the
+    /// previous `&self` signature.
+    fn rank(self) -> u32 {
         match self {
             Self::Untrusted => 0,
             Self::Low => 1,
@@ -160,7 +164,7 @@ impl IntegrityLevel {
     /// `target` from a process running at `self` is permitted without
     /// `SeImpersonatePrivilege` or other elevation). Backs
     /// [`validate_lowerable`].
-    fn permits_lowering_to(&self, target: Self) -> bool {
+    fn permits_lowering_to(self, target: Self) -> bool {
         target.rank() <= self.rank()
     }
 }
