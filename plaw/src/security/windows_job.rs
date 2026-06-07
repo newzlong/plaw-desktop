@@ -907,4 +907,94 @@ mod tests {
             "Default IL must produce Tokio variant"
         );
     }
+
+    /// PR #93 (audit #11 self-review H-1): kernel-level pin that a
+    /// non-`Default` IL spawn ACTUALLY assigns the child to the Job
+    /// Object. PR #90's existing
+    /// `spawn_with_integrity_at_low_returns_lowered_child` only
+    /// asserts the `SandboxedChild` variant — if `after_spawn` had
+    /// silently failed (e.g. fast-exiting child, future hardened
+    /// parent stripped of `PROCESS_SET_QUOTA`), the Lowered child
+    /// would run UNRESTRAINED by the Job Object's kill-on-close +
+    /// resource caps and the test would stay green. The triage
+    /// (workflow `w3yuy188q`) flagged this as the highest-leverage
+    /// defense-in-depth gap.
+    ///
+    /// Uses `IsProcessInJob(processHandle, jobHandle, &mut result)`
+    /// to query the kernel directly. Requires
+    /// `PROCESS_QUERY_LIMITED_INFORMATION` on the child handle —
+    /// which `OpenProcess` grants to any process the caller owns,
+    /// no special privilege.
+    #[tokio::test]
+    async fn spawn_with_integrity_at_low_assigns_child_to_job_object() {
+        use crate::security::traits::{IntegrityLevel, SandboxedChild};
+        use windows_sys::Win32::Foundation::{CloseHandle, FALSE};
+        use windows_sys::Win32::System::JobObjects::IsProcessInJob;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        let sandbox = WindowsJobObjectSandbox::new(defaults()).unwrap();
+        let cmd_exe = std::env::var_os("ComSpec")
+            .unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows\System32\cmd.exe"));
+        let mut cmd = tokio::process::Command::new(&cmd_exe);
+        // Use `ping -n 3` to keep the child alive for ~2s so we can
+        // query its Job Object membership before it exits. `ping`
+        // is universally present, doesn't write anywhere a Low-IL
+        // child can't reach, and is short enough that a hung test
+        // recovers quickly.
+        cmd.arg("/C").arg("ping 127.0.0.1 -n 3 >nul");
+
+        let child = sandbox
+            .spawn_with_integrity(cmd, IntegrityLevel::Low)
+            .await
+            .expect("Low-IL spawn must succeed");
+        let pid = match &child {
+            SandboxedChild::Lowered(c) => c.id(),
+            SandboxedChild::Tokio(_) => panic!("Low IL must return Lowered variant"),
+        };
+
+        // SAFETY: OpenProcess with PROCESS_QUERY_LIMITED_INFORMATION
+        // on a PID we just spawned. Returns null on failure; we check
+        // before using. CloseHandle exactly once after the query.
+        let process_handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) };
+        assert!(
+            !process_handle.is_null(),
+            "OpenProcess on freshly-spawned child PID {pid} must succeed; \
+             child may have exited too quickly"
+        );
+
+        // win32job's Job::handle() returns isize; cast to HANDLE (a
+        // *mut c_void in windows-sys).
+        let job_handle = sandbox.job.handle() as windows_sys::Win32::Foundation::HANDLE;
+        let mut in_job: i32 = 0;
+        // SAFETY: process_handle is owned and non-null; job_handle is
+        // owned by `sandbox` (lifetime covers this call); &mut in_job
+        // is a Sized POD output.
+        let ok = unsafe { IsProcessInJob(process_handle, job_handle, &mut in_job) };
+        // SAFETY: process_handle was obtained from OpenProcess and
+        // not closed elsewhere.
+        unsafe { CloseHandle(process_handle) };
+
+        assert!(
+            ok != 0,
+            "IsProcessInJob syscall failed: GetLastError={}",
+            std::io::Error::last_os_error()
+        );
+        assert!(
+            in_job != 0,
+            "Lowered child MUST be assigned to the Job Object — \
+             after_spawn silently failed and KILL_ON_JOB_CLOSE + \
+             resource caps + UI restrictions are bypassed for this \
+             child. See `WindowsJobObjectSandbox::spawn_with_integrity` \
+             Lowered branch."
+        );
+
+        // Let the child exit naturally so the test doesn't leave
+        // orphans. We don't care about the exit status — the
+        // IsProcessInJob assertion above is the load-bearing check.
+        if let SandboxedChild::Lowered(c) = child {
+            let _ = c.wait();
+        }
+    }
 }
