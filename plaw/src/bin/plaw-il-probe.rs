@@ -23,7 +23,7 @@ fn main() {
 
     let args: Vec<String> = std::env::args().collect();
     let Some(output_path) = args.get(1) else {
-        eprintln!("usage: plaw-il-probe <output-path>");
+        eprintln!("usage: plaw-il-probe <output-path | --stdout>");
         std::process::exit(2);
     };
 
@@ -34,6 +34,17 @@ fn main() {
             std::process::exit(3);
         }
     };
+
+    // `--stdout` mode: write the SID to stdout instead of a file. Used
+    // by the Phase 1c.2a piped-spawn tests, which spawn the probe
+    // DIRECTLY (no cmd.exe wrapper) at a lowered IL and read the SID
+    // back through the captured stdout pipe — proving the lowered token
+    // and the IOCP pipe capture work together. Spawning the probe
+    // directly avoids the cmd→grandchild handle-propagation quirk.
+    if output_path == "--stdout" {
+        println!("{sid}");
+        std::process::exit(0);
+    }
 
     match std::fs::File::create(output_path) {
         Ok(mut f) => {
