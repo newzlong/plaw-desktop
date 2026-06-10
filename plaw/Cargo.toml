@@ -210,6 +210,14 @@ windows-sys = { version = "0.61", features = [
     # SECURITY_MANDATORY_LABEL_AUTHORITY constant for building the
     # TOKEN_MANDATORY_LABEL we lower the child to.
     "Win32_Security_Authorization",
+    # Phase 1c.2a (Token IL piped stdio) — CreateFileW for the child's
+    # named-pipe write end (its stdout/stderr). The parent-read end is
+    # a tokio NamedPipeServer (IOCP-backed); the child end is a raw
+    # OPEN_EXISTING handle passed via the STARTUPINFOEXW handle list.
+    # InitializeProcThreadAttributeList / UpdateProcThreadAttribute /
+    # DeleteProcThreadAttributeList + STARTUPINFOEXW + DuplicateHandle
+    # already live under Win32_System_Threading / Win32_Foundation.
+    "Win32_Storage_FileSystem",
 ] }
 
 # USB device enumeration (hardware discovery) — only on platforms nusb supports

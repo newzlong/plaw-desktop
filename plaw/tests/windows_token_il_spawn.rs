@@ -14,10 +14,21 @@
 
 #![cfg(target_os = "windows")]
 
-use plaw::windows_token_il::{current_process_integrity, spawn_with_lowered_token, IntegrityLevel};
+use plaw::windows_token_il::{
+    current_process_integrity, spawn_with_lowered_token, spawn_with_lowered_token_piped,
+    IntegrityLevel,
+};
 
 fn probe_path() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_plaw-il-probe"))
+}
+
+/// Full path to cmd.exe. `CreateProcessAsUserW`'s lpApplicationName
+/// does NOT search PATH (unlike tokio's spawn), so piped tests must
+/// use the absolute path — same gotcha PR #90 documented.
+fn cmd_exe() -> std::ffi::OsString {
+    std::env::var_os("ComSpec")
+        .unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows\System32\cmd.exe"))
 }
 
 /// End-to-end regression for Low IL spawning. Spawn the probe at Low,
@@ -162,4 +173,145 @@ fn spawn_probe_at_medium_writes_medium_sid() {
     let sid = std::fs::read_to_string(&out)
         .expect("probe should have written its SID to the output path");
     assert_eq!(sid.trim(), IntegrityLevel::Medium.sid_string().unwrap(),);
+}
+
+// ─── Phase 1c.2a: piped-stdio spawn (named pipes + IOCP) ─────────────
+
+/// Drain a `LoweredChild`'s piped stdout to a String via IOCP.
+/// connect() completes the named-pipe handshake; read_to_end drains
+/// until the child's write end closes (on exit). Bounded by an outer
+/// `tokio::time::timeout` in each test.
+#[cfg(target_os = "windows")]
+async fn drain_stdout(child: &mut plaw::windows_token_il::LoweredChild) -> String {
+    use tokio::io::AsyncReadExt;
+    let mut server = child.take_stdout().expect("piped child must have stdout");
+    server.connect().await.expect("pipe connect");
+    let mut buf = Vec::new();
+    server.read_to_end(&mut buf).await.expect("read stdout");
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// THE Phase 1c.2a regression: a lowered-IL child's stdout is captured
+/// through the IOCP-backed named pipe end-to-end. Spawns `cmd /C echo`
+/// at Low IL and reads the echoed marker back from the pipe.
+///
+/// This is the capability ShellTool needs before Phase 1c.2c can lift
+/// its deferred-feature bail.
+#[tokio::test]
+async fn spawn_piped_at_low_captures_child_stdout() {
+    // Drain stderr concurrently so a chatty child can't deadlock on a
+    // full stderr pipe buffer (the classic 4 KiB pipe deadlock) — even
+    // though `echo` writes nothing to stderr, this models the real
+    // drain pattern.
+    let mut child = spawn_with_lowered_token_piped(
+        cmd_exe(),
+        &["/C".to_string(), "echo piped-low-marker".to_string()],
+        IntegrityLevel::Low,
+    )
+    .expect("piped Low-IL spawn must succeed for a Medium parent");
+
+    let mut stderr_server = child.take_stderr().expect("piped child must have stderr");
+    let stderr_drain = async move {
+        use tokio::io::AsyncReadExt;
+        stderr_server.connect().await.ok();
+        let mut b = Vec::new();
+        let _ = stderr_server.read_to_end(&mut b).await;
+        b
+    };
+
+    let out = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::join!(drain_stdout(&mut child), stderr_drain)
+    })
+    .await
+    .expect("piped read must not hang — IOCP path delivers child stdout");
+
+    assert!(
+        out.0.contains("piped-low-marker"),
+        "captured stdout must contain the child's echo marker; got {:?}",
+        out.0
+    );
+
+    // Reap the child so the test leaves no orphan.
+    let _ = child.wait();
+}
+
+/// The captured child genuinely runs at Low IL: the probe (spawned
+/// DIRECTLY, no cmd wrapper) queries its OWN token and prints the
+/// locale-invariant mandatory-label SID `S-1-16-4096` to the piped
+/// stdout. Proves the lowered token + the pipe capture work TOGETHER —
+/// not just that some child wrote to the pipe. Spawning the probe
+/// directly avoids the cmd→whoami grandchild handle-propagation quirk.
+#[tokio::test]
+async fn spawn_piped_at_low_child_token_is_low_il() {
+    let parent_il = current_process_integrity().expect("get parent IL");
+    if parent_il != IntegrityLevel::Medium {
+        eprintln!("Skipping: parent IL is {parent_il:?}, test requires Medium");
+        return;
+    }
+
+    let mut child = spawn_with_lowered_token_piped(
+        probe_path(),
+        &["--stdout".to_string()],
+        IntegrityLevel::Low,
+    )
+    .expect("piped Low-IL spawn must succeed");
+
+    let mut stderr_server = child.take_stderr().expect("stderr");
+    let stderr_drain = async move {
+        use tokio::io::AsyncReadExt;
+        stderr_server.connect().await.ok();
+        let mut b = Vec::new();
+        let _ = stderr_server.read_to_end(&mut b).await;
+    };
+
+    let (stdout, ()) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        tokio::join!(drain_stdout(&mut child), stderr_drain)
+    })
+    .await
+    .expect("probe pipe read must not hang");
+
+    assert_eq!(
+        stdout.trim(),
+        IntegrityLevel::Low.sid_string().unwrap(),
+        "probe's own-token SID read back through the captured pipe must \
+         be the Low mandatory-label SID (S-1-16-4096), proving the \
+         lowered token applied AND the capture works; got:\n{stdout}"
+    );
+
+    let _ = child.wait();
+}
+
+/// `spawn_with_lowered_token_piped` rejects `Default` at the front door
+/// (mirrors the non-piped path). Defense-in-depth against passing the
+/// Default sentinel through to the token machinery.
+#[tokio::test]
+async fn spawn_piped_rejects_default_level() {
+    let err = spawn_with_lowered_token_piped(
+        std::path::PathBuf::from("non-existent.exe"),
+        &[],
+        IntegrityLevel::Default,
+    )
+    .expect_err("Default must be rejected before any syscall");
+    assert!(
+        err.to_string().contains("Default"),
+        "rejection must name the Default sentinel; got {err}"
+    );
+}
+
+/// Called OUTSIDE a tokio runtime, the piped spawn fails fast with a
+/// typed error instead of panicking deep inside the IOCP reactor when
+/// `ServerOptions::create` runs. Plain `#[test]` = no ambient runtime.
+/// (Review S-2 hardening, CLAUDE.md §3.5 fail-fast.)
+#[test]
+fn spawn_piped_outside_runtime_errors_not_panics() {
+    let err = spawn_with_lowered_token_piped(
+        std::path::PathBuf::from("non-existent.exe"),
+        &[],
+        IntegrityLevel::Low,
+    )
+    .expect_err("must error (not panic) when no tokio runtime is present");
+    assert!(
+        err.to_string().contains("tokio runtime"),
+        "error must name the missing runtime; got {err}"
+    );
 }

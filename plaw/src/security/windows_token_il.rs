@@ -76,6 +76,27 @@
 
 #![cfg(target_os = "windows")]
 #![allow(unsafe_code)]
+// FFI-inherent clippy::pedantic lints suppressed module-wide. Every
+// occurrence is a direct consequence of calling Win32 `*W` APIs through
+// `windows-sys`, and the "house style" for this module (and the sibling
+// windows_job.rs) is bare `as` casts:
+//   - `ptr_as_ptr` / `ref_as_ptr` / `borrow_as_ptr`: raw-pointer
+//     constness/erasure casts (`p as *mut _`, `&s as *const _`) are how
+//     POD structs and buffers are handed to the FFI. `.cast()` /
+//     `addr_of!` would not improve safety, only churn.
+//   - `cast_possible_truncation`: the only `usize as u32` casts are
+//     `mem::size_of::<T>()` of fixed Win32 structs (SECURITY_ATTRIBUTES,
+//     STARTUPINFOEXW, TOKEN_MANDATORY_LABEL) — all far below u32::MAX, a
+//     compile-time constant. `u32::try_from(...).unwrap()` adds a
+//     never-taken panic path for no benefit.
+// Genuine smells (underscore-binding reads, needless `&mut`) are FIXED
+// in the code below, not allowed here.
+#![allow(
+    clippy::ptr_as_ptr,
+    clippy::ref_as_ptr,
+    clippy::borrow_as_ptr,
+    clippy::cast_possible_truncation
+)]
 
 use std::io;
 
@@ -623,10 +644,17 @@ fn append_argv_token(acc: &mut String, token: &str) {
 /// returns the OS process id; `wait()` consumes self and returns
 /// `ExitStatus`; `kill()` consumes self and force-terminates.
 ///
+/// Lifecycle note: dropping a `LoweredChild` does NOT kill the child —
+/// it only closes the parent's handles (the child keeps running). Use
+/// [`Self::wait`] to reap it or [`Self::kill`] to terminate it. (The
+/// spawn-time orphan window is handled separately by an internal
+/// kill-on-drop guard, disarmed once the child is fully constructed.)
+/// A future phase may add kill-on-cancel ergonomics when a caller
+/// needs them.
+///
 /// NOT a `tokio::process::Child` — `Child` has no public constructor
-/// for adopting a foreign handle. Lens D flagged this as the highest-
-/// risk API design; we ship a minimal newtype now and revisit tokio
-/// integration in Phase 1b if any caller actually needs async waits.
+/// for adopting a foreign handle. We ship a minimal newtype now and
+/// revisit tokio integration if any caller actually needs async waits.
 #[derive(Debug)]
 pub struct LoweredChild {
     /// PROCESS_INFORMATION.hProcess — used by WaitForSingleObject +
@@ -638,6 +666,14 @@ pub struct LoweredChild {
     /// PROCESS_INFORMATION.dwProcessId — stable across the child's
     /// lifetime; safe to expose even after the process exits.
     pid: u32,
+    /// Phase 1c.2a: parent-read end of the child's stdout pipe, IOCP-
+    /// backed via tokio. `None` for the non-piped
+    /// [`spawn_with_lowered_token`] path; `Some` only for
+    /// [`spawn_with_lowered_token_piped`]. Taken via
+    /// [`Self::take_stdout`].
+    stdout: Option<tokio::net::windows::named_pipe::NamedPipeServer>,
+    /// Parent-read end of the child's stderr pipe. See `stdout`.
+    stderr: Option<tokio::net::windows::named_pipe::NamedPipeServer>,
 }
 
 impl LoweredChild {
@@ -645,6 +681,34 @@ impl LoweredChild {
     /// the `LoweredChild` value. Matches `Child::id()` from std.
     pub fn id(&self) -> u32 {
         self.pid
+    }
+
+    /// Take the parent-read end of the child's stdout pipe, if this
+    /// child was spawned via [`spawn_with_lowered_token_piped`].
+    /// Returns `None` for the non-piped path or after a prior take.
+    ///
+    /// The returned `NamedPipeServer` is IOCP-backed. Usage:
+    /// 1. `server.connect().await` ONCE — this completes the named-pipe
+    ///    server-side connection handshake (the child opening its write
+    ///    end is not sufficient; without `connect()` the first read
+    ///    hangs).
+    /// 2. read with `AsyncReadExt` until EOF (the child's write end
+    ///    closes on exit).
+    ///
+    /// IMPORTANT: if you take BOTH stdout and stderr, you MUST drain
+    /// them CONCURRENTLY (e.g. `tokio::join!`). A child that fills the
+    /// stderr pipe buffer (~bounded) while the parent is blocked
+    /// reading stdout to completion will deadlock. The integration
+    /// tests model the safe pattern.
+    pub fn take_stdout(&mut self) -> Option<tokio::net::windows::named_pipe::NamedPipeServer> {
+        self.stdout.take()
+    }
+
+    /// Take the parent-read end of the child's stderr pipe. See
+    /// [`Self::take_stdout`] — including the concurrent-drain
+    /// requirement when both ends are taken.
+    pub fn take_stderr(&mut self) -> Option<tokio::net::windows::named_pipe::NamedPipeServer> {
+        self.stderr.take()
     }
 
     /// Block until the child exits and return its `ExitStatus`.
@@ -777,11 +841,490 @@ pub fn spawn_with_lowered_token<P: AsRef<Path>>(
         process,
         _thread: thread,
         pid: pi.dwProcessId,
+        stdout: None,
+        stderr: None,
     })
 }
 
 // Bring AsRawHandle into scope for the spawn fn body.
 use std::os::windows::io::AsRawHandle;
+
+// ─── Phase 1c.2a: piped-stdio spawn (named pipes + STARTUPINFOEXW) ───
+//
+// The non-piped `spawn_with_lowered_token` above is byte-identical to
+// PR #89. `spawn_with_lowered_token_piped` below captures the child's
+// stdout/stderr through IOCP-backed tokio named pipes so a caller can
+// read the lowered-IL child's output (which `ShellTool` needs before
+// Phase 1c.2c can lift its deferred-feature bail).
+//
+// Why named pipes, not CreatePipe (the obvious choice):
+//   tokio 1.x's `ChildStdout::from_std` / `tokio::fs::File` route every
+//   `poll_read` through `Blocking::new` (a spawn_blocking task) on
+//   Windows, regardless of FILE_FLAG_OVERLAPPED — confirmed by reading
+//   tokio's src/process/windows.rs. Under blocking-pool pressure that
+//   deadlocks (the wait task + drain tasks all contend for the 512
+//   default slots). `tokio::net::windows::named_pipe::NamedPipeServer`
+//   is the ONLY tokio stdio primitive that uses the IOCP reactor. The
+//   full data path was validated end-to-end by a standalone spike
+//   (see project_phase_1c2_locked_findings memo, "Spike C").
+//
+// Five new unsafe call-site classes vs the non-piped path:
+//   8.  CreateFileW — open each child pipe write end (its stdout/stderr)
+//       and the NUL device for stdin.
+//   9.  DuplicateHandle (+ GetCurrentProcess pseudo-handle) — mint an
+//       inheritable copy of each child-end handle, deferring
+//       inheritability to just before spawn (refute #8).
+//   10. InitializeProcThreadAttributeList / UpdateProcThreadAttribute /
+//       DeleteProcThreadAttributeList — STARTUPINFOEXW handle whitelist
+//       so the child inherits ONLY the 3 stdio handles, not every
+//       inheritable handle in the parent (refute #8 hardening).
+//   11. CreateProcessAsUserW with EXTENDED_STARTUPINFO_PRESENT +
+//       CREATE_NO_WINDOW (refute #4) — spawn with the lowered token,
+//       the handle list, and no inherited console.
+// Each shares the established SAFETY-comment pattern: Sized POD structs,
+// return-value-checked syscalls, handles RAII-closed.
+
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+/// Per-process counter to disambiguate concurrent pipe names. Combined
+/// with the OS pid + stream tag this is unique system-wide (different
+/// plaw processes have different pids; within a process the counter +
+/// tag disambiguate, and `first_pipe_instance(true)` turns any residual
+/// collision into a hard error rather than a silent share).
+static PIPE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// RAII wrapper over a `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` attribute
+/// list. Holds the heap buffer + keeps the handle array alive for the
+/// duration of `CreateProcessAsUserW` (the kernel reads both through
+/// raw pointers). `Drop` calls `DeleteProcThreadAttributeList`.
+struct HandleInheritAttrList {
+    /// Heap buffer sized by `InitializeProcThreadAttributeList`.
+    buf: Vec<u8>,
+    /// The handle array the attribute list points INTO. Must outlive
+    /// the spawn call — the attribute stores a pointer to this Vec's
+    /// backing store, not a copy. Read only for its address.
+    handles: Vec<windows_sys::Win32::Foundation::HANDLE>,
+    initialized: bool,
+}
+
+impl HandleInheritAttrList {
+    /// Build an attribute list whitelisting exactly `handles` for
+    /// child inheritance. `handles` must all carry `HANDLE_FLAG_INHERIT`
+    /// (the caller guarantees this) and must not be pseudo-handles.
+    fn new(handles: Vec<windows_sys::Win32::Foundation::HANDLE>) -> io::Result<Self> {
+        use windows_sys::Win32::Foundation::GetLastError;
+        use windows_sys::Win32::System::Threading::{
+            InitializeProcThreadAttributeList, UpdateProcThreadAttribute,
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+        };
+
+        // First call (NULL buffer) returns the required size in `size`.
+        // It is DOCUMENTED to fail with ERROR_INSUFFICIENT_BUFFER — we
+        // ignore the bool and read `size`.
+        let mut size: usize = 0;
+        // SAFETY: NULL list + count 1 + &mut size (Sized POD) is the
+        // documented sizing call.
+        unsafe {
+            InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut size);
+        }
+        if size == 0 {
+            return Err(io::Error::other(
+                "InitializeProcThreadAttributeList sizing returned zero",
+            ));
+        }
+        let mut me = Self {
+            buf: vec![0u8; size],
+            handles,
+            initialized: false,
+        };
+        // Second call fills the allocated buffer.
+        // SAFETY: buf has `size` writable bytes; &mut size is a Sized POD.
+        let ok = unsafe {
+            InitializeProcThreadAttributeList(me.buf.as_mut_ptr() as *mut _, 1, 0, &mut size)
+        };
+        if ok == 0 {
+            return Err(io::Error::from_raw_os_error(
+                unsafe { GetLastError() } as i32
+            ));
+        }
+        me.initialized = true;
+
+        // Attach the handle whitelist. The attribute stores a POINTER
+        // to `handles`' backing buffer — which is why `handles` is
+        // owned by `self` and lives until Drop.
+        let bytes = std::mem::size_of_val(&me.handles[..]);
+        // SAFETY: buf is an initialized attribute list; handles is a
+        // live array of `bytes` bytes; PROC_THREAD_ATTRIBUTE_HANDLE_LIST
+        // is the documented attribute id.
+        let ok = unsafe {
+            UpdateProcThreadAttribute(
+                me.buf.as_mut_ptr() as *mut _,
+                0,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                me.handles.as_ptr() as *const _,
+                bytes,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::from_raw_os_error(
+                unsafe { GetLastError() } as i32
+            ));
+        }
+        Ok(me)
+    }
+
+    /// Pointer to the attribute list for `STARTUPINFOEXW.lpAttributeList`.
+    fn as_ptr(&mut self) -> *mut std::ffi::c_void {
+        self.buf.as_mut_ptr() as *mut _
+    }
+}
+
+impl Drop for HandleInheritAttrList {
+    fn drop(&mut self) {
+        if self.initialized {
+            use windows_sys::Win32::System::Threading::DeleteProcThreadAttributeList;
+            // SAFETY: buf was initialized by InitializeProcThreadAttributeList
+            // and is deleted exactly once here.
+            unsafe {
+                DeleteProcThreadAttributeList(self.buf.as_mut_ptr() as *mut _);
+            }
+        }
+    }
+}
+
+/// RAII guard that force-terminates a freshly-spawned child if the
+/// spawn function returns early (e.g. a pipe-adoption error after
+/// `CreateProcessAsUserW` already succeeded). Without this the child
+/// would orphan: its process handle drops, but it keeps running
+/// UNMANAGED — the caller's Job Object assignment happens only AFTER
+/// `spawn_with_lowered_token_piped` returns Ok, so KILL_ON_JOB_CLOSE
+/// never fires for the orphan (refute #7). `disarm()` is called once
+/// the function commits to returning Ok.
+struct KillOnDrop {
+    process: windows_sys::Win32::Foundation::HANDLE,
+    armed: bool,
+}
+
+impl KillOnDrop {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            use windows_sys::Win32::System::Threading::TerminateProcess;
+            // SAFETY: process is a live handle owned by the spawning fn
+            // until this guard drops; TerminateProcess on it is safe.
+            unsafe {
+                TerminateProcess(self.process, 1);
+            }
+        }
+    }
+}
+
+/// Create one stdio pipe: a tokio `NamedPipeServer` for the parent to
+/// read, and an inheritable raw `OwnedHandle` for the child to write
+/// (its stdout or stderr). `tag` distinguishes "out"/"err" in the pipe
+/// name. The child end is created NON-inheritable then `DuplicateHandle`-d
+/// into an inheritable copy, minimizing the window where a globally-
+/// inheritable handle exists (refute #8).
+///
+/// Returns `(parent_read_server, child_write_inheritable)`.
+fn create_lowered_stdio_pipe(
+    tag: &str,
+) -> io::Result<(
+    tokio::net::windows::named_pipe::NamedPipeServer,
+    OwnedHandle,
+)> {
+    use tokio::net::windows::named_pipe::ServerOptions;
+    use windows_sys::Win32::Foundation::{
+        DuplicateHandle, GetLastError, DUPLICATE_SAME_ACCESS, HANDLE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId};
+
+    // Unique pipe name. pid + seq + tag is unique system-wide.
+    // SAFETY: GetCurrentProcessId takes no args and cannot fail.
+    let pid = unsafe { GetCurrentProcessId() };
+    let seq = PIPE_SEQ.fetch_add(1, AtomicOrdering::Relaxed);
+    let name = format!(r"\\.\pipe\plaw-il-{pid}-{tag}-{seq}");
+
+    // Parent-read end: tokio ServerOptions IS CreateNamedPipeW with
+    // FILE_FLAG_OVERLAPPED + registers with the IOCP reactor.
+    // access_inbound(true) = server reads (child writes its stdout).
+    // reject_remote_clients(true) blocks network clients. The default
+    // local DACL grants creator + SYSTEM + admins only (not arbitrary
+    // local users) — adequate for plaw-desktop's single-user model; a
+    // full per-user SDDL is a deferred hardening (would require raw
+    // CreateNamedPipeW + from_raw_handle adoption, more unsafe surface).
+    let server = ServerOptions::new()
+        .access_inbound(true)
+        .access_outbound(false)
+        .first_pipe_instance(true)
+        .reject_remote_clients(true)
+        .create(&name)?;
+
+    // Child-write end: CreateFileW with a NON-inheritable SA. We make
+    // it inheritable only via the DuplicateHandle below, right before
+    // the spawn, to minimize the inherit window.
+    let name_w = wide_z(OsStr::new(&name));
+    let sa = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: std::ptr::null_mut(),
+        bInheritHandle: 0, // FALSE — non-inheritable base
+    };
+    // SAFETY: name_w is a live NUL-terminated wide string; &sa is a
+    // Sized POD CreateFileW reads but does not mutate. Returns
+    // INVALID_HANDLE_VALUE on failure (checked).
+    let child_raw: HANDLE = unsafe {
+        CreateFileW(
+            name_w.as_ptr(),
+            windows_sys::Win32::Foundation::GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            &sa,
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    if child_raw == INVALID_HANDLE_VALUE {
+        return Err(io::Error::from_raw_os_error(
+            unsafe { GetLastError() } as i32
+        ));
+    }
+    // Adopt the non-inheritable base into RAII so it closes when we
+    // replace it with the inheritable duplicate below.
+    // SAFETY: child_raw is fresh + unaliased from CreateFileW.
+    let child_base = unsafe { OwnedHandle::from_raw_handle(child_raw as _) };
+
+    // DuplicateHandle → inheritable copy. `bInheritHandle = TRUE` here.
+    let mut child_inheritable: HANDLE = INVALID_HANDLE_VALUE;
+    // SAFETY: GetCurrentProcess() pseudo-handle; child_raw is live;
+    // &mut child_inheritable is a Sized POD out-param.
+    let ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            child_raw,
+            GetCurrentProcess(),
+            &mut child_inheritable,
+            0,
+            1, // bInheritHandle = TRUE
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::from_raw_os_error(
+            unsafe { GetLastError() } as i32
+        ));
+    }
+    // Close the non-inheritable base now that we have the inheritable
+    // duplicate; only the inheritable copy goes to the child + the
+    // handle list.
+    drop(child_base);
+    // SAFETY: child_inheritable is fresh + unaliased from DuplicateHandle.
+    let child_owned = unsafe { OwnedHandle::from_raw_handle(child_inheritable as _) };
+
+    Ok((server, child_owned))
+}
+
+/// Spawn `program`/`args` at the lowered integrity `level` with stdout
+/// and stderr captured through IOCP-backed tokio named pipes. The
+/// returned [`LoweredChild`] has `Some` stdout/stderr taken via
+/// [`LoweredChild::take_stdout`] / [`LoweredChild::take_stderr`].
+///
+/// MUST be called from within a tokio runtime (the `NamedPipeServer`
+/// registers with the reactor). stdin is connected to the NUL device
+/// (the child sees immediate EOF) — matching `ShellTool`'s existing
+/// `Stdio::null()` for stdin; a future PR can add a stdin feeder if a
+/// caller needs one (YAGNI per §3.2).
+///
+/// Errors mirror [`spawn_with_lowered_token`] plus pipe-creation and
+/// attribute-list failures. On any error AFTER `CreateProcessAsUserW`
+/// succeeds, the child is force-terminated (KillOnDrop guard) so it
+/// never orphans before the caller can assign it to a Job Object.
+pub fn spawn_with_lowered_token_piped<P: AsRef<Path>>(
+    program: P,
+    args: &[String],
+    level: IntegrityLevel,
+) -> io::Result<LoweredChild> {
+    use windows_sys::Win32::Foundation::{GetLastError, HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::Threading::{
+        CreateProcessAsUserW, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT,
+        EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    };
+
+    if matches!(level, IntegrityLevel::Default) {
+        return Err(io::Error::other(
+            "spawn_with_lowered_token_piped: caller must resolve IntegrityLevel::Default before invoking",
+        ));
+    }
+    // Fail fast (§3.5) if there is no tokio runtime: `ServerOptions::create`
+    // below registers the named pipe with the IOCP reactor and PANICS
+    // outside a runtime. Convert that panic into a typed error so a
+    // mis-wired (non-async) caller gets a clear message instead of an
+    // opaque reactor panic deep in tokio.
+    if tokio::runtime::Handle::try_current().is_err() {
+        return Err(io::Error::other(
+            "spawn_with_lowered_token_piped: must be called within a tokio runtime \
+             (the captured stdio pipes are IOCP-backed and need the reactor)",
+        ));
+    }
+    let token = duplicate_current_token_lowered(level)?;
+
+    // 1. Create the two output pipes (parent-read server + inheritable
+    //    child-write end). stdin → NUL device (CreateFileW on "NUL").
+    let (stdout_server, stdout_child) = create_lowered_stdio_pipe("out")?;
+    let (stderr_server, stderr_child) = create_lowered_stdio_pipe("err")?;
+
+    // stdin: open the NUL device so the child has a valid
+    // (immediately-EOF) stdin without us feeding it. Mirror the
+    // stdout/stderr inherit-window discipline (refute #8): create
+    // NON-inheritable, then DuplicateHandle to an inheritable copy just
+    // before the spawn — never leave a globally-inheritable handle
+    // lying around longer than necessary, even for the harmless NUL
+    // device. The handle whitelist already scopes inheritance to these
+    // 3 handles, so this is defense-in-depth + symmetry, not a fix for
+    // a live leak.
+    let nul_w = wide_z(OsStr::new("NUL"));
+    let sa_noinherit = windows_sys::Win32::Security::SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<windows_sys::Win32::Security::SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: std::ptr::null_mut(),
+        bInheritHandle: 0, // FALSE — non-inheritable base
+    };
+    // SAFETY: nul_w live wide string; &sa_noinherit Sized POD CreateFileW
+    // reads but does not mutate.
+    let stdin_raw: HANDLE = unsafe {
+        CreateFileW(
+            nul_w.as_ptr(),
+            windows_sys::Win32::Foundation::GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            &sa_noinherit,
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    if stdin_raw == INVALID_HANDLE_VALUE {
+        return Err(io::Error::from_raw_os_error(
+            unsafe { GetLastError() } as i32
+        ));
+    }
+    // SAFETY: fresh unaliased handle from CreateFileW.
+    let stdin_base = unsafe { OwnedHandle::from_raw_handle(stdin_raw as _) };
+    let mut stdin_inheritable: HANDLE = INVALID_HANDLE_VALUE;
+    // SAFETY: GetCurrentProcess() pseudo-handle; stdin_raw live; &mut
+    // out-param is a Sized POD. bInheritHandle = TRUE on the duplicate.
+    let ok = unsafe {
+        windows_sys::Win32::Foundation::DuplicateHandle(
+            windows_sys::Win32::System::Threading::GetCurrentProcess(),
+            stdin_raw,
+            windows_sys::Win32::System::Threading::GetCurrentProcess(),
+            &mut stdin_inheritable,
+            0,
+            1, // bInheritHandle = TRUE
+            windows_sys::Win32::Foundation::DUPLICATE_SAME_ACCESS,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::from_raw_os_error(
+            unsafe { GetLastError() } as i32
+        ));
+    }
+    drop(stdin_base);
+    // SAFETY: fresh unaliased handle from DuplicateHandle.
+    let stdin_child = unsafe { OwnedHandle::from_raw_handle(stdin_inheritable as _) };
+
+    // 2. Build the STARTUPINFOEXW handle whitelist: ONLY these three
+    //    handles inherit, nothing else in the parent (refute #8).
+    let stdin_h = stdin_child.as_raw_handle() as HANDLE;
+    let stdout_h = stdout_child.as_raw_handle() as HANDLE;
+    let stderr_h = stderr_child.as_raw_handle() as HANDLE;
+    let mut attr_list = HandleInheritAttrList::new(vec![stdin_h, stdout_h, stderr_h])?;
+
+    let mut six: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
+    six.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+    six.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    six.StartupInfo.hStdInput = stdin_h;
+    six.StartupInfo.hStdOutput = stdout_h;
+    six.StartupInfo.hStdError = stderr_h;
+    six.lpAttributeList = attr_list.as_ptr();
+
+    let program_wide = wide_z(program.as_ref().as_os_str());
+    let mut cmd_line = build_command_line(program.as_ref().as_os_str(), args);
+    let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+
+    // 3. CreateProcessAsUserW with EXTENDED_STARTUPINFO_PRESENT (use the
+    //    attribute list) + CREATE_NO_WINDOW (refute #4: no inherited
+    //    console on headless sessions). bInheritHandles = TRUE is
+    //    REQUIRED for the handle list to take effect, but the list
+    //    restricts inheritance to exactly the 3 stdio handles.
+    // SAFETY: token is a live lowered primary token; all pointers are
+    // live/Sized; cmd_line is an owned mutable wide buffer.
+    let ok = unsafe {
+        CreateProcessAsUserW(
+            token.as_raw_handle() as _,
+            program_wide.as_ptr(),
+            cmd_line.as_mut_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            1, // bInheritHandles = TRUE (scoped by the handle list)
+            CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            &six.StartupInfo as *const _ as *const _,
+            &mut pi,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::from_raw_os_error(
+            unsafe { GetLastError() } as i32
+        ));
+    }
+
+    // Arm the orphan guard: from here, any early return force-kills the
+    // child (refute #7).
+    let mut kill_guard = KillOnDrop {
+        process: pi.hProcess,
+        armed: true,
+    };
+
+    // 4. CRITICAL: drop the parent's copies of the child-end handles so
+    //    the server reads EOF when the child exits. The child inherited
+    //    its own copies via the handle list. Keeping these open would
+    //    hang `read_to_end` forever (no EOF). The attribute list is also
+    //    dropped now (the spawn consumed it).
+    drop(stdin_child);
+    drop(stdout_child);
+    drop(stderr_child);
+    drop(attr_list);
+
+    // 5. Adopt process/thread handles. These are fresh + unaliased.
+    // SAFETY: populated by the successful CreateProcessAsUserW.
+    let process = unsafe { OwnedHandle::from_raw_handle(pi.hProcess as _) };
+    let thread = unsafe { OwnedHandle::from_raw_handle(pi.hThread as _) };
+
+    // Commit: disarm the guard now that we own the process handle and
+    // the function will return Ok.
+    kill_guard.disarm();
+
+    Ok(LoweredChild {
+        process,
+        _thread: thread,
+        pid: pi.dwProcessId,
+        stdout: Some(stdout_server),
+        stderr: Some(stderr_server),
+    })
+}
 
 #[cfg(test)]
 mod tests {
