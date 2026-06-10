@@ -147,11 +147,25 @@ pub fn hydrate_from_snapshot(workspace_dir: &Path) -> Result<usize> {
 
         match result {
             Ok(changed) if changed > 0 => {
-                // Populate FTS5
-                let _ = conn.execute(
-                    "INSERT INTO memories_fts(key, content) VALUES (?1, ?2)",
-                    params![key, content],
-                );
+                // FTS5 is populated automatically by the `memories_ai`
+                // AFTER INSERT trigger that `init_brain_db_schema`
+                // installs (sqlite.rs:56-59). The `INSERT OR IGNORE`
+                // above DID insert a row (changed > 0), so the trigger
+                // already wrote the correct `memories_fts` entry keyed
+                // by the new rowid.
+                //
+                // A manual `INSERT INTO memories_fts(key, content)`
+                // here would be a SECOND write: `memories_fts` is an
+                // external-content FTS5 table (`content=memories,
+                // content_rowid=rowid`, sqlite.rs:51-53), and a bare
+                // insert without an explicit rowid creates a phantom
+                // index entry that maps to no real `memories` row —
+                // producing duplicate keyword hits and skewed BM25
+                // scores after cold-boot hydration. That manual insert
+                // predated the schema unification that added the
+                // triggers (see the comment at the top of this fn); it
+                // became redundant and harmful once `init_brain_db_schema`
+                // started installing `memories_ai`, and is removed here.
                 hydrated += 1;
             }
             Ok(_) => {
@@ -462,5 +476,93 @@ Rule 3: Protect the user.
         let tmp = TempDir::new().unwrap();
         let count = hydrate_from_snapshot(tmp.path()).unwrap();
         assert_eq!(count, 0);
+    }
+
+    /// Regression for the legacy-work audit M-1 finding: hydration must
+    /// NOT double-insert into the external-content `memories_fts` table.
+    ///
+    /// `memories_fts` is `content=memories, content_rowid=rowid`, kept in
+    /// sync by the `memories_ai` AFTER INSERT trigger. Before this fix,
+    /// the hydration loop ALSO did a manual
+    /// `INSERT INTO memories_fts(key, content)` — a second, rowid-less
+    /// write that created a phantom index entry per row. The symptom:
+    /// a keyword search returned each hydrated row TWICE.
+    ///
+    /// This test seeds a db, exports, deletes the db, re-hydrates, then
+    /// asserts a MATCH query returns exactly one hit per matching row
+    /// (was two before the fix) and that the total FTS index entry count
+    /// equals the row count (was 2x).
+    #[test]
+    fn hydrate_does_not_double_insert_fts() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = tmp.path();
+
+        let db_dir = workspace.join("memory");
+        fs::create_dir_all(&db_dir).unwrap();
+        let db_path = db_dir.join("brain.db");
+
+        let conn = Connection::open(&db_path).unwrap();
+        crate::memory::sqlite::init_brain_db_schema(&conn).unwrap();
+        let now = Local::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO memories
+                (id, key, content, category, created_at, updated_at,
+                 valid_from, valid_to, supersedes_id, ingested_at)
+             VALUES ('id1', 'identity', 'I am a test agent', 'core',
+                     ?1, ?1, ?1, NULL, NULL, ?1)",
+            params![now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories
+                (id, key, content, category, created_at, updated_at,
+                 valid_from, valid_to, supersedes_id, ingested_at)
+             VALUES ('id2', 'preference', 'User likes Rust programming', 'core',
+                     ?1, ?1, ?1, NULL, NULL, ?1)",
+            params![now],
+        )
+        .unwrap();
+        drop(conn);
+
+        // Export → wipe → hydrate (the cold-boot recovery path).
+        let exported = export_snapshot(workspace).unwrap();
+        assert_eq!(exported, 2);
+        fs::remove_file(&db_path).unwrap();
+        let hydrated = hydrate_from_snapshot(workspace).unwrap();
+        assert_eq!(hydrated, 2);
+
+        let conn = Connection::open(&db_path).unwrap();
+
+        // Symptom check 1: a keyword unique to one hydrated row must
+        // return EXACTLY ONE hit. With the phantom double-insert it
+        // returned two (the trigger's correct entry + the rowid-less
+        // manual entry).
+        let rust_hits: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM memories_fts WHERE memories_fts MATCH 'Rust'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            rust_hits, 1,
+            "keyword 'Rust' must match exactly one row after hydration; \
+             {rust_hits} hits means the FTS double-insert phantom is back"
+        );
+
+        // Symptom check 2: total FTS index entries == memories row count.
+        // Before the fix this was 2x (one trigger entry + one phantom
+        // per hydrated row).
+        let fts_count: i64 = conn
+            .query_row("SELECT count(*) FROM memories_fts", [], |row| row.get(0))
+            .unwrap();
+        let mem_count: i64 = conn
+            .query_row("SELECT count(*) FROM memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            fts_count, mem_count,
+            "memories_fts entry count ({fts_count}) must equal memories \
+             row count ({mem_count}); a mismatch means phantom index entries"
+        );
     }
 }
