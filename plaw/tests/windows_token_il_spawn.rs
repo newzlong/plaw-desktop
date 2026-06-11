@@ -207,6 +207,8 @@ async fn spawn_piped_at_low_captures_child_stdout() {
         cmd_exe(),
         &["/C".to_string(), "echo piped-low-marker".to_string()],
         IntegrityLevel::Low,
+        None, // inherit parent env
+        None, // inherit parent cwd
     )
     .expect("piped Low-IL spawn must succeed for a Medium parent");
 
@@ -253,6 +255,8 @@ async fn spawn_piped_at_low_child_token_is_low_il() {
         probe_path(),
         &["--stdout".to_string()],
         IntegrityLevel::Low,
+        None, // inherit parent env (probe needs it for DLL load)
+        None, // inherit parent cwd
     )
     .expect("piped Low-IL spawn must succeed");
 
@@ -290,6 +294,8 @@ async fn spawn_piped_rejects_default_level() {
         std::path::PathBuf::from("non-existent.exe"),
         &[],
         IntegrityLevel::Default,
+        None,
+        None,
     )
     .expect_err("Default must be rejected before any syscall");
     assert!(
@@ -308,10 +314,126 @@ fn spawn_piped_outside_runtime_errors_not_panics() {
         std::path::PathBuf::from("non-existent.exe"),
         &[],
         IntegrityLevel::Low,
+        None,
+        None,
     )
     .expect_err("must error (not panic) when no tokio runtime is present");
     assert!(
         err.to_string().contains("tokio runtime"),
         "error must name the missing runtime; got {err}"
+    );
+}
+
+/// Phase 1c.2b: `LoweredChild::wait_with_output` drains stdout AND
+/// stderr CONCURRENTLY in one call and returns a `std::process::Output`.
+/// Spawn a Low-IL child that writes distinct markers to each stream;
+/// assert both are captured and the exit status is success. This pins
+/// the D-1 concurrent-drain contract (the caller does not have to
+/// orchestrate two pipes) and the std::process::Output bridge.
+#[tokio::test]
+async fn lowered_wait_with_output_captures_both_streams() {
+    // `echo OUT & echo ERR 1>&2` writes to stdout and stderr in one
+    // cmd invocation. Both are cmd builtins (no file write) → run at
+    // Low IL. `&` separates the two echoes.
+    let child = spawn_with_lowered_token_piped(
+        cmd_exe(),
+        &[
+            "/C".to_string(),
+            "echo OUT-marker& echo ERR-marker 1>&2".to_string(),
+        ],
+        IntegrityLevel::Low,
+        None,
+        None,
+    )
+    .expect("piped Low-IL spawn must succeed");
+
+    let output = tokio::time::timeout(std::time::Duration::from_secs(10), child.wait_with_output())
+        .await
+        .expect("wait_with_output must not hang — both pipes drain concurrently")
+        .expect("wait_with_output must succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("OUT-marker"),
+        "stdout must be captured; got {stdout:?}"
+    );
+    assert!(
+        stderr.contains("ERR-marker"),
+        "stderr must be captured; got {stderr:?}"
+    );
+    assert!(
+        output.status.success(),
+        "child exit status must be success; got {:?}",
+        output.status
+    );
+}
+
+/// Review M-1 regression (the CWE-200 fix): the piped spawn must apply
+/// an EXPLICIT environment block + working directory, NOT inherit the
+/// parent's. ShellTool relies on this so its `env_clear()` secret-
+/// stripping survives the lowering — without it the lowered child would
+/// see plaw's raw env (API keys included).
+///
+/// Pass a block containing ONLY `SystemRoot` (cmd.exe needs it to load)
+/// + a marker var, plus a tempdir cwd. Then prove:
+/// - the marker var IS visible to the child (explicit env applied),
+/// - `COMPUTERNAME` (present in the parent env, OMITTED from the block)
+///   is UNSET → cmd echoes the literal `%COMPUTERNAME%` (parent env did
+///   NOT leak in — the block REPLACED it),
+/// - `cd` prints the tempdir we passed (explicit cwd applied).
+#[tokio::test]
+async fn spawn_piped_applies_explicit_env_and_cwd() {
+    use std::ffi::OsString;
+
+    let parent_il = current_process_integrity().expect("get parent IL");
+    if parent_il != IntegrityLevel::Medium {
+        eprintln!("Skipping: parent IL is {parent_il:?}, test requires Medium");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().expect("create tempdir");
+    let system_root =
+        std::env::var_os("SystemRoot").unwrap_or_else(|| OsString::from(r"C:\Windows"));
+    let envs: Vec<(OsString, OsString)> = vec![
+        (OsString::from("SystemRoot"), system_root),
+        (
+            OsString::from("PLAW_IL_ENV_MARKER"),
+            OsString::from("env-marker-value"),
+        ),
+    ];
+
+    let child = spawn_with_lowered_token_piped(
+        cmd_exe(),
+        &[
+            "/C".to_string(),
+            "echo M=%PLAW_IL_ENV_MARKER% C=%COMPUTERNAME%& cd".to_string(),
+        ],
+        IntegrityLevel::Low,
+        Some(&envs),
+        Some(tmp.path()),
+    )
+    .expect("piped Low-IL spawn with explicit env+cwd must succeed");
+
+    let output = tokio::time::timeout(std::time::Duration::from_secs(10), child.wait_with_output())
+        .await
+        .expect("must not hang")
+        .expect("wait_with_output must succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("M=env-marker-value"),
+        "explicit env var must reach the child; got {stdout:?}"
+    );
+    assert!(
+        stdout.contains("C=%COMPUTERNAME%"),
+        "parent env MUST NOT leak into the lowered child (CWE-200): \
+         COMPUTERNAME was omitted from the block so cmd should echo it \
+         literally; got {stdout:?}"
+    );
+    let tmp_str = tmp.path().to_string_lossy().to_lowercase();
+    assert!(
+        stdout.to_lowercase().contains(&tmp_str),
+        "child cwd must be the explicit dir we passed; got {stdout:?} (want {tmp_str})"
     );
 }

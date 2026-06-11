@@ -1,7 +1,8 @@
 # Plaw Sandboxing — Status & Roadmap
 
-> **Status: Phase 0 + Phase 1 shipped**. Phase 1c.2 in design.
-> Last updated: 2026-06-07.
+> **Status: Phase 0 + Phase 1 + Phase 1c.2 shipped**. ShellTool now
+> captures output from Token-IL-lowered children.
+> Last updated: 2026-06-10.
 >
 > For operator-facing config, see [`config-reference.md`](config-reference.md)
 > → `[security.sandbox]` + `[security.sandbox.integrity]`.
@@ -111,7 +112,7 @@ Plus self-review follow-ups:
 |---|---|---|---|
 | `default` | parent's IL | no lowering | ✅ works today |
 | `medium` | `S-1-16-8192` | same as parent for unelevated plaw | ✅ works today |
-| `low` | `S-1-16-4096` | kernel write-deny on user profile + most FS | ⚠️ needs Phase 1c.2 for ShellTool output capture |
+| `low` | `S-1-16-4096` | kernel write-deny on user profile + most FS | ✅ ShellTool captures output (Phase 1c.2); **commands that write outside Low-labeled dirs fail with access-denied** — this is the sandbox working as intended |
 | `untrusted` | `S-1-16-0` | most restrictive | ❌ breaks Rust MSVC C runtime DLL load (`STATUS_DLL_INIT_FAILED 0xC0000142`); reserved for enum completeness |
 
 ### Lens C Gatekeeper failure mode
@@ -124,37 +125,43 @@ sandboxing entirely. PR #91 ships with `default_level = None` (no
 lowering); operators opt-in per-tool only after testing compatibility
 with their workload.
 
-## Roadmap: Phase 1c.2 (designed, deferred)
+## Shipped: Phase 1c.2 (Token IL output capture)
 
-`ShellTool::execute` currently returns a **clear deferred-feature
-error** when `[security.sandbox.integrity] shell = "low"` is set,
-because the Phase 1a-2 `spawn_with_lowered_token` primitive does not
-yet support piped stdio capture — children inherit the parent console.
-Phase 1c.2 will add that capture path.
+`ShellTool::execute` now **captures stdout/stderr** from a Token-IL-
+lowered child. Setting `[security.sandbox.integrity] shell = "low"`
+runs shell commands at Low IL with their output captured normally —
+the previous deferred-feature bail is gone.
 
-The hardened design is captured in the
-[`project_phase_1c2_locked_findings`](https://github.com/newzlong/plaw-desktop)
-memo (internal). Key findings from the 5-lens discovery +
-3-adversarial-refute pass:
+| PR | Phase | What |
+|---|---|---|
+| [#103](https://github.com/newzlong/plaw-desktop/pull/103) | 1c.2a | `spawn_with_lowered_token_piped` — IOCP-backed named-pipe stdio capture primitive (dormant) |
+| [#104](https://github.com/newzlong/plaw-desktop/pull/104) | 1c.2b+c | `LoweredChild::wait_with_output` (concurrent drain) + `SandboxedChild::wait_with_output` forwarding + ShellTool wired through the piped path |
 
-- Use `CreateNamedPipeW` with `FILE_FLAG_OVERLAPPED` (NOT `CreatePipe`)
-  so tokio's IOCP path runs; `CreatePipe` would route through
-  `Blocking::new` and deadlock under blocking-pool pressure.
-- Use `STARTUPINFOEXW` + `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` instead of
-  bare `bInheritHandles=TRUE` — kernel-enforced handle whitelist
-  prevents inheriting unrelated sockets / file handles from the parent.
-- Use `CREATE_NO_WINDOW` to avoid spawning a console on headless
-  Windows sessions.
-- `wait_with_output` needs cancel-safety: drop without `kill()` would
-  orphan the child via `spawn_blocking`-parked `WaitForSingleObject`.
-- Per-caller stdio options through the `Sandbox` trait — always-piped
-  Lowered would break MCP-stdio + Browser callers that currently
-  inherit parent stdio.
+Design (from the 5-lens discovery + 3-adversarial-refute pass, validated
+by a standalone IOCP spike before any unsafe was written):
 
-Estimated scope: ~450 LOC across 3 PRs (named-pipe creation + ACL +
-tokio NamedPipe adoption + race-safe `DuplicateHandle` + KillOnDrop +
-`CREATE_NO_WINDOW` + corrected `IsProcessInJob`-style test design).
-Multi-week dedicated work; deferred to a future session.
+- `tokio::net::windows::named_pipe::NamedPipeServer` (which IS
+  `CreateNamedPipeW` + `FILE_FLAG_OVERLAPPED` under the hood) — NOT
+  `CreatePipe`, which tokio wraps in `Blocking::new` and deadlocks under
+  blocking-pool pressure.
+- `STARTUPINFOEXW` + `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` whitelisting
+  exactly the 3 stdio handles — not bare `bInheritHandles=TRUE`, which
+  would inherit every inheritable handle in the parent.
+- `CREATE_NO_WINDOW` to avoid a console on headless sessions.
+- `KillOnDrop` guard so a spawn that fails after `CreateProcessAsUserW`
+  cannot orphan the child before the Job Object adopts it.
+- The "always-piped Lowered breaks MCP/Browser" concern from discovery
+  no longer applies: `ShellTool` is the **sole** caller of
+  `spawn_with_integrity` (MCP stdio, Browser, and ProcessTool wire
+  through `wrap_command` + spawn directly per PR #87), so always-piping
+  the Lowered path is correct.
+
+**Cancel behavior (parity, documented):** `wait_with_output` matches
+`tokio::process::Child` with the default `kill_on_drop(false)` — if the
+ShellTool `timeout` elapses, the child detaches and runs to completion
+(the Job Object's `KILL_ON_JOB_CLOSE` reaps it when the sandbox is
+dropped). The existing Tokio path shares this exact behavior. A uniform
+cancel-kill across both paths is a future follow-up.
 
 ## Roadmap: not in scope today
 

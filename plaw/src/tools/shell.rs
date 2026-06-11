@@ -644,14 +644,19 @@ impl Tool for ShellTool {
         // wrap_command → cmd.spawn → after_spawn(pid).
         //
         // At a non-`Default` level: WindowsJobObjectSandbox returns
-        // `SandboxedChild::Lowered`. Stdio piping does NOT work on the
-        // Lowered path yet — `spawn_with_lowered_token` (PR #89)
-        // inherits parent stdio; piping requires Phase 1c.2's
-        // CreateProcessAsUserW stdio-handle plumbing. ShellTool
-        // therefore returns a CLEAR deferred-feature error in that
-        // case so users opting in via TOML config see exactly why
-        // their output capture broke. This matches §3.5 fail-fast
-        // (no silent broken-feature degradation).
+        // `SandboxedChild::Lowered`, spawned via PR #103's piped Token
+        // IL primitive. Phase 1c.2c: `SandboxedChild::wait_with_output`
+        // captures stdout/stderr identically for both the Tokio and the
+        // Lowered variant, so there is no longer a deferred-feature bail
+        // here.
+        //
+        // NOTE: at a lowered IL the child runs with kernel-enforced
+        // integrity restrictions — e.g. Low IL DENIES writes to
+        // Medium-labeled locations (most temp dirs and the workspace).
+        // That is the POINT of the sandbox, opt-in via
+        // `[security.sandbox.integrity] shell = "..."` (default off), but
+        // operators should expect commands that write outside Low-labeled
+        // dirs to fail with access-denied. See docs/sandboxing.md.
         let sandboxed = match self
             .sandbox
             .spawn_with_integrity(cmd, self.integrity_level)
@@ -669,30 +674,12 @@ impl Tool for ShellTool {
                 });
             }
         };
-        let child = match sandboxed {
-            crate::security::traits::SandboxedChild::Tokio(c) => c,
-            #[cfg(target_os = "windows")]
-            crate::security::traits::SandboxedChild::Lowered(_) => {
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(
-                        "Token IL lowered shell does not yet support output capture. \
-                         Remove `[security.sandbox.integrity] shell = \"...\"` from \
-                         your config (or set it to `\"default\"`) until Phase 1c.2 \
-                         ships piped stdio for CreateProcessAsUserW. The Phase 0 \
-                         Job Object caps + Lens C's Gatekeeper warning together \
-                         make this the right deferral — see PR #91 description \
-                         + project_token_il_pr89 memo for the empirical IL \
-                         compatibility envelope."
-                            .to_string(),
-                    ),
-                });
-            }
-        };
 
-        let result =
-            tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(timeout_secs),
+            sandboxed.wait_with_output(),
+        )
+        .await;
 
         match result {
             Ok(Ok(output)) => {
@@ -1520,22 +1507,23 @@ mod tests {
         );
     }
 
-    /// At a non-Default IL, the WindowsJobObjectSandbox override
-    /// returns `SandboxedChild::Lowered` — but
-    /// `spawn_with_lowered_token` (PR #89) doesn't yet support piped
-    /// stdio, so ShellTool returns a clear deferred-feature error
-    /// instead of silently dropping output. Verify both the error
-    /// message format and that it names the config key the user
-    /// should remove.
+    /// Phase 1c.2c: at a non-Default IL, the WindowsJobObjectSandbox
+    /// override returns `SandboxedChild::Lowered` spawned via PR #103's
+    /// piped Token IL primitive, and `SandboxedChild::wait_with_output`
+    /// drains the IOCP-backed pipes. ShellTool therefore CAPTURES the
+    /// lowered child's stdout — the previous deferred-feature bail is
+    /// gone. This is the unit-level proof that ShellTool reads lowered
+    /// output; the real `WindowsJobObjectSandbox` path is pinned by
+    /// `windows_job::tests::spawn_with_integrity_at_low_returns_lowered_child`,
+    /// and the end-to-end real-Windows capture by the integration test
+    /// `shell_lowered_il_captures_stdout`.
     ///
-    /// `MockLoweredSandbox` returns `SandboxedChild::Lowered` for any
-    /// non-Default level so we can exercise the bail without
-    /// depending on real Win32 token machinery. The real
-    /// `WindowsJobObjectSandbox` path is already pinned by
-    /// `windows_job::tests::spawn_with_integrity_at_low_returns_lowered_child`.
+    /// `MockLoweredSandbox` spawns a real cmd.exe at the requested IL
+    /// via the production PIPED primitive so we exercise the actual
+    /// capture path without standing up the whole Job Object backend.
     #[cfg(target_os = "windows")]
     #[tokio::test]
-    async fn shell_tool_at_low_integrity_returns_deferred_feature_error() {
+    async fn shell_tool_at_low_integrity_captures_lowered_output() {
         struct MockLoweredSandbox;
         #[async_trait::async_trait]
         impl crate::security::Sandbox for MockLoweredSandbox {
@@ -1549,7 +1537,7 @@ mod tests {
                 "mock-lowered"
             }
             fn description(&self) -> &str {
-                "test mock that always returns Lowered for any non-Default level"
+                "test mock that always returns piped Lowered for any non-Default level"
             }
 
             async fn spawn_with_integrity(
@@ -1561,15 +1549,18 @@ mod tests {
                 if matches!(level, IntegrityLevel::Default) {
                     panic!("test sandbox should only see non-Default IL");
                 }
-                // Spawn a real cmd.exe at the requested IL via the
-                // production primitive. Test runner is at Medium so
-                // Low is always reachable.
+                // Spawn a real cmd.exe at the requested IL via the PIPED
+                // primitive. Test runner is at Medium so Low is always
+                // reachable. echo is a cmd builtin (no file write) so it
+                // runs cleanly even at Low IL.
                 let cmd_exe = std::env::var_os("ComSpec")
                     .unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows\System32\cmd.exe"));
-                let child = crate::security::windows_token_il::spawn_with_lowered_token(
+                let child = crate::security::windows_token_il::spawn_with_lowered_token_piped(
                     std::path::Path::new(&cmd_exe),
-                    &["/C".to_string(), "exit 0".to_string()],
+                    &["/C".to_string(), "echo lowered-capture-marker".to_string()],
                     level,
+                    None,
+                    None,
                 )?;
                 Ok(SandboxedChild::Lowered(child))
             }
@@ -1584,28 +1575,63 @@ mod tests {
         .with_integrity_level(crate::security::traits::IntegrityLevel::Low);
 
         let result = tool
-            .execute(json!({"command": "echo would-not-be-captured-anyway"}))
+            .execute(json!({"command": "echo ignored-by-mock"}))
             .await
             .expect("execute must Ok-wrap the ToolResult");
 
         assert!(
-            !result.success,
-            "Lowered IL shell must fail with deferred-feature error"
-        );
-        let err = result
-            .error
-            .expect("Lowered-IL execute must populate the error field");
-        assert!(
-            err.contains("Token IL"),
-            "error must name the Token IL feature: {err}"
+            result.success,
+            "Lowered IL shell must now succeed (output capture works); error={:?}",
+            result.error
         );
         assert!(
-            err.contains("Phase 1c.2"),
-            "error must point at the deferred-feature phase: {err}"
+            result.output.contains("lowered-capture-marker"),
+            "ShellTool must capture the lowered child's stdout via the \
+             piped wait_with_output path; got output={:?}",
+            result.output
+        );
+    }
+
+    /// Phase 1c.2c END-TO-END: ShellTool + the REAL
+    /// `WindowsJobObjectSandbox` at Low IL captures stdout. This is the
+    /// full production path — sandbox builds the Job Object, lowers the
+    /// token, pipes stdio, assigns the child to the job, and ShellTool
+    /// drains the pipes. The mock test above isolates the capture; this
+    /// one proves the whole stack composes. Test runner is at Medium so
+    /// Low is reachable; `echo` is a cmd builtin (no file write) so it
+    /// runs cleanly at Low IL.
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn shell_lowered_il_captures_stdout() {
+        let sandbox: Arc<dyn crate::security::Sandbox> = Arc::new(
+            crate::security::windows_job::WindowsJobObjectSandbox::new(
+                crate::security::windows_job::WindowsJobLimits::built_in_defaults(),
+            )
+            .expect("Job Object sandbox must construct on Windows"),
+        );
+        let tool = ShellTool::new(
+            test_security(AutonomyLevel::Supervised),
+            test_runtime(),
+            sandbox,
+        )
+        .with_integrity_level(crate::security::traits::IntegrityLevel::Low);
+
+        let result = tool
+            .execute(json!({"command": "echo real-sandbox-low-il-marker"}))
+            .await
+            .expect("execute must Ok-wrap the ToolResult");
+
+        assert!(
+            result.success,
+            "real Low-IL ShellTool execution must succeed for a no-write \
+             builtin; error={:?}",
+            result.error
         );
         assert!(
-            err.contains("security.sandbox.integrity"),
-            "error must name the config key to remove: {err}"
+            result.output.contains("real-sandbox-low-il-marker"),
+            "the full WindowsJobObjectSandbox → piped Token IL → ShellTool \
+             stack must capture stdout; got output={:?}",
+            result.output
         );
     }
 }

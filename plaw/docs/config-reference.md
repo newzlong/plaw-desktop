@@ -254,7 +254,7 @@ Allowed values for both `default_level` and `shell`:
 |---|---|---|---|
 | `"default"` | `S-1-16-8192` (parent's IL) | No lowering — byte-identical to pre-#91 | ✅ works today |
 | `"medium"` | `S-1-16-8192` | Same IL as a typical unelevated plaw — explicit "do not lower" | ✅ works today |
-| `"low"` | `S-1-16-4096` | Kernel-enforces write-deny on user profile + most filesystem | ⚠️ **Phase 1c.2 required** for shell output capture (see deferred-feature note) |
+| `"low"` | `S-1-16-4096` | Kernel-enforces write-deny on user profile + most filesystem | ✅ ShellTool runs + captures output (Phase 1c.2). **Commands that write outside Low-labeled dirs fail with access-denied** — that is the sandbox working as intended |
 | `"untrusted"` | `S-1-16-0` | Most restrictive — `STATUS_DLL_INIT_FAILED` on Rust C runtime DLL load | ❌ unusable in practice; reserved for enum completeness |
 
 Resolution order (per-tool > `default_level` > `Default`):
@@ -265,22 +265,20 @@ default_level = "medium"   # most tools stay at parent's IL
 shell = "low"              # shell-specific override wins
 ```
 
-Phase 1c.2 deferred-feature note:
+Phase 1c.2 — output capture shipped (PRs #103 + #104):
 
-`ShellTool` currently returns a clear error when the resolved level is non-`Default`,
-because `spawn_with_lowered_token` (PR #89) doesn't yet support piped stdio capture.
-The error names the feature (Token IL), the phase (1c.2), and this exact config key
-so operators see actionable next steps:
+`ShellTool` now runs shell commands at the resolved integrity level and
+**captures stdout/stderr** through IOCP-backed named pipes. The previous
+deferred-feature bail is gone. What an operator should expect at
+`shell = "low"`:
 
-```text
-Token IL lowered shell does not yet support output capture. Remove
-`[security.sandbox.integrity] shell = "..."` (or set it to `"default"`)
-until Phase 1c.2 ships piped stdio for CreateProcessAsUserW.
-```
-
-Until Phase 1c.2 lands, leave `shell` unset (or set it to `"default"`) — the config knob
-is reserved so users can plan their TOML, but flipping the runtime gate is a one-line
-change in Phase 1c.2.
+- Commands that only read or write to Low-labeled locations work normally.
+- Commands that write to the user profile, temp dirs, or most of the
+  workspace (all Medium-labeled) **fail with access-denied** — this is
+  the kernel Mandatory Integrity Control enforcing the sandbox, not a
+  bug. Test your specific command set before enabling.
+- `untrusted` still breaks the Rust/MSVC C runtime and most binaries;
+  it is reserved for enum completeness, not real use.
 
 Example — minimal default (no behavior change):
 
@@ -289,12 +287,13 @@ Example — minimal default (no behavior change):
 # resolves to Default for every tool. Byte-identical to pre-PR #91.
 ```
 
-Example — operator-tunable opt-in (functional once Phase 1c.2 ships):
+Example — operator opt-in (functional; test your workload first):
 
 ```toml
 [security.sandbox.integrity]
-shell = "low"              # ShellTool runs at S-1-16-4096
-                           # — currently bails with deferred-feature error
+shell = "low"              # ShellTool runs at S-1-16-4096 and captures
+                           # output; writes outside Low-labeled dirs are
+                           # kernel-denied
 ```
 
 ## `[agents.<name>]`
