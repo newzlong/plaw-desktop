@@ -472,20 +472,54 @@ impl Sandbox for WindowsJobObjectSandbox {
             return Ok(SandboxedChild::Tokio(child));
         }
 
-        // Non-Default path: lower the IL via the PR #89 spawn primitive,
-        // then assign to the Job Object via the existing after_spawn
-        // helper. The lowered child cannot be re-wrapped in
+        // Non-Default path: lower the IL via the PR #103 PIPED spawn
+        // primitive, then assign to the Job Object via the existing
+        // after_spawn helper. The lowered child cannot be re-wrapped in
         // `tokio::process::Child` (which has no public constructor for
         // adopting a foreign handle) — we surface it via
         // `SandboxedChild::Lowered` instead.
+        //
+        // Phase 1c.2c: use `spawn_with_lowered_token_piped` (not the
+        // non-piped PR #89 variant) so the child's stdout/stderr are
+        // captured through IOCP-backed named pipes. The sole caller of
+        // `spawn_with_integrity`, `ShellTool`, always wants captured
+        // output; the other subprocess paths (MCP stdio, Browser,
+        // ProcessTool) wire through `wrap_command` + spawn directly per
+        // PR #87 and never reach this method, so always-piping here is
+        // correct (the Phase 1c.2 discovery "refute #3 / always-piped
+        // breaks MCP+Browser" no longer applies to the current call
+        // graph). `SandboxedChild::wait_with_output` drains the pipes.
         let std_cmd = cmd.as_std();
         let program = std::path::PathBuf::from(std_cmd.get_program());
         let args: Vec<String> = std_cmd
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        let child =
-            crate::security::windows_token_il::spawn_with_lowered_token(&program, &args, level)?;
+        // Carry the command's environment + working directory across to
+        // the lowered child. CRITICAL: `ShellTool` calls `cmd.env_clear()`
+        // then rebuilds a curated allowlist (its CWE-200 secret-stripping
+        // control) and sets `current_dir(workspace_dir)`. Extracting only
+        // program+args here would inherit plaw's RAW environment (provider
+        // API keys included) and the parent's cwd — a security inversion on
+        // the very flag meant to tighten the sandbox. `get_envs()` after
+        // `env_clear()` yields exactly the curated set; pairs with a value
+        // become the explicit env block, `None`-valued removals are
+        // skipped (they cannot exist after env_clear + sets, but we filter
+        // defensively). Empty → `None` = inherit (preserves the non-shell
+        // / non-env_clear caller's expectations).
+        let envs: Vec<(std::ffi::OsString, std::ffi::OsString)> = std_cmd
+            .get_envs()
+            .filter_map(|(k, v)| v.map(|v| (k.to_os_string(), v.to_os_string())))
+            .collect();
+        let envs_opt = if envs.is_empty() {
+            None
+        } else {
+            Some(envs.as_slice())
+        };
+        let cwd_opt = std_cmd.get_current_dir();
+        let child = crate::security::windows_token_il::spawn_with_lowered_token_piped(
+            &program, &args, level, envs_opt, cwd_opt,
+        )?;
         if let Err(e) = self.after_spawn(child.id()) {
             tracing::warn!(
                 sandbox = self.name(),

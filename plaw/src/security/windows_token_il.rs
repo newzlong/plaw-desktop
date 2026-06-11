@@ -637,6 +637,37 @@ fn append_argv_token(acc: &mut String, token: &str) {
     acc.push('"');
 }
 
+/// Build a `CREATE_UNICODE_ENVIRONMENT` block for `CreateProcessAsUserW`:
+/// a run of NUL-terminated `KEY=VALUE` UTF-16 strings followed by a
+/// final NUL terminator, sorted case-insensitively by key per the
+/// Windows convention.
+///
+/// This is how the Lowered path honors `ShellTool`'s `env_clear()` +
+/// curated allowlist (the CWE-200 secret-stripping control): without an
+/// explicit block, `CreateProcessAsUserW` inherits the RAW parent
+/// environment — including API-key-bearing vars the allowlist exists to
+/// strip. Passing this block makes the lowered child's environment
+/// byte-equivalent to what the Default (`tokio::process`) path produces.
+fn build_environment_block(envs: &[(std::ffi::OsString, std::ffi::OsString)]) -> Vec<u16> {
+    let mut sorted: Vec<&(std::ffi::OsString, std::ffi::OsString)> = envs.iter().collect();
+    sorted.sort_by(|a, b| {
+        a.0.to_string_lossy()
+            .to_uppercase()
+            .cmp(&b.0.to_string_lossy().to_uppercase())
+    });
+    let mut block: Vec<u16> = Vec::new();
+    for (k, v) in sorted {
+        block.extend(k.encode_wide());
+        block.push(u16::from(b'='));
+        block.extend(v.encode_wide());
+        block.push(0);
+    }
+    // Final terminator. Empty env → `[0]` (a valid empty block); N vars
+    // → the last var's NUL + this one (the required double-NUL).
+    block.push(0);
+    block
+}
+
 /// A child process spawned with a lowered Token IL.
 ///
 /// Owns both the process handle (for wait + kill) and the primary
@@ -762,6 +793,76 @@ impl LoweredChild {
             ));
         }
         Ok(())
+    }
+
+    /// Phase 1c.2b: drain stdout+stderr and wait for exit, returning a
+    /// `std::process::Output` — the async-friendly analogue of
+    /// `tokio::process::Child::wait_with_output`, for a `LoweredChild`
+    /// spawned via [`spawn_with_lowered_token_piped`].
+    ///
+    /// Both pipes are drained CONCURRENTLY (via `tokio::try_join!`)
+    /// alongside the wait, so a child that fills one pipe's buffer while
+    /// the parent reads the other cannot deadlock — the caller does NOT
+    /// have to orchestrate concurrent draining itself (satisfies the
+    /// take_stdout/take_stderr concurrent-drain contract internally).
+    ///
+    /// For a non-piped child (spawned via [`spawn_with_lowered_token`],
+    /// where stdout/stderr are `None`) the corresponding `Output` field
+    /// comes back empty — the wait still works.
+    ///
+    /// Cancel behavior: matches `tokio::process::Child::wait_with_output`
+    /// with the default `kill_on_drop(false)` — if the returned future
+    /// is dropped (e.g. a `tokio::time::timeout` elapsing), the child is
+    /// NOT force-killed; it detaches and runs to completion. The
+    /// `WindowsJobObjectSandbox`'s `KILL_ON_JOB_CLOSE` reaps it when the
+    /// sandbox is ultimately dropped. A uniform cancel-kill across both
+    /// the Tokio and Lowered paths is a deliberate future follow-up
+    /// (the existing Tokio path shares this same no-kill-on-drop
+    /// behavior, so this is parity, not a regression).
+    ///
+    /// MUST be called from within a tokio runtime.
+    pub async fn wait_with_output(mut self) -> io::Result<std::process::Output> {
+        use tokio::io::AsyncReadExt;
+
+        // Take the pipe servers out BEFORE moving `self` into the
+        // blocking wait task. After the takes, `self` owns only the
+        // process/thread handles (pipes are None), so it is `Send` for
+        // spawn_blocking.
+        let stdout_server = self.stdout.take();
+        let stderr_server = self.stderr.take();
+
+        async fn drain(
+            server: Option<tokio::net::windows::named_pipe::NamedPipeServer>,
+        ) -> io::Result<Vec<u8>> {
+            let Some(mut server) = server else {
+                return Ok(Vec::new());
+            };
+            // connect() completes the server-side handshake (see
+            // take_stdout docs); read_to_end drains until the child's
+            // write end closes on exit.
+            server.connect().await?;
+            let mut buf = Vec::new();
+            server.read_to_end(&mut buf).await?;
+            Ok(buf)
+        }
+
+        // The sync `wait()` (WaitForSingleObject) runs on a blocking
+        // thread so it doesn't stall the async worker, concurrently with
+        // both drains.
+        let wait_fut = tokio::task::spawn_blocking(move || self.wait());
+
+        let (stdout, stderr, status) =
+            tokio::try_join!(drain(stdout_server), drain(stderr_server), async {
+                wait_fut.await.map_err(|e| {
+                    io::Error::other(format!("LoweredChild wait task panicked: {e}"))
+                })?
+            },)?;
+
+        Ok(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        })
     }
 }
 
@@ -1139,6 +1240,15 @@ fn create_lowered_stdio_pipe(
 /// returned [`LoweredChild`] has `Some` stdout/stderr taken via
 /// [`LoweredChild::take_stdout`] / [`LoweredChild::take_stderr`].
 ///
+/// - `envs`: `Some(&[(KEY, VALUE)])` builds an explicit environment
+///   block so the child gets EXACTLY those vars; `None` inherits the
+///   parent process's environment (NULL `lpEnvironment`). `ShellTool`
+///   passes `Some(curated allowlist)` so the lowered child honors its
+///   `env_clear()` secret-stripping (CWE-200) — without this the child
+///   would inherit plaw's raw env, including provider API keys.
+/// - `cwd`: `Some(dir)` runs the child there; `None` inherits the
+///   parent's working directory. `ShellTool` passes the workspace dir.
+///
 /// MUST be called from within a tokio runtime (the `NamedPipeServer`
 /// registers with the reactor). stdin is connected to the NUL device
 /// (the child sees immediate EOF) — matching `ShellTool`'s existing
@@ -1153,6 +1263,8 @@ pub fn spawn_with_lowered_token_piped<P: AsRef<Path>>(
     program: P,
     args: &[String],
     level: IntegrityLevel,
+    envs: Option<&[(std::ffi::OsString, std::ffi::OsString)]>,
+    cwd: Option<&Path>,
 ) -> io::Result<LoweredChild> {
     use windows_sys::Win32::Foundation::{GetLastError, HANDLE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
@@ -1263,13 +1375,26 @@ pub fn spawn_with_lowered_token_piped<P: AsRef<Path>>(
     let mut cmd_line = build_command_line(program.as_ref().as_os_str(), args);
     let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
 
+    // Explicit env block + cwd (if provided). These OWN the buffers the
+    // raw pointers point into; both locals outlive the CreateProcessAsUserW
+    // call below. NULL = inherit parent (env / cwd respectively).
+    let env_block: Option<Vec<u16>> = envs.map(build_environment_block);
+    let env_ptr: *mut std::ffi::c_void = env_block
+        .as_ref()
+        .map_or(std::ptr::null_mut(), |b| b.as_ptr() as *mut _);
+    let cwd_wide: Option<Vec<u16>> = cwd.map(|p| wide_z(p.as_os_str()));
+    let cwd_ptr = cwd_wide.as_ref().map_or(std::ptr::null(), |w| w.as_ptr());
+
     // 3. CreateProcessAsUserW with EXTENDED_STARTUPINFO_PRESENT (use the
     //    attribute list) + CREATE_NO_WINDOW (refute #4: no inherited
-    //    console on headless sessions). bInheritHandles = TRUE is
+    //    console on headless sessions) + CREATE_UNICODE_ENVIRONMENT (the
+    //    env block, when present, is UTF-16). bInheritHandles = TRUE is
     //    REQUIRED for the handle list to take effect, but the list
     //    restricts inheritance to exactly the 3 stdio handles.
     // SAFETY: token is a live lowered primary token; all pointers are
-    // live/Sized; cmd_line is an owned mutable wide buffer.
+    // live/Sized; cmd_line is an owned mutable wide buffer; env_ptr /
+    // cwd_ptr are either NULL or borrow `env_block` / `cwd_wide` which
+    // outlive this call.
     let ok = unsafe {
         CreateProcessAsUserW(
             token.as_raw_handle() as _,
@@ -1279,8 +1404,8 @@ pub fn spawn_with_lowered_token_piped<P: AsRef<Path>>(
             std::ptr::null_mut(),
             1, // bInheritHandles = TRUE (scoped by the handle list)
             CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW,
-            std::ptr::null_mut(),
-            std::ptr::null(),
+            env_ptr,
+            cwd_ptr,
             &six.StartupInfo as *const _ as *const _,
             &mut pi,
         )

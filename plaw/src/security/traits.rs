@@ -120,6 +120,29 @@ impl SandboxedChild {
                 })?,
         }
     }
+
+    /// Phase 1c.2b: wait for the child to exit and collect its captured
+    /// stdout/stderr into a `std::process::Output`. Consumes `self`.
+    ///
+    /// - `Tokio`: forwards to `tokio::process::Child::wait_with_output`,
+    ///   which requires the command's stdout/stderr to have been set to
+    ///   `Stdio::piped()` (ShellTool does this).
+    /// - `Lowered`: forwards to
+    ///   [`crate::security::windows_token_il::LoweredChild::wait_with_output`],
+    ///   which drains the IOCP-backed named pipes concurrently with the
+    ///   wait. Output is empty if the lowered child was spawned without
+    ///   piped stdio.
+    ///
+    /// This single forwarding method lets `ShellTool` capture output
+    /// identically across both variants — the Lowered branch no longer
+    /// needs a deferred-feature bail (Phase 1c.2c).
+    pub async fn wait_with_output(self) -> std::io::Result<std::process::Output> {
+        match self {
+            Self::Tokio(c) => c.wait_with_output().await,
+            #[cfg(target_os = "windows")]
+            Self::Lowered(c) => c.wait_with_output().await,
+        }
+    }
 }
 
 /// Sandbox backend for OS-level process isolation.
