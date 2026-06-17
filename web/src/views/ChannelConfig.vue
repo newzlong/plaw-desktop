@@ -102,6 +102,56 @@
         </div>
       </GlassCard>
 
+      <!-- WATI (WhatsApp Business via WATI service) -->
+      <GlassCard :hoverable="false">
+        <div class="channel-header" role="button" tabindex="0" @click="expanded.wati = !expanded.wati" @keydown.enter="expanded.wati = !expanded.wati" :aria-expanded="expanded.wati">
+          <div class="channel-header__left">
+            <Phone class="w-5 h-5" style="color: #25D366" />
+            <span class="channel-header__name">WATI (WhatsApp)</span>
+          </div>
+          <div class="channel-header__right">
+            <GlassToggle v-model="form.wati.enabled" @click.stop />
+            <ChevronDown class="w-4 h-4 expand-icon" :class="{ 'expand-icon--open': expanded.wati }" />
+          </div>
+        </div>
+        <div v-if="expanded.wati" class="channel-body">
+          <GlassInput
+            v-model="form.wati.api_token"
+            :label="t('channel.watiApiToken')"
+            type="password"
+            placeholder="Bearer eyJ..."
+            :hint="t('channel.watiApiTokenHint')"
+          />
+          <GlassInput
+            v-model="form.wati.api_url"
+            :label="t('channel.watiApiUrl')"
+            placeholder="https://live-mt-server.wati.io"
+            class="mt-3"
+          />
+          <GlassInput
+            v-model="form.wati.tenant_id"
+            :label="t('channel.watiTenantId')"
+            placeholder=""
+            :hint="t('channel.watiTenantIdHint')"
+            class="mt-3"
+          />
+          <GlassInput
+            v-model="form.wati.allowed_numbers"
+            :label="t('channel.watiAllowedNumbers')"
+            :placeholder="t('channel.watiAllowedNumbersHint')"
+            class="mt-3"
+          />
+          <GlassInput
+            v-model="form.wati.webhook_secret"
+            :label="t('channel.watiWebhookSecret')"
+            type="password"
+            placeholder=""
+            :hint="t('channel.watiWebhookSecretHint')"
+            class="mt-3"
+          />
+        </div>
+      </GlassCard>
+
     </div>
 
     <!-- Sticky save bar -->
@@ -126,13 +176,13 @@
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
-import { MessageCircle, Hash, AtSign, ChevronDown } from 'lucide-vue-next'
+import { MessageCircle, Hash, AtSign, Phone, ChevronDown } from 'lucide-vue-next'
 import { GlassCard, GlassButton, GlassInput, GlassToggle } from '../components/glass'
 import { readConfig, writeConfig, restartPlaw, getPlawStatus } from '../api/tauri'
 import { useI18n } from '../composables/useI18n'
 const { t } = useI18n()
 
-const expanded = reactive({ telegram: false, discord: false, slack: false })
+const expanded = reactive({ telegram: false, discord: false, slack: false, wati: false })
 const saving = ref(false)
 const saveMsg = ref('')
 const saveOk = ref(false)
@@ -143,6 +193,14 @@ const form = reactive({
   telegram: { enabled: false, bot_token: '', allowed_users: '' },
   discord: { enabled: false, bot_token: '', guild_id: '', channel_id: '' },
   slack: { enabled: false, bot_token: '', app_token: '', channel: '' },
+  wati: {
+    enabled: false,
+    api_token: '',
+    api_url: 'https://live-mt-server.wati.io',
+    tenant_id: '',
+    allowed_numbers: '',
+    webhook_secret: '',
+  },
 })
 
 onMounted(async () => {
@@ -168,6 +226,18 @@ onMounted(async () => {
       form.slack.channel = cfg.slack.channel || ''
       expanded.slack = true
     }
+    if (cfg.wati) {
+      form.wati.enabled = true
+      // api_token + webhook_secret are stored as Secret newtype (PR #21/#24).
+      // Backend returns the wire form (enc2:... ciphertext or legacy plaintext);
+      // the password input renders dots so the wire form never visually leaks.
+      form.wati.api_token = cfg.wati.api_token || ''
+      form.wati.api_url = cfg.wati.api_url || 'https://live-mt-server.wati.io'
+      form.wati.tenant_id = cfg.wati.tenant_id || ''
+      form.wati.allowed_numbers = (cfg.wati.allowed_numbers || []).join(', ')
+      form.wati.webhook_secret = cfg.wati.webhook_secret || ''
+      expanded.wati = true
+    }
   } catch { /* no config yet */ }
 })
 
@@ -181,6 +251,7 @@ async function save() {
     delete cfg.telegram
     delete cfg.discord
     delete cfg.slack
+    delete cfg.wati
 
     if (form.telegram.enabled && form.telegram.bot_token) {
       cfg.telegram = { bot_token: form.telegram.bot_token }
@@ -200,6 +271,19 @@ async function save() {
         app_token: form.slack.app_token || undefined,
         channel: form.slack.channel || undefined,
       }
+    }
+    if (form.wati.enabled && form.wati.api_token) {
+      cfg.wati = {
+        api_token: form.wati.api_token,
+        api_url: form.wati.api_url || 'https://live-mt-server.wati.io',
+        tenant_id: form.wati.tenant_id || undefined,
+        webhook_secret: form.wati.webhook_secret || undefined,
+      }
+      const nums = form.wati.allowed_numbers
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+      if (nums.length) cfg.wati.allowed_numbers = nums
     }
 
     await writeConfig(cfg)
