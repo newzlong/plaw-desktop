@@ -44,8 +44,16 @@ defineProps({
   outline: none;
   box-shadow: var(--input-focus-shadow);
 }
+/* Ghost has a transparent background, so the soft box-shadow glow is hard
+   to see; give it a real outline + tint for keyboard users. */
+.glass-btn--ghost:focus-visible {
+  background: var(--plaw-primary-soft);
+  outline: 2px solid var(--plaw-primary);
+  outline-offset: 2px;
+  box-shadow: none;
+}
 .glass-btn:disabled {
-  opacity: 0.45;
+  opacity: var(--opacity-disabled);
   cursor: not-allowed;
 }
 
@@ -86,7 +94,7 @@ defineProps({
 .glass-btn--sm {
   padding: 0.3rem 0.75rem;
   font-size: 0.78rem;
-  border-radius: 6px;
+  border-radius: var(--radius-xs);
 }
 .glass-btn--lg {
   padding: 0.7rem 1.75rem;

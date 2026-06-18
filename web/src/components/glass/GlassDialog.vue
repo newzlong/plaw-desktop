@@ -51,11 +51,12 @@ function close() { if (props.closable) emit('update:modelValue', false) }
 
 <style scoped>
 .glass-dialog__overlay {
-  position: fixed; inset: 0; z-index: 1100;
+  position: fixed; inset: 0; z-index: var(--z-modal);
   display: flex; align-items: center; justify-content: center;
   padding: 24px;
-  background: rgba(0, 0, 0, 0.55);
-  backdrop-filter: blur(4px);
+  background: var(--overlay-scrim);
+  backdrop-filter: blur(var(--blur-scrim));
+  -webkit-backdrop-filter: blur(var(--blur-scrim));
 }
 .glass-dialog__panel {
   background: var(--bg-overlay);
@@ -90,7 +91,7 @@ function close() { if (props.closable) emit('update:modelValue', false) }
 }
 .glass-dialog__close:hover {
   color: var(--text-primary);
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--hover-overlay);
 }
 .glass-dialog__body {
   padding: 20px;

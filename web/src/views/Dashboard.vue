@@ -410,10 +410,10 @@ onUnmounted(() => {
   border-radius: var(--radius-sm);
 }
 .hero-status--ok .hero-status__indicator {
-  background: rgba(34, 197, 94, 0.1);
+  background: var(--status-ok-soft);
 }
 .hero-status--off .hero-status__indicator {
-  background: rgba(239, 68, 68, 0.1);
+  background: var(--status-err-soft);
 }
 .hero-status__dot {
   width: 10px; height: 10px; border-radius: 50%;
@@ -488,11 +488,11 @@ onUnmounted(() => {
   color: var(--plaw-accent);
 }
 .stat-item__icon--blue {
-  background: rgba(59, 130, 246, 0.12);
+  background: var(--status-info-soft);
   color: var(--status-info);
 }
 .stat-item__icon--green {
-  background: rgba(34, 197, 94, 0.12);
+  background: var(--status-ok-soft);
   color: var(--status-ok);
 }
 .stat-item__value {
@@ -509,7 +509,7 @@ onUnmounted(() => {
 /* --- Error bar --- */
 .error-bar {
   padding: 10px 16px;
-  background: rgba(239, 68, 68, 0.1);
+  background: var(--status-err-soft);
   border: 1px solid var(--status-err);
   border-radius: var(--radius-sm);
   color: var(--status-err);

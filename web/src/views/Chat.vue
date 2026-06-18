@@ -1455,7 +1455,7 @@ onUnmounted(() => {
   font-weight: 600;
 }
 .chat-msg__text :deep(a) {
-  color: var(--accent);
+  color: var(--plaw-accent);
   text-decoration: underline;
   text-decoration-style: dotted;
 }

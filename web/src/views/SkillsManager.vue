@@ -701,7 +701,7 @@ onUnmounted(() => {
   display: inline-block;
   padding: 1px 6px;
   border-radius: 3px;
-  background: rgba(59, 130, 246, 0.15);
+  background: var(--status-info-soft);
   color: var(--status-info);
   font-size: 0.65rem;
   font-weight: 600;
@@ -741,9 +741,9 @@ onUnmounted(() => {
   width: 7px; height: 7px; border-radius: 50%;
   flex-shrink: 0;
 }
-.compat-dot--verified { background: rgb(34, 197, 94); }
-.compat-dot--needs-setup { background: rgb(245, 158, 11); }
-.compat-dot--incompatible { background: rgb(239, 68, 68); }
+.compat-dot--verified { background: var(--status-ok); }
+.compat-dot--needs-setup { background: var(--status-warn); }
+.compat-dot--incompatible { background: var(--status-err); }
 .compat-dot--untagged { background: rgb(120, 120, 130); opacity: 0.6; }
 .skill-actions {
   display: flex; align-items: center; gap: 4px; flex-shrink: 0;
@@ -769,9 +769,9 @@ onUnmounted(() => {
   transform: rotate(45deg);
   border-radius: 1px;
 }
-.risk-diamond--safe { background: rgb(34, 197, 94); }
-.risk-diamond--warning { background: rgb(245, 158, 11); }
-.risk-diamond--danger { background: rgb(239, 68, 68); }
+.risk-diamond--safe { background: var(--status-ok); }
+.risk-diamond--warning { background: var(--status-warn); }
+.risk-diamond--danger { background: var(--status-err); }
 .risk-diamond--untagged { background: rgb(120, 120, 130); opacity: 0.6; }
 
 /* Audit dialog */
@@ -801,12 +801,12 @@ onUnmounted(() => {
   font-size: 0.75rem; font-weight: 600;
   padding: 2px 8px; border-radius: 10px;
 }
-.compat-badge--verified { background: rgba(34,197,94,0.15); color: rgb(34,197,94); }
-.compat-badge--needs-setup { background: rgba(245,158,11,0.15); color: rgb(245,158,11); }
-.compat-badge--incompatible { background: rgba(239,68,68,0.15); color: rgb(239,68,68); }
-.risk-badge--safe { background: rgba(34,197,94,0.15); color: rgb(34,197,94); }
-.risk-badge--warning { background: rgba(245,158,11,0.15); color: rgb(245,158,11); }
-.risk-badge--danger { background: rgba(239,68,68,0.15); color: rgb(239,68,68); }
+.compat-badge--verified { background: var(--status-ok-soft); color: var(--status-ok); }
+.compat-badge--needs-setup { background: var(--status-warn-soft); color: var(--status-warn); }
+.compat-badge--incompatible { background: var(--status-err-soft); color: var(--status-err); }
+.risk-badge--safe { background: var(--status-ok-soft); color: var(--status-ok); }
+.risk-badge--warning { background: var(--status-warn-soft); color: var(--status-warn); }
+.risk-badge--danger { background: var(--status-err-soft); color: var(--status-err); }
 .audit-reason {
   font-size: 0.8rem; color: var(--text-secondary);
   line-height: 1.4; margin-top: 4px;
@@ -823,9 +823,9 @@ onUnmounted(() => {
 .audit-warn {
   display: flex; align-items: center; gap: 8px;
   margin-top: 10px; padding: 8px 10px;
-  background: rgba(239,68,68,0.08); border-radius: var(--radius-sm);
+  background: var(--status-err-soft); border-radius: var(--radius-sm);
   border: 1px solid rgba(239,68,68,0.2);
-  color: rgb(239,68,68); font-size: 0.8rem;
+  color: var(--status-err); font-size: 0.8rem;
 }
 .audit-error {
   color: var(--status-err); font-size: 0.8rem;
@@ -845,9 +845,9 @@ onUnmounted(() => {
 }
 .source-hint--ok {
   display: flex; align-items: center; gap: 8px;
-  background: rgba(34, 197, 94, 0.08);
+  background: var(--status-ok-soft);
   border: 1px solid rgba(34, 197, 94, 0.2);
-  color: rgb(34, 197, 94);
+  color: var(--status-ok);
 }
 .source-hint--ok span { flex: 1; }
 .source-hint__main {
@@ -856,7 +856,7 @@ onUnmounted(() => {
 .proxy-config {
   margin-top: 10px;
   padding-top: 10px;
-  border-top: 1px solid rgba(245, 158, 11, 0.15);
+  border-top: 1px solid var(--status-warn-soft);
 }
 .proxy-config__row {
   display: flex; gap: 8px; align-items: center;

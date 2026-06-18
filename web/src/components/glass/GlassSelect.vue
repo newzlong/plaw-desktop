@@ -97,12 +97,12 @@ onBeforeUnmount(() => document.removeEventListener('click', onClickOutside))
 .glass-select__dropdown {
   position: absolute; top: calc(100% + 4px); left: 0; right: 0;
   background: var(--bg-overlay);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(var(--blur-md));
+  -webkit-backdrop-filter: blur(var(--blur-md));
   border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
   padding: 4px;
-  z-index: 50;
+  z-index: var(--z-dropdown);
   max-height: 200px; overflow-y: auto;
   box-shadow: 0 12px 32px rgba(0,0,0,0.2);
 }
@@ -112,7 +112,7 @@ onBeforeUnmount(() => document.removeEventListener('click', onClickOutside))
   color: var(--text-primary);
   font-size: 0.85rem;
   background: none; border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-xs);
   cursor: pointer; text-align: left;
   transition: background var(--duration-fast);
 }
