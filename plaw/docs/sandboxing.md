@@ -166,11 +166,66 @@ task that can't itself be cancelled. The Job Object's
 `KILL_ON_JOB_CLOSE` remains a backstop. This is what makes the
 "timed out … and was killed" message true.
 
+## Decided against: BrowserTool Token IL (REJECTED, not deferred)
+
+Investigated 2026-06-11 (spike `wad03c4sw`, verified against `browser.rs`).
+**Decision: BrowserTool will NOT adopt Token IL lowering.** Containment
+for the browser = the existing `WindowsJobObjectSandbox` (PR #77/#87) +
+Chromium's own renderer sandbox. This is a settled won't-do, not a
+pending spike — don't re-open it as fresh discovery.
+
+What BrowserTool actually spawns (verified):
+
+- **`agent_browser` (default)**: plaw spawns the `agent-browser` Node CLI
+  (`browser.rs` spawn sites: the two `--version` probes + the main
+  `run_command` exec); that CLI internally launches a
+  `chrome-headless-shell` grandchild plaw does not directly control.
+  This is the ONLY backend with a plaw-controlled subprocess. Already
+  routed through the Sandbox trait (`wrap_command` + `after_spawn` →
+  Job Object) per PR #87.
+- **`rust_native`**: spawns NOTHING — connects via WebDriver
+  (`ClientBuilder::rustls().connect(native_webdriver_url)`, default
+  `http://127.0.0.1:9515`) to an externally-started
+  `chromedriver`/`geckodriver`. `native_chrome_path` is a
+  `goog:chromeOptions.binary` hint, not a spawn. Token IL is a no-op.
+- **`computer_use`**: remote HTTP sidecar (`127.0.0.1:8787`). No
+  subprocess. Token IL is a no-op.
+
+Why Token IL is the wrong primitive here:
+
+1. **It conflicts with Chromium's sandbox, kernel-enforced.** Chromium's
+   Windows sandbox is asymmetric: the broker (browser process) runs at
+   Medium IL and spawns renderers that IT lowers to Low/AppContainer.
+   Token lowering is monotonic — a process can only mint tokens at or
+   below its own IL — and a Low-IL process has `SeImpersonatePrivilege`
+   stripped by the kernel, which is exactly the privilege the broker
+   needs to create lowered renderer tokens. Pre-lowering the browser to
+   Low therefore either breaks renderer spawn (automation fails) or
+   forces `--no-sandbox` (which disables Chromium's renderer isolation
+   entirely — strictly worse). plaw does NOT pass `--no-sandbox` today,
+   so Chromium's sandbox is active; lowering would REMOVE a working
+   containment layer to add a broken one.
+2. **A Low-IL browser can't even start.** Low IL kernel-denies writes to
+   Medium-labeled `%USERPROFILE%` / `%APPDATA%` / `%TEMP%`, where
+   Chromium's user-data-dir, disk cache, and cookies DB live → profile
+   init fails. Untrusted IL breaks the C-runtime DLL load entirely. A
+   with-config path (Low-labeled `--user-data-dir` + `--disable-gpu`)
+   is fragile, non-transparent, and still doesn't solve (1).
+3. **Only 1 of 3 backends spawns a plaw-controlled process at all** — and
+   it's the Chromium-family case where lowering does the most damage.
+
+Why ShellTool was the right (and only) Token IL adopter: a shell is an
+IL-unaware leaf process, so Low IL is both safe and useful. Chromium is
+not — it wants to BE the lower-IL party, conflicting with Token IL.
+"We shipped IL for the shell" does not generalize to the browser.
+
+Reopen trigger (narrow): only if a future backend runs Chromium OUT of
+plaw's process tree at Medium IL and exposes an endpoint (the
+`rust_native` shape), so plaw could lower its own *client* without
+touching the browser tree — and even then the gain is marginal.
+
 ## Roadmap: not in scope today
 
-- **BrowserTool Token IL**: Chromium expects parent at Medium IL to
-  self-lower renderers. Pre-lowering risks breaking the renderer fork
-  invariant; needs separate spike before committing.
 - **`web_fetch` Token IL**: N/A. `web_fetch` is in-process `reqwest`
   with no subprocess to lower (Lens C correction).
 - **macOS sandbox profile**: no roadmap. Plaw on macOS today runs at
