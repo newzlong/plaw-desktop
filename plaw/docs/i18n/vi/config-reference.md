@@ -4,6 +4,8 @@ Các mục cấu hình thường dùng và giá trị mặc định.
 
 Xác minh lần cuối: **2026-02-19**.
 
+> **Lưu ý đồng bộ (2026-06-11):** Các phần `[security.sandbox]` và `[security.sandbox.integrity]` (Windows Token Integrity Level sandboxing) là nội dung mới hơn ngày xác minh ở trên và hiện chỉ có đầy đủ trong [bản nguồn tiếng Anh](../../config-reference.md).
+
 Thứ tự tìm config khi khởi động:
 
 1. Biến `PLAW_WORKSPACE` (nếu được đặt)

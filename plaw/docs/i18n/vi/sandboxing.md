@@ -5,6 +5,8 @@
 > Tài liệu này mô tả các hướng tiếp cận đề xuất và có thể bao gồm các lệnh hoặc cấu hình giả định.
 > Để biết hành vi runtime hiện tại, xem [config-reference.md](config-reference.md), [operations-runbook.md](operations-runbook.md), và [troubleshooting.md](troubleshooting.md).
 
+> **Lưu ý đồng bộ (2026-06-11):** Bản dịch này phản ánh phiên bản *đề xuất* trước đây. Các backend được mô tả bên dưới (firejail / bubblewrap / docker / landlock) đã được triển khai, và phần **Windows Token Integrity Level sandboxing** (Phase 0/1/1c.2) là nội dung mới hơn, hiện chỉ có đầy đủ trong [bản nguồn tiếng Anh](../../sandboxing.md). Xem bản tiếng Anh để biết trạng thái hiện tại.
+
 ## Vấn đề
 
 Plaw hiện có application-layer security (allowlists, path blocking, command injection protection) nhưng thiếu cơ chế cách ly cấp hệ điều hành. Nếu kẻ tấn công nằm trong allowlist, họ có thể chạy bất kỳ lệnh nào được cho phép với quyền của user plaw.

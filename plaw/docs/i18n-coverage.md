@@ -2,7 +2,9 @@
 
 This document defines the localization structure for Plaw docs and tracks current coverage.
 
-Last refreshed: **February 24, 2026**.
+Last refreshed: **February 24, 2026** (coverage matrix baseline). Targeted
+sync **June 11, 2026**: Windows Token IL sandboxing content (see
+[Content-Depth Deferrals](#content-depth-deferrals)).
 
 Execution guide: [i18n-guide.md](i18n-guide.md)
 Gap backlog: [i18n-gap-backlog.md](i18n-gap-backlog.md)
@@ -86,6 +88,31 @@ Localized category index files now exist for all supported locales under:
 - `docs/i18n/<locale>/project/README.md`
 
 This closes collection-index localization parity for supported locales.
+
+## Content-Depth Deferrals
+
+Top-level parity above means the localized file EXISTS and is navigable; it
+does not guarantee section-by-section content parity with the latest English
+source.
+
+Known deferral (owner: next docs i18n sweep):
+
+- **`sandboxing.md` + `config-reference.md` — Windows Token Integrity Level
+  sandboxing (PRs #77, #87–#106).** The entire Token IL subsystem (Job Object
+  hardening, `Sandbox::spawn_with_integrity`, ShellTool lowered-IL output
+  capture, and the rejected BrowserTool Token IL decision) is currently
+  English-only. As of the 2026-06-11 targeted sync:
+  - `fr` / `ja` / `ru` `sandboxing.md` (bridge pages): the source section maps
+    were re-synced to the current English structure; the body remains a pointer
+    to the English source by design (hub-parity locales).
+  - `vi` / `el` `sandboxing.md` (full translations of the earlier *proposal*
+    version): a dated sync banner now points to the English source for the
+    Token IL sections.
+  - `vi` / `el` `config-reference.md`: a dated sync banner flags
+    `[security.sandbox]` / `[security.sandbox.integrity]` as English-only.
+  - Full prose translation of the Token IL sections is intentionally deferred —
+    dense Windows-security content where the English doc is the normative
+    source; the banners keep readers from trusting stale localized framing.
 
 ## Localization Rules
 
