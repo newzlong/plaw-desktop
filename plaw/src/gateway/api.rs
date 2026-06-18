@@ -245,6 +245,7 @@ pub async fn handle_api_cron_list(
                         "enabled": job.enabled,
                         "plaw_session": job.plaw_session,
                         "timeout_secs": job.timeout_secs,
+                        "pipeline_name": job.pipeline_name,
                     })
                 })
                 .collect();

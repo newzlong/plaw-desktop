@@ -84,6 +84,7 @@ async fn execute_job_with_retry(
             JobType::Shell => run_job_command(config, security, job).await,
             JobType::Agent => run_agent_job(config, security, job).await,
             JobType::Notification => run_notification_job(job),
+            JobType::Pipeline => run_pipeline_job(config, security, job).await,
         };
         last_output = output;
 
@@ -268,6 +269,72 @@ fn run_notification_job(job: &CronJob) -> (bool, String) {
     }
 }
 
+async fn run_pipeline_job(
+    config: &Config,
+    security: &SecurityPolicy,
+    job: &CronJob,
+) -> (bool, String) {
+    // Pipelines fan out to sub-agents (DelegateTool, side-effect class Spawn),
+    // so gate them exactly like agent jobs rather than shell jobs.
+    if !security.can_act() {
+        return (
+            false,
+            "blocked by security policy: autonomy is read-only".to_string(),
+        );
+    }
+    if security.is_rate_limited() {
+        return (
+            false,
+            "blocked by security policy: rate limit exceeded".to_string(),
+        );
+    }
+    if !security.record_action() {
+        return (
+            false,
+            "blocked by security policy: action budget exhausted".to_string(),
+        );
+    }
+
+    let Some(pipeline_name) = job.pipeline_name.clone().filter(|n| !n.trim().is_empty()) else {
+        return (false, "pipeline job has no pipeline_name".to_string());
+    };
+    // The pipeline's initial {user_message} is carried in the job's prompt.
+    let user_message = job.prompt.clone().unwrap_or_default();
+
+    let cron_trace = crate::observability::trace_context::TraceContext::root();
+    tracing::debug!(
+        cron_job_id = %job.id,
+        trace_id = %cron_trace.trace_id,
+        pipeline = %pipeline_name,
+        "cron pipeline run starting under trace"
+    );
+
+    let run_result = crate::observability::trace_context::CURRENT_TRACE
+        .scope(
+            Some(cron_trace),
+            crate::agent::pipeline::run_pipeline_from_config(config, &pipeline_name, &user_message),
+        )
+        .await;
+
+    match run_result {
+        Ok(result) if result.success => (
+            true,
+            if result.output.trim().is_empty() {
+                "pipeline job executed".to_string()
+            } else {
+                result.output
+            },
+        ),
+        Ok(result) => (
+            false,
+            result
+                .error
+                .unwrap_or_else(|| "pipeline job failed".to_string()),
+        ),
+        Err(e) => (false, format!("pipeline job failed: {e}")),
+    }
+}
+
 async fn persist_job_result(
     config: &Config,
     job: &CronJob,
@@ -330,7 +397,9 @@ fn is_one_shot_auto_delete(job: &CronJob) -> bool {
 }
 
 fn warn_if_high_frequency_agent_job(job: &CronJob) {
-    if !matches!(job.job_type, JobType::Agent) {
+    // Agent and pipeline jobs both invoke the model / fan out to sub-agents,
+    // so both are expensive to fire at high frequency.
+    if !matches!(job.job_type, JobType::Agent | JobType::Pipeline) {
         return;
     }
     let too_frequent = match &job.schedule {
@@ -683,6 +752,7 @@ mod tests {
             plaw_session: None,
             context_summary: None,
             timeout_secs: None,
+            pipeline_name: None,
             created_at: Utc::now(),
             next_run: Utc::now(),
             last_run: None,

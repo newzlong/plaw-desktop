@@ -210,6 +210,87 @@ pub async fn run_pipeline(
     })
 }
 
+/// Build the full tool registry from `config` and run a named pipeline
+/// end-to-end, returning the `run_pipeline` tool's [`ToolResult`].
+///
+/// This is the config-only entry point used by the cron scheduler
+/// (`JobType::Pipeline`): the scheduler holds only `&Config`, whereas
+/// the LLM path reaches pipelines through the already-assembled tool
+/// registry. Rather than duplicate ~80 lines of `DelegateTool` wiring,
+/// this rebuilds the same registry the agent loop builds (runtime +
+/// memory + tools) and invokes the existing `run_pipeline` tool by name,
+/// so the trust boundary, security policy, and coordination bus are
+/// byte-identical to an interactive pipeline call.
+///
+/// Fail-fast cases (returned as `Err`, surfaced to the cron run as a job
+/// failure rather than a silent no-op):
+/// - the pipeline name is not declared under `[pipelines.*]`
+/// - no `run_pipeline` tool exists, i.e. no `[agents.*]` are configured
+///   (the tool is only registered when both agents and pipelines exist)
+pub async fn run_pipeline_from_config(
+    config: &crate::config::Config,
+    pipeline_name: &str,
+    user_message: &str,
+) -> Result<crate::tools::traits::ToolResult> {
+    use std::sync::Arc;
+
+    if !config.pipelines.contains_key(pipeline_name) {
+        anyhow::bail!("pipeline '{pipeline_name}' is not configured under [pipelines.*]");
+    }
+
+    // Mirror the agent loop's registry construction (loop_.rs `run`).
+    let runtime: Arc<dyn crate::runtime::RuntimeAdapter> =
+        Arc::from(crate::runtime::create_runtime(&config.runtime)?);
+    let security = Arc::new(crate::security::SecurityPolicy::from_config(
+        &config.autonomy,
+        &config.workspace_dir,
+    ));
+    let memory: Arc<dyn crate::memory::Memory> =
+        Arc::from(crate::memory::create_memory_with_storage(
+            &config.memory,
+            Some(&config.storage.provider.config),
+            &config.workspace_dir,
+            config.api_key.as_deref(),
+        )?);
+    let (composio_key, composio_entity_id) = if config.composio.enabled {
+        (
+            config.composio.api_key.as_deref(),
+            Some(config.composio.entity_id.as_str()),
+        )
+    } else {
+        (None, None)
+    };
+
+    let registry = crate::tools::all_tools_with_runtime(
+        Arc::new(config.clone()),
+        &security,
+        runtime,
+        memory,
+        composio_key,
+        composio_entity_id,
+        &config.browser,
+        &config.http_request,
+        &config.web_fetch,
+        &config.workspace_dir,
+        &config.agents,
+        config.api_key.as_deref(),
+        config,
+    );
+
+    let Some(pipeline_tool) = registry.iter().find(|t| t.name() == "run_pipeline") else {
+        anyhow::bail!(
+            "pipeline jobs require at least one [agents.*] entry — the run_pipeline tool is \
+             only registered when both agents and pipelines are configured"
+        );
+    };
+
+    let args = serde_json::json!({
+        "pipeline_name": pipeline_name,
+        "user_message": user_message,
+    });
+    pipeline_tool.execute(args).await
+}
+
 /// Static validation: stages must have non-empty agent + prompt +
 /// output_key, and output_keys must be unique within the pipeline.
 /// Misnamed `{prior.<key>}` placeholders are NOT validated statically
@@ -323,6 +404,22 @@ mod tests {
                 parameters: self.parameters_schema(),
             }
         }
+    }
+
+    // ── run_pipeline_from_config ─────────────────────────────────
+
+    #[tokio::test]
+    async fn run_pipeline_from_config_fails_fast_for_unknown_pipeline() {
+        // No [pipelines.*] configured → bail before building any registry
+        // (so this needs no provider/runtime/memory).
+        let config = crate::config::Config::default();
+        let err = run_pipeline_from_config(&config, "ghost", "hi")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("is not configured"),
+            "unexpected error: {err}"
+        );
     }
 
     // ── render_template ──────────────────────────────────────────

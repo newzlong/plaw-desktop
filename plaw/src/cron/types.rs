@@ -8,6 +8,7 @@ pub enum JobType {
     Shell,
     Agent,
     Notification,
+    Pipeline,
 }
 
 impl From<JobType> for &'static str {
@@ -16,6 +17,7 @@ impl From<JobType> for &'static str {
             JobType::Shell => "shell",
             JobType::Agent => "agent",
             JobType::Notification => "notification",
+            JobType::Pipeline => "pipeline",
         }
     }
 }
@@ -28,8 +30,9 @@ impl TryFrom<&str> for JobType {
             "shell" => Ok(JobType::Shell),
             "agent" => Ok(JobType::Agent),
             "notification" => Ok(JobType::Notification),
+            "pipeline" => Ok(JobType::Pipeline),
             _ => Err(format!(
-                "Invalid job type '{}'. Expected one of: 'shell', 'agent', 'notification'",
+                "Invalid job type '{}'. Expected one of: 'shell', 'agent', 'notification', 'pipeline'",
                 value
             )),
         }
@@ -129,6 +132,11 @@ pub struct CronJob {
     /// agent and notification jobs ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// Name of the `[pipelines.*]` workflow to run. Only meaningful for
+    /// `JobType::Pipeline`; the job's `prompt` carries the pipeline's
+    /// initial `{user_message}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_name: Option<String>,
     pub created_at: DateTime<Utc>,
     pub next_run: DateTime<Utc>,
     pub last_run: Option<DateTime<Utc>>,
@@ -163,6 +171,9 @@ pub struct CronJobPatch {
     /// Per-job shell timeout override in seconds (shell jobs only). `Some(v)`
     /// sets the override; `None` leaves the existing value unchanged.
     pub timeout_secs: Option<u64>,
+    /// Pipeline name override (pipeline jobs only). `Some(v)` sets it;
+    /// `None` leaves the existing value unchanged.
+    pub pipeline_name: Option<String>,
 }
 
 #[cfg(test)]
@@ -177,6 +188,15 @@ mod tests {
         assert_eq!(JobType::try_from("AgEnT").unwrap(), JobType::Agent);
         assert_eq!(JobType::try_from("notification").unwrap(), JobType::Notification);
         assert_eq!(JobType::try_from("NOTIFICATION").unwrap(), JobType::Notification);
+        assert_eq!(JobType::try_from("pipeline").unwrap(), JobType::Pipeline);
+        assert_eq!(JobType::try_from("PipeLine").unwrap(), JobType::Pipeline);
+    }
+
+    #[test]
+    fn job_type_str_roundtrip_includes_pipeline() {
+        let s: &str = JobType::Pipeline.into();
+        assert_eq!(s, "pipeline");
+        assert_eq!(JobType::try_from(s).unwrap(), JobType::Pipeline);
     }
 
     #[test]

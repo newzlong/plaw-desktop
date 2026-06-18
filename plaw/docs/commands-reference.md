@@ -111,6 +111,7 @@ Notes:
 - Mutating schedule/cron actions require `cron.enabled = true`.
 - Shell command payloads for schedule creation (`create` / `add` / `once`) are validated by security command policy before job persistence.
 - `--timeout-secs` sets a per-job shell command timeout in seconds (range `1..=86400`; default `120` when omitted). It applies to shell jobs only; agent and notification jobs ignore it. The same override is available to the `cron_add` / `cron_update` agent tools (`timeout_secs`) and the `POST` / `PATCH /api/cron` endpoints.
+- Cron jobs come in four types, selected via the `cron_add` agent tool's `job_type`: `shell` (run a command), `agent` (run an AI task), `notification` (a pure reminder, no AI call), and `pipeline` (run a pre-configured `[pipelines.*]` multi-stage workflow — requires `pipeline_name`; the job's `prompt` becomes the pipeline's initial `{user_message}`). The CLI `add*` commands create `shell` jobs; the other types are created through the agent tool or `POST /api/cron`.
 
 ### `models`
 
