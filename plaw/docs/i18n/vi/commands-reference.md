@@ -73,6 +73,8 @@ Xác minh lần cuối: **2026-02-20**.
 - `plaw cron resume <id>`
 
 > `--timeout-secs`: per-job shell timeout (`1..=86400`s; default `120`). Shell jobs only.
+>
+> Cron `job_type` (via the `cron_add` tool): `shell` | `agent` | `notification` | `pipeline` (runs a `[pipelines.*]` workflow, needs `pipeline_name`). CLI `add*` create `shell` jobs.
 
 ### `models`
 

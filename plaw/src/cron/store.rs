@@ -163,11 +163,57 @@ pub fn add_notification_job(
     get_job(config, &id)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn add_pipeline_job(
+    config: &Config,
+    name: Option<String>,
+    schedule: Schedule,
+    pipeline_name: &str,
+    user_message: &str,
+    delivery: Option<DeliveryConfig>,
+    delete_after_run: bool,
+    plaw_session: Option<String>,
+) -> Result<CronJob> {
+    let now = Utc::now();
+    validate_schedule(&schedule, now)?;
+    let next_run = next_run_for_schedule(&schedule, now)?;
+    let id = Uuid::new_v4().to_string();
+    let expression = schedule_cron_expression(&schedule).unwrap_or_default();
+    let schedule_json = serde_json::to_string(&schedule)?;
+    let delivery = delivery.unwrap_or_default();
+
+    with_connection(config, |conn| {
+        conn.execute(
+            "INSERT INTO cron_jobs (
+                id, expression, command, schedule, job_type, prompt, name, session_target, model,
+                enabled, delivery, delete_after_run, created_at, next_run, plaw_session, pipeline_name
+             ) VALUES (?1, ?2, '', ?3, 'pipeline', ?4, ?5, 'isolated', NULL, 1, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                id,
+                expression,
+                schedule_json,
+                user_message,
+                name,
+                serde_json::to_string(&delivery)?,
+                if delete_after_run { 1 } else { 0 },
+                now.to_rfc3339(),
+                next_run.to_rfc3339(),
+                plaw_session,
+                pipeline_name,
+            ],
+        )
+        .context("Failed to insert cron pipeline job")?;
+        Ok(())
+    })?;
+
+    get_job(config, &id)
+}
+
 pub fn list_jobs(config: &Config) -> Result<Vec<CronJob>> {
     with_connection(config, |conn| {
         let mut stmt = conn.prepare(
             "SELECT id, expression, command, schedule, job_type, prompt, name, session_target, model,
-                    enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output, plaw_session, context_summary, timeout_secs
+                    enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output, plaw_session, context_summary, timeout_secs, pipeline_name
              FROM cron_jobs ORDER BY next_run ASC",
         )?;
 
@@ -185,7 +231,7 @@ pub fn get_job(config: &Config, job_id: &str) -> Result<CronJob> {
     with_connection(config, |conn| {
         let mut stmt = conn.prepare(
             "SELECT id, expression, command, schedule, job_type, prompt, name, session_target, model,
-                    enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output, plaw_session, context_summary, timeout_secs
+                    enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output, plaw_session, context_summary, timeout_secs, pipeline_name
              FROM cron_jobs WHERE id = ?1",
         )?;
 
@@ -218,7 +264,7 @@ pub fn due_jobs(config: &Config, now: DateTime<Utc>) -> Result<Vec<CronJob>> {
     with_connection(config, |conn| {
         let mut stmt = conn.prepare(
             "SELECT id, expression, command, schedule, job_type, prompt, name, session_target, model,
-                    enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output, plaw_session, context_summary, timeout_secs
+                    enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output, plaw_session, context_summary, timeout_secs, pipeline_name
              FROM cron_jobs
              WHERE enabled = 1 AND next_run <= ?1
              ORDER BY next_run ASC
@@ -279,6 +325,9 @@ pub fn update_job(config: &Config, job_id: &str, patch: CronJobPatch) -> Result<
         crate::cron::validate_timeout_secs(Some(timeout_secs))?;
         job.timeout_secs = Some(timeout_secs);
     }
+    if let Some(pipeline_name) = patch.pipeline_name {
+        job.pipeline_name = Some(pipeline_name);
+    }
 
     if schedule_changed {
         job.next_run = next_run_for_schedule(&job.schedule, Utc::now())?;
@@ -289,7 +338,8 @@ pub fn update_job(config: &Config, job_id: &str, patch: CronJobPatch) -> Result<
             "UPDATE cron_jobs
              SET expression = ?1, command = ?2, schedule = ?3, job_type = ?4, prompt = ?5, name = ?6,
                  session_target = ?7, model = ?8, enabled = ?9, delivery = ?10, delete_after_run = ?11,
-                 next_run = ?12, plaw_session = ?14, context_summary = ?15, timeout_secs = ?16
+                 next_run = ?12, plaw_session = ?14, context_summary = ?15, timeout_secs = ?16,
+                 pipeline_name = ?17
              WHERE id = ?13",
             params![
                 job.expression,
@@ -308,6 +358,7 @@ pub fn update_job(config: &Config, job_id: &str, patch: CronJobPatch) -> Result<
                 job.plaw_session,
                 job.context_summary,
                 job.timeout_secs,
+                job.pipeline_name,
             ],
         )
         .context("Failed to update cron job")?;
@@ -518,6 +569,7 @@ fn map_cron_job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CronJob> {
         timeout_secs: row
             .get::<_, Option<i64>>(19)?
             .and_then(|v| u64::try_from(v).ok()),
+        pipeline_name: row.get(20)?,
     })
 }
 
@@ -666,6 +718,7 @@ fn with_connection<T>(config: &Config, f: impl FnOnce(&Connection) -> Result<T>)
     add_column_if_missing(&conn, "plaw_session", "TEXT")?;
     add_column_if_missing(&conn, "context_summary", "TEXT")?;
     add_column_if_missing(&conn, "timeout_secs", "INTEGER")?;
+    add_column_if_missing(&conn, "pipeline_name", "TEXT")?;
 
     f(&conn)
 }
@@ -796,6 +849,72 @@ mod tests {
         assert!(zero.is_err());
         // The rejected job must not have been persisted.
         assert!(list_jobs(&config).unwrap().is_empty());
+    }
+
+    #[test]
+    fn pipeline_job_persists_name_and_user_message() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp);
+
+        let job = add_pipeline_job(
+            &config,
+            Some("nightly".into()),
+            Schedule::Cron {
+                expr: "0 2 * * *".into(),
+                tz: None,
+            },
+            "report_pipeline",
+            "summarize today",
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(job.job_type, JobType::Pipeline);
+        assert_eq!(job.pipeline_name.as_deref(), Some("report_pipeline"));
+        // The pipeline's initial {user_message} is stored in `prompt`.
+        assert_eq!(job.prompt.as_deref(), Some("summarize today"));
+        assert_eq!(job.command, "");
+
+        // Survives a round-trip through SQLite (job_type + pipeline_name).
+        let reloaded = get_job(&config, &job.id).unwrap();
+        assert_eq!(reloaded.job_type, JobType::Pipeline);
+        assert_eq!(reloaded.pipeline_name.as_deref(), Some("report_pipeline"));
+    }
+
+    #[test]
+    fn update_job_sets_pipeline_name() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp);
+        let job = add_pipeline_job(
+            &config,
+            None,
+            Schedule::Cron {
+                expr: "0 2 * * *".into(),
+                tz: None,
+            },
+            "p1",
+            "msg",
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+
+        let updated = update_job(
+            &config,
+            &job.id,
+            CronJobPatch {
+                pipeline_name: Some("p2".into()),
+                ..CronJobPatch::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.pipeline_name.as_deref(), Some("p2"));
+        assert_eq!(
+            get_job(&config, &job.id).unwrap().pipeline_name.as_deref(),
+            Some("p2")
+        );
     }
 
     #[test]
