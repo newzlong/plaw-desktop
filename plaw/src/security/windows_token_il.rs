@@ -810,15 +810,22 @@ impl LoweredChild {
     /// where stdout/stderr are `None`) the corresponding `Output` field
     /// comes back empty — the wait still works.
     ///
-    /// Cancel behavior: matches `tokio::process::Child::wait_with_output`
-    /// with the default `kill_on_drop(false)` — if the returned future
-    /// is dropped (e.g. a `tokio::time::timeout` elapsing), the child is
-    /// NOT force-killed; it detaches and runs to completion. The
-    /// `WindowsJobObjectSandbox`'s `KILL_ON_JOB_CLOSE` reaps it when the
-    /// sandbox is ultimately dropped. A uniform cancel-kill across both
-    /// the Tokio and Lowered paths is a deliberate future follow-up
-    /// (the existing Tokio path shares this same no-kill-on-drop
-    /// behavior, so this is parity, not a regression).
+    /// Cancel behavior: if the returned future is dropped before
+    /// completion (e.g. a `tokio::time::timeout` elapsing), the child is
+    /// FORCE-KILLED, not orphaned. Because `self` is moved into a
+    /// detached `spawn_blocking` wait task (parked in
+    /// `WaitForSingleObject`), we duplicate the process handle up front
+    /// and hold a [`ProcessKillGuard`]; dropping this future drops the
+    /// guard, which `TerminateProcess`es the child. That unblocks the
+    /// detached wait task (so it finishes + closes its handles) and
+    /// matches the Tokio path's `kill_on_drop(true)` — making ShellTool's
+    /// "and was killed" timeout message true on both paths. (refute #5)
+    ///
+    /// On a clean completion the guard is disarmed (the child already
+    /// exited). On an internal error (`?` on a drain/wait) the guard is
+    /// NOT disarmed, so the still-running child is killed rather than
+    /// leaked. `WindowsJobObjectSandbox`'s `KILL_ON_JOB_CLOSE` remains a
+    /// backstop if the guard somehow can't fire.
     ///
     /// MUST be called from within a tokio runtime.
     pub async fn wait_with_output(mut self) -> io::Result<std::process::Output> {
@@ -830,6 +837,12 @@ impl LoweredChild {
         // spawn_blocking.
         let stdout_server = self.stdout.take();
         let stderr_server = self.stderr.take();
+
+        // Cancel-safety: duplicate the process handle so we can kill the
+        // child even after `self` (with the original handle) is moved
+        // into the detached wait task. The guard is armed until a clean
+        // completion disarms it.
+        let mut kill_guard = ProcessKillGuard::duplicate_from(&self.process)?;
 
         async fn drain(
             server: Option<tokio::net::windows::named_pipe::NamedPipeServer>,
@@ -857,6 +870,9 @@ impl LoweredChild {
                     io::Error::other(format!("LoweredChild wait task panicked: {e}"))
                 })?
             },)?;
+
+        // Clean completion — the child already exited, so don't kill.
+        kill_guard.disarm();
 
         Ok(std::process::Output {
             status,
@@ -1122,6 +1138,82 @@ impl Drop for KillOnDrop {
             // until this guard drops; TerminateProcess on it is safe.
             unsafe {
                 TerminateProcess(self.process, 1);
+            }
+        }
+    }
+}
+
+/// Cancel-safety guard for [`LoweredChild::wait_with_output`] (refute
+/// #5). Owns a DUPLICATE of the child's process handle so the child can
+/// be force-terminated even after the original handle was moved into a
+/// detached `spawn_blocking` wait task. Dropping the guard while armed
+/// `TerminateProcess`es the child (the timeout / cancel path);
+/// `disarm()` is called on a clean completion. Distinct from
+/// [`KillOnDrop`] (which borrows a spawn-time raw handle and is scoped
+/// to the spawn fn) — this OWNS its duplicate and closes it on drop.
+struct ProcessKillGuard {
+    /// Inherited-FALSE duplicate of the process handle. Closed by
+    /// `OwnedHandle::Drop` after the optional `TerminateProcess`.
+    handle: OwnedHandle,
+    armed: bool,
+}
+
+impl ProcessKillGuard {
+    /// Duplicate `src` (the live process handle) into a new owned handle
+    /// for kill-on-cancel. Uses `DUPLICATE_SAME_ACCESS` so the copy keeps
+    /// the `PROCESS_TERMINATE` right the original got from
+    /// `CreateProcessAsUserW`. Non-inheritable.
+    fn duplicate_from(src: &OwnedHandle) -> io::Result<Self> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{
+            DuplicateHandle, GetLastError, DUPLICATE_SAME_ACCESS, HANDLE, INVALID_HANDLE_VALUE,
+        };
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+        let mut dup: HANDLE = INVALID_HANDLE_VALUE;
+        // SAFETY: GetCurrentProcess() pseudo-handle; src is a live owned
+        // handle; &mut dup is a Sized POD out-param. bInheritHandle FALSE.
+        let ok = unsafe {
+            DuplicateHandle(
+                GetCurrentProcess(),
+                src.as_raw_handle() as HANDLE,
+                GetCurrentProcess(),
+                &mut dup,
+                0,
+                0, // bInheritHandle = FALSE
+                DUPLICATE_SAME_ACCESS,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::from_raw_os_error(
+                unsafe { GetLastError() } as i32
+            ));
+        }
+        // SAFETY: dup is a fresh, unaliased handle from DuplicateHandle.
+        let handle = unsafe { OwnedHandle::from_raw_handle(dup as _) };
+        Ok(Self {
+            handle,
+            armed: true,
+        })
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ProcessKillGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Foundation::HANDLE;
+            use windows_sys::Win32::System::Threading::TerminateProcess;
+            // SAFETY: handle is a live owned duplicate of the process
+            // handle until this guard drops; TerminateProcess is safe and
+            // a no-op if the child already exited. The OwnedHandle closes
+            // the duplicate immediately after.
+            unsafe {
+                TerminateProcess(self.handle.as_raw_handle() as HANDLE, 1);
             }
         }
     }

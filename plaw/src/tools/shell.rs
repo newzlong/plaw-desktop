@@ -629,9 +629,20 @@ impl Tool for ShellTool {
         // `cmd.output()` would auto-pipe stdout/stderr for us, but `spawn()`
         // inherits the parent's streams by default — set Piped explicitly
         // so wait_with_output() can capture the bytes for ToolResult.
+        //
+        // `kill_on_drop(true)` makes the timeout path below ACTUALLY kill
+        // the child: `tokio::time::timeout` drops the `wait_with_output`
+        // future on elapse, which drops the tokio `Child` — and with
+        // kill_on_drop set, tokio terminates it instead of detaching an
+        // orphan. (The Lowered path achieves the same via an internal
+        // process-handle kill guard in `LoweredChild::wait_with_output`.)
+        // This is what makes the "and was killed" timeout message true on
+        // both paths. Only ShellTool sets this; detached background
+        // processes (ProcessTool) build their command separately.
         cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .stdin(std::process::Stdio::null());
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true);
 
         // PR #91 Phase 1c: route the spawn through the trait method
         // shipped in PR #90. The default impl handles wrap_command +
