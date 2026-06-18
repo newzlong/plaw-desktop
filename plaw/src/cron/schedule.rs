@@ -60,6 +60,30 @@ pub fn validate_schedule(schedule: &Schedule, now: DateTime<Utc>) -> Result<()> 
     }
 }
 
+/// Upper bound for a per-job shell timeout. A shell cron job that needs to run
+/// longer than 24h is almost certainly a mistake and would pin a scheduler
+/// worker under `[scheduler] max_concurrent`, so we reject it secure-by-default.
+pub const MAX_SHELL_TIMEOUT_SECS: u64 = 86_400;
+
+/// Validate an optional per-job shell timeout override.
+///
+/// `None` is always valid (means "use the built-in default"). `Some(0)` is
+/// rejected because `tokio::time::timeout(Duration::ZERO, ..)` fires
+/// immediately, which would make every such job time out instantly. Values
+/// above [`MAX_SHELL_TIMEOUT_SECS`] are rejected as runaway-job protection.
+pub fn validate_timeout_secs(timeout_secs: Option<u64>) -> Result<()> {
+    let Some(secs) = timeout_secs else {
+        return Ok(());
+    };
+    if secs == 0 {
+        anyhow::bail!("timeout_secs must be greater than 0");
+    }
+    if secs > MAX_SHELL_TIMEOUT_SECS {
+        anyhow::bail!("timeout_secs must be <= {MAX_SHELL_TIMEOUT_SECS} seconds (24h); got {secs}");
+    }
+    Ok(())
+}
+
 pub fn schedule_cron_expression(schedule: &Schedule) -> Option<String> {
     match schedule {
         Schedule::Cron { expr, .. } => Some(expr.clone()),
@@ -98,6 +122,25 @@ mod tests {
         let at_schedule = Schedule::At { at };
         let next_at = next_run_for_schedule(&at_schedule, now).unwrap();
         assert_eq!(next_at, at);
+    }
+
+    #[test]
+    fn validate_timeout_secs_accepts_none_and_in_range() {
+        assert!(validate_timeout_secs(None).is_ok());
+        assert!(validate_timeout_secs(Some(1)).is_ok());
+        assert!(validate_timeout_secs(Some(300)).is_ok());
+        assert!(validate_timeout_secs(Some(MAX_SHELL_TIMEOUT_SECS)).is_ok());
+    }
+
+    #[test]
+    fn validate_timeout_secs_rejects_zero_and_over_max() {
+        let zero = validate_timeout_secs(Some(0)).unwrap_err().to_string();
+        assert!(zero.contains("greater than 0"), "{zero}");
+
+        let over = validate_timeout_secs(Some(MAX_SHELL_TIMEOUT_SECS + 1))
+            .unwrap_err()
+            .to_string();
+        assert!(over.contains("must be <="), "{over}");
     }
 
     #[test]

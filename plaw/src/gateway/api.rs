@@ -64,6 +64,8 @@ pub struct CronAddBody {
     pub name: Option<String>,
     pub schedule: String,
     pub command: String,
+    /// Optional per-job shell timeout in seconds (default 120, max 86400).
+    pub timeout_secs: Option<u64>,
 }
 
 // ── Handlers ────────────────────────────────────────────────────
@@ -242,6 +244,7 @@ pub async fn handle_api_cron_list(
                         "last_status": job.last_status,
                         "enabled": job.enabled,
                         "plaw_session": job.plaw_session,
+                        "timeout_secs": job.timeout_secs,
                     })
                 })
                 .collect();
@@ -271,7 +274,14 @@ pub async fn handle_api_cron_add(
         tz: None,
     };
 
-    match crate::cron::add_shell_job(&config, body.name, schedule, &body.command, None) {
+    match crate::cron::add_shell_job(
+        &config,
+        body.name,
+        schedule,
+        &body.command,
+        None,
+        body.timeout_secs,
+    ) {
         Ok(job) => Json(serde_json::json!({
             "status": "ok",
             "job": {
@@ -319,6 +329,8 @@ pub struct CronPatchBody {
     pub name: Option<String>,
     pub enabled: Option<bool>,
     pub context_summary: Option<String>,
+    /// Per-job shell timeout override in seconds (shell jobs only, 1..=86400).
+    pub timeout_secs: Option<u64>,
 }
 
 /// PATCH /api/cron/:id — update cron job fields
@@ -340,6 +352,7 @@ pub async fn handle_api_cron_patch(
         name: body.name,
         enabled: body.enabled,
         context_summary: body.context_summary,
+        timeout_secs: body.timeout_secs,
         ..crate::cron::CronJobPatch::default()
     };
 

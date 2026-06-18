@@ -63,13 +63,16 @@ Xác minh lần cuối: **2026-02-20**.
 ### `cron`
 
 - `plaw cron list`
-- `plaw cron add <expr> [--tz <IANA_TZ>] <command>`
-- `plaw cron add-at <rfc3339_timestamp> <command>`
-- `plaw cron add-every <every_ms> <command>`
-- `plaw cron once <delay> <command>`
+- `plaw cron add <expr> [--tz <IANA_TZ>] [--timeout-secs <N>] <command>`
+- `plaw cron add-at <rfc3339_timestamp> [--timeout-secs <N>] <command>`
+- `plaw cron add-every <every_ms> [--timeout-secs <N>] <command>`
+- `plaw cron once <delay> [--timeout-secs <N>] <command>`
+- `plaw cron update <id> [--expression <expr>] [--tz <IANA_TZ>] [--command <cmd>] [--name <name>] [--timeout-secs <N>]`
 - `plaw cron remove <id>`
 - `plaw cron pause <id>`
 - `plaw cron resume <id>`
+
+> `--timeout-secs`: per-job shell timeout (`1..=86400`s; default `120`). Shell jobs only.
 
 ### `models`
 

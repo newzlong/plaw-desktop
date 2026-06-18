@@ -79,6 +79,7 @@ impl Tool for CronAddTool {
                     "description": "notification=pure text reminder (no AI call), agent=AI executes with tools, shell=runs shell command"
                 },
                 "command": { "type": "string", "description": "For shell jobs: the command to run" },
+                "timeout_secs": { "type": "integer", "description": "For shell jobs only: per-job command timeout in seconds (default 120, max 86400). Ignored for agent/notification jobs." },
                 "prompt": {
                     "type": "string",
                     "description": "For notification: the text shown to user. For agent: the instruction for AI to execute."
@@ -214,7 +215,16 @@ impl Tool for CronAddTool {
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string);
 
-                cron::add_shell_job(&self.config, name, schedule, command, plaw_session)
+                let timeout_secs = args.get("timeout_secs").and_then(serde_json::Value::as_u64);
+
+                cron::add_shell_job(
+                    &self.config,
+                    name,
+                    schedule,
+                    command,
+                    plaw_session,
+                    timeout_secs,
+                )
             }
             JobType::Agent => {
                 let prompt = match args.get("prompt").and_then(serde_json::Value::as_str) {

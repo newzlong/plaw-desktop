@@ -491,13 +491,11 @@ async fn run_job_command(
     security: &SecurityPolicy,
     job: &CronJob,
 ) -> (bool, String) {
-    run_job_command_with_timeout(
-        config,
-        security,
-        job,
-        Duration::from_secs(SHELL_JOB_TIMEOUT_SECS),
-    )
-    .await
+    // Per-job override (validated > 0 and <= MAX_SHELL_TIMEOUT_SECS at
+    // creation/update time) takes precedence; unset jobs fall back to the
+    // built-in default. Covers both scheduled fires and `cron_run` force-runs.
+    let timeout = Duration::from_secs(job.timeout_secs.unwrap_or(SHELL_JOB_TIMEOUT_SECS));
+    run_job_command_with_timeout(config, security, job, timeout).await
 }
 
 async fn run_job_command_with_timeout(
@@ -684,6 +682,7 @@ mod tests {
             delete_after_run: false,
             plaw_session: None,
             context_summary: None,
+            timeout_secs: None,
             created_at: Utc::now(),
             next_run: Utc::now(),
             last_run: None,
@@ -744,6 +743,25 @@ mod tests {
             run_job_command_with_timeout(&config, &security, &job, Duration::from_millis(50)).await;
         assert!(!success);
         assert!(output.contains("job timed out after"));
+    }
+
+    #[tokio::test]
+    async fn run_job_command_honors_per_job_timeout() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = test_config(&tmp).await;
+        config.autonomy.allowed_commands = vec!["sleep".into()];
+        let mut job = test_job("sleep 5");
+        // Per-job override resolved inside run_job_command (not the test-only
+        // _with_timeout helper), so this exercises job.timeout_secs end to end.
+        job.timeout_secs = Some(1);
+        let security = SecurityPolicy::from_config(&config.autonomy, &config.workspace_dir);
+
+        let (success, output) = run_job_command(&config, &security, &job).await;
+        assert!(!success);
+        assert!(
+            output.contains("job timed out after 1"),
+            "expected per-job 1s timeout, got: {output}"
+        );
     }
 
     #[tokio::test]

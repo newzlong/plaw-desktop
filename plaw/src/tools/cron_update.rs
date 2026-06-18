@@ -83,6 +83,10 @@ impl Tool for CronUpdateTool {
                         },
                         "name": { "type": "string" },
                         "enabled": { "type": "boolean" },
+                        "timeout_secs": {
+                            "type": "integer",
+                            "description": "For shell jobs only: per-job command timeout in seconds (must be 1..=86400)."
+                        },
                         "context_summary": {
                             "type": "string",
                             "description": "Updated context summary for agent jobs. Include when the task context changes."

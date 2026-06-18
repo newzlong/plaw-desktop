@@ -12,6 +12,7 @@ pub mod scheduler;
 #[allow(unused_imports)]
 pub use schedule::{
     next_run_for_schedule, normalize_expression, schedule_cron_expression, validate_schedule,
+    validate_timeout_secs, MAX_SHELL_TIMEOUT_SECS,
 };
 #[allow(unused_imports)]
 pub use store::{
@@ -55,6 +56,9 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
                 if let Some(prompt) = &job.prompt {
                     println!("    prompt: {prompt}");
                 }
+                if let Some(timeout) = job.timeout_secs {
+                    println!("    timeout: {timeout}s");
+                }
             }
             Ok(())
         }
@@ -62,40 +66,53 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
             expression,
             tz,
             command,
+            timeout_secs,
         } => {
             let schedule = Schedule::Cron {
                 expr: expression,
                 tz,
             };
-            let job = add_shell_job(config, None, schedule, &command, None)?;
+            let job = add_shell_job(config, None, schedule, &command, None, timeout_secs)?;
             println!("✅ Added cron job {}", job.id);
             println!("  Expr: {}", job.expression);
             println!("  Next: {}", job.next_run.to_rfc3339());
             println!("  Cmd : {}", job.command);
             Ok(())
         }
-        crate::CronCommands::AddAt { at, command } => {
+        crate::CronCommands::AddAt {
+            at,
+            command,
+            timeout_secs,
+        } => {
             let at = chrono::DateTime::parse_from_rfc3339(&at)
                 .map_err(|e| anyhow::anyhow!("Invalid RFC3339 timestamp for --at: {e}"))?
                 .with_timezone(&chrono::Utc);
             let schedule = Schedule::At { at };
-            let job = add_shell_job(config, None, schedule, &command, None)?;
+            let job = add_shell_job(config, None, schedule, &command, None, timeout_secs)?;
             println!("✅ Added one-shot cron job {}", job.id);
             println!("  At  : {}", job.next_run.to_rfc3339());
             println!("  Cmd : {}", job.command);
             Ok(())
         }
-        crate::CronCommands::AddEvery { every_ms, command } => {
+        crate::CronCommands::AddEvery {
+            every_ms,
+            command,
+            timeout_secs,
+        } => {
             let schedule = Schedule::Every { every_ms };
-            let job = add_shell_job(config, None, schedule, &command, None)?;
+            let job = add_shell_job(config, None, schedule, &command, None, timeout_secs)?;
             println!("✅ Added interval cron job {}", job.id);
             println!("  Every(ms): {every_ms}");
             println!("  Next     : {}", job.next_run.to_rfc3339());
             println!("  Cmd      : {}", job.command);
             Ok(())
         }
-        crate::CronCommands::Once { delay, command } => {
-            let job = add_once(config, &delay, &command)?;
+        crate::CronCommands::Once {
+            delay,
+            command,
+            timeout_secs,
+        } => {
+            let job = add_once_with_timeout(config, &delay, &command, timeout_secs)?;
             println!("✅ Added one-shot cron job {}", job.id);
             println!("  At  : {}", job.next_run.to_rfc3339());
             println!("  Cmd : {}", job.command);
@@ -107,9 +124,17 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
             tz,
             command,
             name,
+            timeout_secs,
         } => {
-            if expression.is_none() && tz.is_none() && command.is_none() && name.is_none() {
-                bail!("At least one of --expression, --tz, --command, or --name must be provided");
+            if expression.is_none()
+                && tz.is_none()
+                && command.is_none()
+                && name.is_none()
+                && timeout_secs.is_none()
+            {
+                bail!(
+                    "At least one of --expression, --tz, --command, --name, or --timeout-secs must be provided"
+                );
             }
 
             // Merge expression/tz with the existing schedule so that
@@ -143,6 +168,7 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
                 schedule,
                 command,
                 name,
+                timeout_secs,
                 ..CronJobPatch::default()
             };
 
@@ -168,9 +194,18 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
 }
 
 pub fn add_once(config: &Config, delay: &str, command: &str) -> Result<CronJob> {
+    add_once_with_timeout(config, delay, command, None)
+}
+
+pub fn add_once_with_timeout(
+    config: &Config,
+    delay: &str,
+    command: &str,
+    timeout_secs: Option<u64>,
+) -> Result<CronJob> {
     let duration = parse_delay(delay)?;
     let at = chrono::Utc::now() + duration;
-    add_once_at(config, at, command)
+    add_once_at_with_timeout(config, at, command, timeout_secs)
 }
 
 pub fn add_once_at(
@@ -178,8 +213,17 @@ pub fn add_once_at(
     at: chrono::DateTime<chrono::Utc>,
     command: &str,
 ) -> Result<CronJob> {
+    add_once_at_with_timeout(config, at, command, None)
+}
+
+pub fn add_once_at_with_timeout(
+    config: &Config,
+    at: chrono::DateTime<chrono::Utc>,
+    command: &str,
+    timeout_secs: Option<u64>,
+) -> Result<CronJob> {
     let schedule = Schedule::At { at };
-    add_shell_job(config, None, schedule, command, None)
+    add_shell_job(config, None, schedule, command, None, timeout_secs)
 }
 
 pub fn pause_job(config: &Config, id: &str) -> Result<CronJob> {
@@ -250,6 +294,7 @@ mod tests {
             },
             cmd,
             None,
+            None,
         )
         .unwrap()
     }
@@ -269,6 +314,7 @@ mod tests {
                 tz: tz.map(Into::into),
                 command: command.map(Into::into),
                 name: name.map(Into::into),
+                timeout_secs: None,
             },
             config,
         )
@@ -372,6 +418,7 @@ mod tests {
                 tz: None,
             },
             "echo original",
+            None,
             None,
         )
         .unwrap();

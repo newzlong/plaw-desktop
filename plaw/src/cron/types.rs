@@ -124,6 +124,11 @@ pub struct CronJob {
     /// AI-generated summary of creation context, injected into agent prompt at execution time
     #[serde(default)]
     pub context_summary: Option<String>,
+    /// Per-job shell command timeout in seconds. `None` falls back to the
+    /// built-in default (120s). Only meaningful for `JobType::Shell`;
+    /// agent and notification jobs ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
     pub created_at: DateTime<Utc>,
     pub next_run: DateTime<Utc>,
     pub last_run: Option<DateTime<Utc>>,
@@ -155,6 +160,9 @@ pub struct CronJobPatch {
     pub delete_after_run: Option<bool>,
     pub plaw_session: Option<String>,
     pub context_summary: Option<String>,
+    /// Per-job shell timeout override in seconds (shell jobs only). `Some(v)`
+    /// sets the override; `None` leaves the existing value unchanged.
+    pub timeout_secs: Option<u64>,
 }
 
 #[cfg(test)]
