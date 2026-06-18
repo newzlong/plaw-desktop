@@ -105,9 +105,10 @@ const activeComponent = computed(() => componentMap[activeTab.value])
 .settings-overlay {
   position: fixed;
   inset: 0;
-  z-index: 1000;
-  background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(4px);
+  z-index: var(--z-panel);
+  background: var(--overlay-scrim);
+  backdrop-filter: blur(var(--blur-scrim));
+  -webkit-backdrop-filter: blur(var(--blur-scrim));
   display: flex;
   align-items: center;
   justify-content: center;

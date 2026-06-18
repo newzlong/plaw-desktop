@@ -102,7 +102,7 @@ onUnmounted(() => {
   transition: background 0.15s, color 0.15s;
 }
 .titlebar__tool:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--hover-overlay);
   color: var(--text-primary);
 }
 
@@ -133,7 +133,7 @@ onUnmounted(() => {
   transition: background 0.15s, color 0.15s;
 }
 .titlebar__btn:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--hover-overlay);
   color: var(--text-primary);
 }
 .titlebar__btn--close:hover {

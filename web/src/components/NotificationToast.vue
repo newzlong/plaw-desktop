@@ -36,7 +36,7 @@ function iconFor(type) {
   position: fixed;
   top: 16px;
   right: 16px;
-  z-index: 9999;
+  z-index: var(--z-notification);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -48,8 +48,8 @@ function iconFor(type) {
   pointer-events: auto;
   cursor: pointer;
   background: var(--bg-overlay);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(var(--blur-lg));
+  -webkit-backdrop-filter: blur(var(--blur-lg));
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   padding: 14px 16px;
