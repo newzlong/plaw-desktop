@@ -83,15 +83,8 @@ onUnmounted(() => clearInterval(timer))
 </script>
 
 <style scoped>
-.page-header {
-  display: flex; align-items: flex-start; justify-content: space-between;
-  margin-bottom: 24px;
-}
-.page-title {
-  font-size: 1.5rem; font-weight: 700;
-  color: var(--text-primary);
-  letter-spacing: -0.02em;
-}
+
+
 .log-container {
   font-family: 'Cascadia Code', 'Fira Code', monospace;
   font-size: 0.78rem;

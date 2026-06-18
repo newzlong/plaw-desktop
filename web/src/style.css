@@ -46,3 +46,36 @@ select:focus-visible {
     scroll-behavior: auto !important;
   }
 }
+
+/* --- Shared page layout ---
+   Promoted from per-view scoped duplicates (these blocks were copied
+   into ~8 views with only margin drift). Views keep a small scoped
+   `margin-*` override where they differ. */
+.page-header {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  margin-bottom: 24px;
+}
+.page-title {
+  font-size: 1.5rem; font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+}
+.page-desc {
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+.save-msg {
+  font-size: 0.82rem; font-weight: 500;
+  transition: opacity 0.3s;
+}
+.save-msg--ok { color: var(--status-ok); }
+.save-msg--err { color: var(--status-err); }
+.restart-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  background: var(--plaw-primary-soft);
+  border: 1px solid var(--plaw-primary);
+  border-radius: var(--radius-md);
+  padding: 10px 16px;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+}

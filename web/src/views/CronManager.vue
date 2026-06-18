@@ -336,19 +336,8 @@ onMounted(() => {
 .mt-1\.5 { margin-top: 0.375rem; }
 .mt-2 { margin-top: 0.5rem; }
 
-.page-header {
-  display: flex; align-items: flex-start; justify-content: space-between;
-  margin-bottom: 24px;
-}
-.page-title {
-  font-size: 1.5rem; font-weight: 700;
-  color: var(--text-primary);
-  letter-spacing: -0.02em;
-}
-.page-desc {
-  color: var(--text-secondary);
-  font-size: 0.875rem; margin-top: 4px;
-}
+
+.page-desc { margin-top: 4px; }
 
 .empty-hint {
   display: flex; align-items: center; gap: 10px;
