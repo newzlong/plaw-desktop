@@ -298,19 +298,9 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.page-header {
-  display: flex; align-items: flex-start; justify-content: space-between;
-  margin-bottom: 24px;
-}
-.page-title {
-  font-size: 1.5rem; font-weight: 700;
-  color: var(--text-primary);
-  letter-spacing: -0.02em;
-}
-.page-desc {
-  color: var(--text-secondary);
-  font-size: 0.875rem; margin-top: 4px;
-}
+
+
+.page-desc { margin-top: 4px; }
 
 .stats-row {
   display: flex; gap: 16px; margin-bottom: 16px;

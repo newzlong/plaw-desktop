@@ -282,17 +282,8 @@ async function doRestart() {
 </script>
 
 <style scoped>
-.page-title {
-  font-size: 1.5rem; font-weight: 700;
-  color: var(--text-primary);
-  margin-bottom: 24px; letter-spacing: -0.02em;
-}
-.save-msg {
-  font-size: 0.82rem; font-weight: 500;
-  transition: opacity 0.3s;
-}
-.save-msg--ok { color: var(--status-ok); }
-.save-msg--err { color: var(--status-err); }
+.page-title { margin-bottom: 24px; }
+
 .proxy-toggle {
   display: flex; align-items: center; justify-content: space-between;
   width: 100%; background: none; border: none; cursor: pointer;
@@ -305,13 +296,5 @@ async function doRestart() {
   font-size: 0.75rem;
 }
 .proxy-toggle__arrow--open { transform: rotate(90deg); }
-.restart-bar {
-  display: flex; align-items: center; justify-content: space-between;
-  background: var(--plaw-primary-soft);
-  border: 1px solid var(--plaw-primary);
-  border-radius: var(--radius-md);
-  padding: 10px 16px;
-  font-size: 0.85rem;
-  color: var(--text-primary);
-}
+
 </style>
