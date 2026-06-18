@@ -156,12 +156,15 @@ by a standalone IOCP spike before any unsafe was written):
   through `wrap_command` + spawn directly per PR #87), so always-piping
   the Lowered path is correct.
 
-**Cancel behavior (parity, documented):** `wait_with_output` matches
-`tokio::process::Child` with the default `kill_on_drop(false)` — if the
-ShellTool `timeout` elapses, the child detaches and runs to completion
-(the Job Object's `KILL_ON_JOB_CLOSE` reaps it when the sandbox is
-dropped). The existing Tokio path shares this exact behavior. A uniform
-cancel-kill across both paths is a future follow-up.
+**Cancel behavior:** when ShellTool's `timeout` elapses, the child is
+force-killed on BOTH paths. The Tokio path uses tokio's
+`kill_on_drop(true)`; the Lowered path holds an internal process-handle
+kill guard (`ProcessKillGuard`) in `wait_with_output` that
+`TerminateProcess`es the child when the future is dropped — necessary
+because the lowered child's wait runs in a detached `spawn_blocking`
+task that can't itself be cancelled. The Job Object's
+`KILL_ON_JOB_CLOSE` remains a backstop. This is what makes the
+"timed out … and was killed" message true.
 
 ## Roadmap: not in scope today
 

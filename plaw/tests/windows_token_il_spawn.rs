@@ -437,3 +437,70 @@ async fn spawn_piped_applies_explicit_env_and_cwd() {
         "child cwd must be the explicit dir we passed; got {stdout:?} (want {tmp_str})"
     );
 }
+
+/// Cancel-kill (refute #5): dropping the `wait_with_output` future (e.g.
+/// a `tokio::time::timeout` elapsing) must FORCE-KILL the child, not
+/// orphan it. Spawn a ~29s child at Low, time out after 700ms, then via
+/// a process handle opened BEFORE the kill (so PID reuse can't fool the
+/// check) verify the child terminates within a few seconds — far below
+/// its natural lifetime, so an early exit proves the kill guard fired.
+#[tokio::test]
+async fn lowered_wait_with_output_kills_child_on_cancel() {
+    use windows_sys::Win32::Foundation::{CloseHandle, FALSE, HANDLE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    const STILL_ACTIVE: u32 = 259;
+
+    // `ping -n 30` keeps cmd alive ~29s; `>nul` keeps the stdout pipe
+    // empty (no buffer pressure). Killing cmd (the LoweredChild's
+    // process) is what the guard does.
+    let child = spawn_with_lowered_token_piped(
+        cmd_exe(),
+        &["/C".to_string(), "ping 127.0.0.1 -n 30 >nul".to_string()],
+        IntegrityLevel::Low,
+        None,
+        None,
+    )
+    .expect("piped Low-IL spawn must succeed");
+    let pid = child.id();
+
+    // SAFETY: OpenProcess with query access on a PID we just spawned;
+    // the handle pins the process object (survives termination as a
+    // zombie) so the exit-code poll is immune to PID reuse.
+    let proc: HANDLE = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) };
+    assert!(
+        !proc.is_null(),
+        "OpenProcess on the freshly-spawned child must succeed"
+    );
+
+    // Time out fast → drops wait_with_output → guard TerminateProcess.
+    let r = tokio::time::timeout(
+        std::time::Duration::from_millis(700),
+        child.wait_with_output(),
+    )
+    .await;
+    assert!(r.is_err(), "must time out (the child runs ~29s)");
+
+    // Poll up to ~6s — far below the ~29s natural lifetime, so an exit
+    // here can ONLY be the cancel guard's TerminateProcess.
+    let mut exited = false;
+    for _ in 0..60 {
+        let mut code: u32 = STILL_ACTIVE;
+        // SAFETY: proc is a live owned handle until CloseHandle below.
+        let ok = unsafe { GetExitCodeProcess(proc, &mut code) };
+        if ok != 0 && code != STILL_ACTIVE {
+            exited = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    // SAFETY: proc obtained from OpenProcess, closed exactly once here.
+    unsafe { CloseHandle(proc) };
+
+    assert!(
+        exited,
+        "the cancel guard must terminate the lowered child on timeout — \
+         it would otherwise run ~29s before exiting on its own"
+    );
+}
