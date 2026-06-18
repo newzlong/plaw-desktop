@@ -234,6 +234,9 @@ Examples:
         tz: Option<String>,
         /// Command to run
         command: String,
+        /// Optional per-job shell timeout in seconds (default 120, max 86400)
+        #[arg(long)]
+        timeout_secs: Option<u64>,
     },
     /// Add a one-shot scheduled task at an RFC3339 timestamp
     #[command(long_about = "\
@@ -249,6 +252,9 @@ Examples:
         at: String,
         /// Command to run
         command: String,
+        /// Optional per-job shell timeout in seconds (default 120, max 86400)
+        #[arg(long)]
+        timeout_secs: Option<u64>,
     },
     /// Add a fixed-interval scheduled task
     #[command(long_about = "\
@@ -264,6 +270,9 @@ Examples:
         every_ms: u64,
         /// Command to run
         command: String,
+        /// Optional per-job shell timeout in seconds (default 120, max 86400)
+        #[arg(long)]
+        timeout_secs: Option<u64>,
     },
     /// Add a one-shot delayed task (e.g. "30m", "2h", "1d")
     #[command(long_about = "\
@@ -281,6 +290,9 @@ Examples:
         delay: String,
         /// Command to run
         command: String,
+        /// Optional per-job shell timeout in seconds (default 120, max 86400)
+        #[arg(long)]
+        timeout_secs: Option<u64>,
     },
     /// Remove a scheduled task
     Remove {
@@ -312,6 +324,9 @@ Examples:
         /// New job name
         #[arg(long)]
         name: Option<String>,
+        /// New per-job shell timeout in seconds (default 120, max 86400)
+        #[arg(long)]
+        timeout_secs: Option<u64>,
     },
     /// Pause a scheduled task
     Pause {

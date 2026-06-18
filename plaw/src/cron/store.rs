@@ -24,7 +24,7 @@ pub fn add_job(config: &Config, expression: &str, command: &str) -> Result<CronJ
         expr: expression.to_string(),
         tz: None,
     };
-    add_shell_job(config, None, schedule, command, None)
+    add_shell_job(config, None, schedule, command, None, None)
 }
 
 pub fn add_shell_job(
@@ -33,9 +33,11 @@ pub fn add_shell_job(
     schedule: Schedule,
     command: &str,
     plaw_session: Option<String>,
+    timeout_secs: Option<u64>,
 ) -> Result<CronJob> {
     let now = Utc::now();
     validate_schedule(&schedule, now)?;
+    crate::cron::validate_timeout_secs(timeout_secs)?;
     let next_run = next_run_for_schedule(&schedule, now)?;
     let id = Uuid::new_v4().to_string();
     let expression = schedule_cron_expression(&schedule).unwrap_or_default();
@@ -47,8 +49,8 @@ pub fn add_shell_job(
         conn.execute(
             "INSERT INTO cron_jobs (
                 id, expression, command, schedule, job_type, prompt, name, session_target, model,
-                enabled, delivery, delete_after_run, created_at, next_run, plaw_session
-             ) VALUES (?1, ?2, ?3, ?4, 'shell', NULL, ?5, 'isolated', NULL, 1, ?6, ?7, ?8, ?9, ?10)",
+                enabled, delivery, delete_after_run, created_at, next_run, plaw_session, timeout_secs
+             ) VALUES (?1, ?2, ?3, ?4, 'shell', NULL, ?5, 'isolated', NULL, 1, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 id,
                 expression,
@@ -60,6 +62,7 @@ pub fn add_shell_job(
                 now.to_rfc3339(),
                 next_run.to_rfc3339(),
                 plaw_session,
+                timeout_secs,
             ],
         )
         .context("Failed to insert cron shell job")?;
@@ -164,7 +167,7 @@ pub fn list_jobs(config: &Config) -> Result<Vec<CronJob>> {
     with_connection(config, |conn| {
         let mut stmt = conn.prepare(
             "SELECT id, expression, command, schedule, job_type, prompt, name, session_target, model,
-                    enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output, plaw_session, context_summary
+                    enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output, plaw_session, context_summary, timeout_secs
              FROM cron_jobs ORDER BY next_run ASC",
         )?;
 
@@ -182,7 +185,7 @@ pub fn get_job(config: &Config, job_id: &str) -> Result<CronJob> {
     with_connection(config, |conn| {
         let mut stmt = conn.prepare(
             "SELECT id, expression, command, schedule, job_type, prompt, name, session_target, model,
-                    enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output, plaw_session, context_summary
+                    enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output, plaw_session, context_summary, timeout_secs
              FROM cron_jobs WHERE id = ?1",
         )?;
 
@@ -215,7 +218,7 @@ pub fn due_jobs(config: &Config, now: DateTime<Utc>) -> Result<Vec<CronJob>> {
     with_connection(config, |conn| {
         let mut stmt = conn.prepare(
             "SELECT id, expression, command, schedule, job_type, prompt, name, session_target, model,
-                    enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output, plaw_session, context_summary
+                    enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output, plaw_session, context_summary, timeout_secs
              FROM cron_jobs
              WHERE enabled = 1 AND next_run <= ?1
              ORDER BY next_run ASC
@@ -272,6 +275,10 @@ pub fn update_job(config: &Config, job_id: &str, patch: CronJobPatch) -> Result<
     if let Some(context_summary) = patch.context_summary {
         job.context_summary = Some(context_summary);
     }
+    if let Some(timeout_secs) = patch.timeout_secs {
+        crate::cron::validate_timeout_secs(Some(timeout_secs))?;
+        job.timeout_secs = Some(timeout_secs);
+    }
 
     if schedule_changed {
         job.next_run = next_run_for_schedule(&job.schedule, Utc::now())?;
@@ -282,7 +289,7 @@ pub fn update_job(config: &Config, job_id: &str, patch: CronJobPatch) -> Result<
             "UPDATE cron_jobs
              SET expression = ?1, command = ?2, schedule = ?3, job_type = ?4, prompt = ?5, name = ?6,
                  session_target = ?7, model = ?8, enabled = ?9, delivery = ?10, delete_after_run = ?11,
-                 next_run = ?12, plaw_session = ?14, context_summary = ?15
+                 next_run = ?12, plaw_session = ?14, context_summary = ?15, timeout_secs = ?16
              WHERE id = ?13",
             params![
                 job.expression,
@@ -300,6 +307,7 @@ pub fn update_job(config: &Config, job_id: &str, patch: CronJobPatch) -> Result<
                 job.id,
                 job.plaw_session,
                 job.context_summary,
+                job.timeout_secs,
             ],
         )
         .context("Failed to update cron job")?;
@@ -507,6 +515,9 @@ fn map_cron_job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CronJob> {
         last_output: row.get(16)?,
         plaw_session: row.get(17)?,
         context_summary: row.get(18)?,
+        timeout_secs: row
+            .get::<_, Option<i64>>(19)?
+            .and_then(|v| u64::try_from(v).ok()),
     })
 }
 
@@ -654,6 +665,7 @@ fn with_connection<T>(config: &Config, f: impl FnOnce(&Connection) -> Result<T>)
     add_column_if_missing(&conn, "delete_after_run", "INTEGER NOT NULL DEFAULT 0")?;
     add_column_if_missing(&conn, "plaw_session", "TEXT")?;
     add_column_if_missing(&conn, "context_summary", "TEXT")?;
+    add_column_if_missing(&conn, "timeout_secs", "INTEGER")?;
 
     f(&conn)
 }
@@ -699,6 +711,7 @@ mod tests {
             },
             "echo once",
             None,
+            None,
         )
         .unwrap();
         assert!(one_shot.delete_after_run);
@@ -709,9 +722,80 @@ mod tests {
             Schedule::Every { every_ms: 60_000 },
             "echo recurring",
             None,
+            None,
         )
         .unwrap();
         assert!(!recurring.delete_after_run);
+    }
+
+    #[test]
+    fn shell_job_persists_timeout_override() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp);
+
+        let job = add_shell_job(
+            &config,
+            None,
+            Schedule::Cron {
+                expr: "*/5 * * * *".into(),
+                tz: None,
+            },
+            "echo timed",
+            None,
+            Some(300),
+        )
+        .unwrap();
+        assert_eq!(job.timeout_secs, Some(300));
+
+        // Survives a round-trip through SQLite.
+        let reloaded = get_job(&config, &job.id).unwrap();
+        assert_eq!(reloaded.timeout_secs, Some(300));
+
+        // Default (None) shell jobs keep NULL / fall through to the built-in default.
+        let default_job = add_job(&config, "*/5 * * * *", "echo default").unwrap();
+        assert_eq!(default_job.timeout_secs, None);
+    }
+
+    #[test]
+    fn update_job_sets_timeout_override() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp);
+        let job = add_job(&config, "*/5 * * * *", "echo ok").unwrap();
+        assert_eq!(job.timeout_secs, None);
+
+        let updated = update_job(
+            &config,
+            &job.id,
+            CronJobPatch {
+                timeout_secs: Some(45),
+                ..CronJobPatch::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.timeout_secs, Some(45));
+        // Persisted, not just in-memory.
+        assert_eq!(get_job(&config, &job.id).unwrap().timeout_secs, Some(45));
+    }
+
+    #[test]
+    fn add_shell_job_rejects_invalid_timeout() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp);
+
+        let zero = add_shell_job(
+            &config,
+            None,
+            Schedule::Cron {
+                expr: "*/5 * * * *".into(),
+                tz: None,
+            },
+            "echo bad",
+            None,
+            Some(0),
+        );
+        assert!(zero.is_err());
+        // The rejected job must not have been persisted.
+        assert!(list_jobs(&config).unwrap().is_empty());
     }
 
     #[test]

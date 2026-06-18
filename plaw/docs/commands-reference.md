@@ -97,10 +97,11 @@ Notes:
 ### `cron`
 
 - `plaw cron list`
-- `plaw cron add <expr> [--tz <IANA_TZ>] <command>`
-- `plaw cron add-at <rfc3339_timestamp> <command>`
-- `plaw cron add-every <every_ms> <command>`
-- `plaw cron once <delay> <command>`
+- `plaw cron add <expr> [--tz <IANA_TZ>] [--timeout-secs <N>] <command>`
+- `plaw cron add-at <rfc3339_timestamp> [--timeout-secs <N>] <command>`
+- `plaw cron add-every <every_ms> [--timeout-secs <N>] <command>`
+- `plaw cron once <delay> [--timeout-secs <N>] <command>`
+- `plaw cron update <id> [--expression <expr>] [--tz <IANA_TZ>] [--command <cmd>] [--name <name>] [--timeout-secs <N>]`
 - `plaw cron remove <id>`
 - `plaw cron pause <id>`
 - `plaw cron resume <id>`
@@ -109,6 +110,7 @@ Notes:
 
 - Mutating schedule/cron actions require `cron.enabled = true`.
 - Shell command payloads for schedule creation (`create` / `add` / `once`) are validated by security command policy before job persistence.
+- `--timeout-secs` sets a per-job shell command timeout in seconds (range `1..=86400`; default `120` when omitted). It applies to shell jobs only; agent and notification jobs ignore it. The same override is available to the `cron_add` / `cron_update` agent tools (`timeout_secs`) and the `POST` / `PATCH /api/cron` endpoints.
 
 ### `models`
 
