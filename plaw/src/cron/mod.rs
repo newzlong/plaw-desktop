@@ -11,8 +11,8 @@ pub mod scheduler;
 
 #[allow(unused_imports)]
 pub use schedule::{
-    next_run_for_schedule, normalize_expression, schedule_cron_expression, validate_schedule,
-    validate_timeout_secs, MAX_SHELL_TIMEOUT_SECS,
+    next_run_after_run, next_run_for_schedule, normalize_expression, schedule_cron_expression,
+    validate_schedule, validate_timeout_secs, MAX_SHELL_TIMEOUT_SECS,
 };
 #[allow(unused_imports)]
 pub use store::{
