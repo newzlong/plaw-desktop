@@ -349,6 +349,17 @@ pub struct AppState {
     pub hooks: Option<Arc<crate::hooks::HookRunner>>,
 }
 
+/// Aborts the wrapped task when dropped. Used so the gateway-owned cron
+/// scheduler is torn down when `run_gateway` returns or its future is dropped
+/// (supervisor restart), instead of leaking a detached poll loop.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Run the HTTP gateway using axum with proper HTTP/1.1 compliance.
 #[allow(clippy::too_many_lines)]
 pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
@@ -1033,10 +1044,17 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         // ── SPA fallback: non-API GET requests serve index.html ──
         .fallback(get(static_files::handle_spa_fallback));
 
-    // Spawn cron scheduler if enabled (so gateway mode also runs scheduled tasks)
-    if config.cron.enabled {
+    // Spawn the cron scheduler if enabled (gateway mode runs scheduled tasks).
+    // This is the SINGLE scheduler for the process — the daemon intentionally
+    // does NOT spawn its own (see daemon::run), since it always starts this
+    // gateway and a second poll loop would double-fire every job against the
+    // shared cron DB. The task is held in an abort-on-drop guard so that when
+    // run_gateway returns OR its future is dropped on a supervisor restart, the
+    // scheduler is torn down rather than leaked as a detached loop that would
+    // double-fire after the next restart.
+    let _scheduler_guard = config.cron.enabled.then(|| {
         let scheduler_config = config.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             if let Err(e) = crate::cron::scheduler::run_with_notifier(
                 scheduler_config,
                 Some(scheduler_event_tx),
@@ -1047,7 +1065,8 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
             }
         });
         crate::health::mark_component_ok("scheduler");
-    }
+        AbortOnDrop(handle)
+    });
 
     // Run the server
     axum::serve(
@@ -2363,6 +2382,30 @@ async fn handle_qq_webhook(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn abort_on_drop_aborts_the_scheduler_task() {
+        // Pins the gateway-scheduler teardown invariant: dropping the guard
+        // (run_gateway returns / future dropped on restart) aborts the task,
+        // so a restart can't leak a detached scheduler that double-fires.
+        let handle = tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        });
+        let abort_handle = handle.abort_handle();
+        let guard = AbortOnDrop(handle);
+        assert!(!abort_handle.is_finished(), "task should be running");
+        drop(guard);
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            abort_handle.is_finished(),
+            "task must be aborted after the guard is dropped"
+        );
+    }
+
     use crate::channels::traits::ChannelMessage;
     use crate::memory::{Memory, MemoryCategory, MemoryEntry};
     use crate::providers::Provider;

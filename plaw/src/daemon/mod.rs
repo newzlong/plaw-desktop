@@ -80,20 +80,17 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
         ));
     }
 
-    if config.cron.enabled {
-        let scheduler_cfg = config.clone();
-        handles.push(spawn_component_supervisor(
-            "scheduler",
-            initial_backoff,
-            max_backoff,
-            move || {
-                let cfg = scheduler_cfg.clone();
-                async move { crate::cron::scheduler::run(cfg).await }
-            },
-        ));
-    } else {
+    // The cron scheduler is owned by the GATEWAY: run_gateway spawns it with
+    // the WS cron-result notifier wired in, so scheduled-task output reaches
+    // chat clients. The daemon ALWAYS starts the gateway above, so spawning a
+    // second scheduler here would run two poll loops against the one shared
+    // cron DB and double-fire every job (two LLM calls, two announcements, two
+    // git pushes...). Health for the "scheduler" component is maintained by
+    // the gateway-owned loop; when cron is disabled nobody spawns one, so mark
+    // it ok here to keep the component reporting healthy.
+    if !config.cron.enabled {
         crate::health::mark_component_ok("scheduler");
-        tracing::info!("Cron disabled; scheduler supervisor not started");
+        tracing::info!("Cron disabled; scheduler not started");
     }
 
     println!("🧠 Plaw daemon started");
