@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::cron::{
-    next_run_for_schedule, schedule_cron_expression, validate_schedule, CronJob, CronJobPatch,
-    CronRun, DeliveryConfig, JobType, Schedule, SessionTarget,
+    next_run_after_run, next_run_for_schedule, schedule_cron_expression, validate_schedule,
+    CronJob, CronJobPatch, CronRun, DeliveryConfig, JobType, Schedule, SessionTarget,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -396,7 +396,11 @@ pub fn reschedule_after_run(
     output: &str,
 ) -> Result<()> {
     let now = Utc::now();
-    let next_run = next_run_for_schedule(&job.schedule, now)?;
+    // Anchor `Every` reschedules to the tick this run was scheduled for, not to
+    // `now` (the completion time), so periodic jobs keep a fixed rate instead of
+    // drifting forward by their own execution time each cycle. Cron/At are
+    // unaffected (still anchored to `now`).
+    let next_run = next_run_after_run(&job.schedule, job.next_run, now)?;
     let status = if success { "ok" } else { "error" };
     let bounded_output = truncate_cron_output(output);
 

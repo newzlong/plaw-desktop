@@ -38,6 +38,58 @@ pub fn next_run_for_schedule(schedule: &Schedule, from: DateTime<Utc>) -> Result
     }
 }
 
+/// Compute the next run time AFTER a job has executed, given the tick it was
+/// scheduled for (`scheduled_for`) and the current time (`now`).
+///
+/// For `Every` schedules this anchors the next fire to the SCHEDULED tick and
+/// advances by whole intervals until strictly after `now`, so a periodic job
+/// keeps a fixed rate instead of drifting forward by its own execution time
+/// each cycle. Missed ticks (the job ran longer than the interval, or the
+/// process was down across several) are skipped rather than fired back-to-back
+/// — this mirrors the scheduler loop's own `MissedTickBehavior::Skip`.
+///
+/// `Cron` and `At` are anchored to `now`, exactly as [`next_run_for_schedule`]:
+/// Cron then correctly skips any occurrence missed during execution, and `At`
+/// is a one-shot whose stored time is returned unchanged.
+pub fn next_run_after_run(
+    schedule: &Schedule,
+    scheduled_for: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Result<DateTime<Utc>> {
+    match schedule {
+        Schedule::Every { every_ms } => next_every_fixed_rate(scheduled_for, *every_ms, now),
+        _ => next_run_for_schedule(schedule, now),
+    }
+}
+
+/// Smallest `anchor + k * every_ms` (k >= 1) strictly greater than `now`.
+/// Fixed-rate with missed-tick skip; O(1) and overflow-checked.
+fn next_every_fixed_rate(
+    anchor: DateTime<Utc>,
+    every_ms: u64,
+    now: DateTime<Utc>,
+) -> Result<DateTime<Utc>> {
+    if every_ms == 0 {
+        anyhow::bail!("Invalid schedule: every_ms must be > 0");
+    }
+    let ms = i64::try_from(every_ms).context("every_ms is too large")?;
+    // Whole intervals elapsed since the anchor; +1 lands on the next tick
+    // strictly after `now`. A fast job (elapsed ~0) yields k = 1, i.e. anchor +
+    // one interval. If the anchor is somehow in the future, fall back to one.
+    let elapsed_ms = now.signed_duration_since(anchor).num_milliseconds();
+    let steps = if elapsed_ms < 0 {
+        1
+    } else {
+        elapsed_ms / ms + 1
+    };
+    let advance_ms = ms
+        .checked_mul(steps)
+        .context("schedule interval advance overflowed")?;
+    anchor
+        .checked_add_signed(ChronoDuration::milliseconds(advance_ms))
+        .ok_or_else(|| anyhow::anyhow!("every_ms overflowed DateTime"))
+}
+
 pub fn validate_schedule(schedule: &Schedule, now: DateTime<Utc>) -> Result<()> {
     match schedule {
         Schedule::Cron { expr, .. } => {
@@ -141,6 +193,74 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(over.contains("must be <="), "{over}");
+    }
+
+    #[test]
+    fn every_reschedule_is_fixed_rate_not_completion_anchored() {
+        // A job scheduled for t=0 with a 60s interval that finishes 5s later
+        // must next fire at t=60 (anchor + interval), NOT t=65 (completion +
+        // interval). This is the drift the completion-anchored path accumulated.
+        let scheduled_for = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let every = Schedule::Every { every_ms: 60_000 };
+        let finished_at = scheduled_for + ChronoDuration::seconds(5);
+
+        let next = next_run_after_run(&every, scheduled_for, finished_at).unwrap();
+        assert_eq!(next, scheduled_for + ChronoDuration::seconds(60));
+    }
+
+    #[test]
+    fn every_reschedule_does_not_accumulate_drift() {
+        // Ten cycles of a 60s job that each take 7s must land exactly on the
+        // minute, with zero accumulated drift.
+        let mut scheduled_for = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let every = Schedule::Every { every_ms: 60_000 };
+        for i in 1..=10 {
+            let finished_at = scheduled_for + ChronoDuration::seconds(7);
+            scheduled_for = next_run_after_run(&every, scheduled_for, finished_at).unwrap();
+            assert_eq!(
+                scheduled_for,
+                Utc.with_ymd_and_hms(2026, 1, 1, 0, i, 0).unwrap(),
+                "cycle {i} drifted"
+            );
+        }
+    }
+
+    #[test]
+    fn every_reschedule_skips_missed_ticks_no_catchup_burst() {
+        // A 60s job that took 150s (longer than the interval) must skip to the
+        // next future tick rather than fire back-to-back for every missed one.
+        let scheduled_for = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let every = Schedule::Every { every_ms: 60_000 };
+        let finished_at = scheduled_for + ChronoDuration::seconds(150);
+
+        let next = next_run_after_run(&every, scheduled_for, finished_at).unwrap();
+        // Elapsed 150s -> two whole intervals passed (t=60, t=120 both <= now);
+        // next strictly-future tick is t=180.
+        assert_eq!(next, scheduled_for + ChronoDuration::seconds(180));
+        assert!(next > finished_at);
+    }
+
+    #[test]
+    fn next_run_after_run_delegates_cron_and_at_to_now() {
+        // Cron/At must be unchanged: anchored to `now`, ignoring scheduled_for.
+        let scheduled_for = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 2, 16, 0, 0, 0).unwrap();
+
+        let at_time = now + ChronoDuration::hours(3);
+        let at = Schedule::At { at: at_time };
+        assert_eq!(
+            next_run_after_run(&at, scheduled_for, now).unwrap(),
+            at_time
+        );
+
+        let cron = Schedule::Cron {
+            expr: "0 9 * * *".into(),
+            tz: None,
+        };
+        assert_eq!(
+            next_run_after_run(&cron, scheduled_for, now).unwrap(),
+            next_run_for_schedule(&cron, now).unwrap(),
+        );
     }
 
     #[test]
