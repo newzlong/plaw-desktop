@@ -210,6 +210,26 @@ pub fn default_tools_with_runtime(
     tools
 }
 
+/// Process-wide ceiling on concurrent agentic sub-agent loops.
+///
+/// `parallel_delegate` (≤10 tasks/call) and `subagent_spawn` (≤10 background
+/// sessions) each cap themselves, but those caps compose multiplicatively with
+/// no global ceiling — one of each can run ~20 simultaneous agentic loops, each
+/// hammering the provider in a tight tool loop (instant 429s / uncapped spend).
+/// Both tools acquire a permit from this shared semaphore before their loop
+/// runs, so total concurrency is bounded process-wide.
+const MAX_CONCURRENT_AGENTIC_LOOPS: usize = 16;
+static AGENTIC_SEMAPHORE: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::OnceLock::new();
+
+/// The shared semaphore bounding concurrent agentic sub-agent loops across
+/// `parallel_delegate` and `subagent_spawn` (a single process-global instance).
+pub(crate) fn agentic_semaphore() -> Arc<tokio::sync::Semaphore> {
+    AGENTIC_SEMAPHORE
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_AGENTIC_LOOPS)))
+        .clone()
+}
+
 /// Create full tool registry including memory tools and optional Composio
 #[allow(clippy::implicit_hasher, clippy::too_many_arguments)]
 pub fn all_tools(
@@ -746,6 +766,19 @@ mod tests {
     use crate::config::{BrowserConfig, Config, MemoryConfig, WasmRuntimeConfig};
     use crate::runtime::WasmRuntime;
     use tempfile::TempDir;
+
+    #[test]
+    fn agentic_semaphore_is_process_shared() {
+        // Both delegation tools must draw permits from ONE semaphore so their
+        // per-call fan-out caps compose into a single process-wide ceiling.
+        let a = agentic_semaphore();
+        let b = agentic_semaphore();
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "agentic semaphore must be a single shared instance"
+        );
+        assert_eq!(a.available_permits(), MAX_CONCURRENT_AGENTIC_LOOPS);
+    }
 
     fn test_config(tmp: &TempDir) -> Config {
         Config {

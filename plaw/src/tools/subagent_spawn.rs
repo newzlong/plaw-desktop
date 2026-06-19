@@ -253,6 +253,10 @@ impl Tool for SubAgentSpawnTool {
         let sid = session_id.clone();
 
         let handle = tokio::spawn(async move {
+            // Bound concurrent agentic loops process-wide (shared with
+            // parallel_delegate) so fan-out can't compose into a provider-
+            // request storm. Held for the lifetime of this background run.
+            let _permit = crate::tools::agentic_semaphore().acquire_owned().await.ok();
             let result = if is_agentic {
                 run_agentic_background(
                     &agent_name_owned,
