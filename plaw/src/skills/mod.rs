@@ -226,6 +226,20 @@ fn load_skills_from_directory(skills_dir: &Path) -> Vec<Skill> {
 
     for entry in entries.flatten() {
         let path = entry.path();
+
+        // Skip symlinked entries up front. `is_dir()` below follows symlinks,
+        // so a symlinked directory would otherwise be canonicalized and loaded
+        // into the prompt — inconsistent with the skill audit, which rejects
+        // symlinks outright. Fail fast and consistently (secure-by-default):
+        // a symlink in skills/ must not be a path to skill content elsewhere.
+        if entry.file_type().map(|ft| ft.is_symlink()).unwrap_or(false) {
+            tracing::warn!(
+                "skipping symlinked skill entry {}: symlinks are not allowed in skills/",
+                path.display()
+            );
+            continue;
+        }
+
         if !path.is_dir() {
             continue;
         }
@@ -2362,6 +2376,54 @@ description = "Bare minimum"
             Some(PathBuf::from("/tmp/home-dir/open-skills"))
         );
         assert_eq!(resolve_open_skills_dir_from_sources(None, None, None), None);
+    }
+
+    #[test]
+    fn load_skills_skips_symlinked_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skills_dir = tmp.path().join("skills");
+        fs::create_dir_all(&skills_dir).unwrap();
+
+        // A real skill dir (named by its directory) — must still load.
+        let real = skills_dir.join("real-skill");
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("SKILL.md"), "# Real\nA safe skill.\n").unwrap();
+
+        // A valid skill OUTSIDE skills/, symlinked in as `linked-skill`.
+        // Following the symlink would load it; the loader must refuse.
+        let target = tmp.path().join("external-skill");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("SKILL.md"), "# External\nAlso safe.\n").unwrap();
+        let link = skills_dir.join("linked-skill");
+
+        // A directory symlink needs privilege on Windows; if unavailable, skip
+        // the assertion rather than fail in a restricted environment.
+        if create_dir_symlink(&target, &link).is_err() {
+            return;
+        }
+
+        let names: Vec<String> = load_skills_from_directory(&skills_dir)
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "real-skill"),
+            "the real skill must still load: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n == "linked-skill"),
+            "a symlinked skill dir must be skipped, not followed: {names:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    fn create_dir_symlink(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    fn create_dir_symlink(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_dir(target, link)
     }
 
     #[test]
