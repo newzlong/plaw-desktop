@@ -874,6 +874,31 @@ impl SecurityPolicy {
                         || arg == "-c"
                 })
             }
+            // Script interpreters can run arbitrary code straight from the
+            // command line, which escapes the command allowlist exactly like
+            // `find -exec` (e.g. allowlisting `python` to run scripts must not
+            // silently auto-run `python -c "import os; os.system(...)"`). These
+            // forms fall through to approval, not a hard block — and full
+            // wildcard mode skips this check entirely.
+            "python" | "python3" => {
+                // -c runs code from the argument.
+                !args.iter().any(|arg| arg == "-c")
+            }
+            "node" => {
+                // -e/--eval/-p/--print run code from the argument; -r/--require
+                // preloads an arbitrary module before the script runs.
+                !args.iter().any(|arg| {
+                    matches!(
+                        arg.as_str(),
+                        "-e" | "--eval" | "-p" | "--print" | "-r" | "--require"
+                    )
+                })
+            }
+            "perl" | "ruby" => {
+                // -e (and perl's -E, which lowercases to -e here) execute code
+                // supplied on the command line.
+                !args.iter().any(|arg| arg == "-e")
+            }
             _ => true,
         }
     }
@@ -1768,6 +1793,33 @@ mod tests {
         assert!(p.is_command_allowed("find . -name '*.txt'"));
         assert!(p.is_command_allowed("git status"));
         assert!(p.is_command_allowed("git add ."));
+    }
+
+    #[test]
+    fn interpreter_eval_args_gated_but_scripts_allowed() {
+        // An interpreter allowlisted to run scripts must not also silently
+        // auto-run arbitrary inline code (an allowlist escape, like find -exec).
+        let mut p = default_policy();
+        for cmd in ["python", "python3", "node", "perl", "ruby"] {
+            p.allowed_commands.push(cmd.to_string());
+        }
+
+        // Inline-code forms are gated.
+        assert!(!p.is_command_allowed("python -c \"import os; os.system('id')\""));
+        assert!(!p.is_command_allowed("python3 -c 'print(1)'"));
+        assert!(!p.is_command_allowed("node -e \"require('child_process').exec('id')\""));
+        assert!(!p.is_command_allowed("node --eval \"1+1\""));
+        assert!(!p.is_command_allowed("node -p \"process.env\""));
+        assert!(!p.is_command_allowed("node -r ./preload.js app.js"));
+        assert!(!p.is_command_allowed("perl -e 'system(\"id\")'"));
+        assert!(!p.is_command_allowed("ruby -e 'puts 1'"));
+
+        // Running a script file (the legitimate use) is still allowed.
+        assert!(p.is_command_allowed("python script.py"));
+        assert!(p.is_command_allowed("python3 manage.py migrate"));
+        assert!(p.is_command_allowed("node app.js"));
+        assert!(p.is_command_allowed("perl build.pl"));
+        assert!(p.is_command_allowed("ruby rakefile.rb"));
     }
 
     #[test]
