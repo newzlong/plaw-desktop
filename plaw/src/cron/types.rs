@@ -127,9 +127,9 @@ pub struct CronJob {
     /// AI-generated summary of creation context, injected into agent prompt at execution time
     #[serde(default)]
     pub context_summary: Option<String>,
-    /// Per-job shell command timeout in seconds. `None` falls back to the
-    /// built-in default (120s). Only meaningful for `JobType::Shell`;
-    /// agent and notification jobs ignore it.
+    /// Per-job wall-clock timeout in seconds (1..=86400). `None` falls back to
+    /// a job-type default: 120s for shell jobs, 1800s for agent/pipeline jobs.
+    /// Notification jobs ignore it (there is no execution to bound).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
     /// Name of the `[pipelines.*]` workflow to run. Only meaningful for

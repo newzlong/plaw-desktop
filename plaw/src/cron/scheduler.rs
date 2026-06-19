@@ -19,7 +19,20 @@ use tokio::time::{self, Duration};
 
 const MIN_POLL_SECONDS: u64 = 5;
 const SHELL_JOB_TIMEOUT_SECS: u64 = 120;
+/// Default wall-clock cap for agent + pipeline cron jobs. Larger than the
+/// shell default because agentic / multi-stage runs are legitimately longer,
+/// but still bounded so a wedged LLM/tool call can't pin a scheduler worker
+/// forever (with the default `max_concurrent=1`, one hung job would otherwise
+/// stall ALL cron while health still reports green). A per-job
+/// `timeout_secs` override (1..=86400) takes precedence.
+const AGENT_JOB_TIMEOUT_SECS: u64 = 1800;
 const SCHEDULER_COMPONENT: &str = "scheduler";
+
+/// Resolve the wall-clock timeout for an agent or pipeline cron job: the
+/// validated per-job override if set, else [`AGENT_JOB_TIMEOUT_SECS`].
+fn agent_job_timeout(job: &CronJob) -> Duration {
+    Duration::from_secs(job.timeout_secs.unwrap_or(AGENT_JOB_TIMEOUT_SECS))
+}
 
 pub async fn run(config: Config) -> Result<()> {
     run_with_notifier(config, None).await
@@ -225,24 +238,36 @@ async fn run_agent_job(
         "cron run starting under trace"
     );
 
-    let run_result = match job.session_target {
+    let timeout = agent_job_timeout(job);
+    let scoped = match job.session_target {
         SessionTarget::Main | SessionTarget::Isolated => {
-            crate::observability::trace_context::CURRENT_TRACE
-                .scope(
-                    Some(cron_trace),
-                    crate::agent::run(
-                        config.clone(),
-                        Some(prefixed_prompt),
-                        None,
-                        model_override,
-                        config.default_temperature,
-                        vec![],
-                        false,
-                        None, // cron jobs always start fresh; no resume
-                        None, // no resume iteration
-                    ),
-                )
-                .await
+            crate::observability::trace_context::CURRENT_TRACE.scope(
+                Some(cron_trace),
+                crate::agent::run(
+                    config.clone(),
+                    Some(prefixed_prompt),
+                    None,
+                    model_override,
+                    config.default_temperature,
+                    vec![],
+                    false,
+                    None, // cron jobs always start fresh; no resume
+                    None, // no resume iteration
+                ),
+            )
+        }
+    };
+    // Bound the run: on timeout the future is dropped (cancelling the agent),
+    // the job records as failed, and reschedule_after_run advances next_run so
+    // the wedged job leaves the head of the due queue instead of stalling cron.
+    // Box::pin the agent run (a large future) so the awaited Timeout stays small.
+    let run_result = match time::timeout(timeout, Box::pin(scoped)).await {
+        Ok(result) => result,
+        Err(_) => {
+            return (
+                false,
+                format!("agent job timed out after {}s", timeout.as_secs()),
+            );
         }
     };
 
@@ -309,12 +334,23 @@ async fn run_pipeline_job(
         "cron pipeline run starting under trace"
     );
 
-    let run_result = crate::observability::trace_context::CURRENT_TRACE
-        .scope(
-            Some(cron_trace),
-            crate::agent::pipeline::run_pipeline_from_config(config, &pipeline_name, &user_message),
-        )
-        .await;
+    let timeout = agent_job_timeout(job);
+    let scoped = crate::observability::trace_context::CURRENT_TRACE.scope(
+        Some(cron_trace),
+        crate::agent::pipeline::run_pipeline_from_config(config, &pipeline_name, &user_message),
+    );
+    // Bound the run (pipelines fan out to sub-agents and are the most expensive
+    // cron class). On timeout the future is dropped and the job records failed,
+    // so next_run advances and the wedged pipeline frees the worker.
+    let run_result = match time::timeout(timeout, scoped).await {
+        Ok(result) => result,
+        Err(_) => {
+            return (
+                false,
+                format!("pipeline job timed out after {}s", timeout.as_secs()),
+            );
+        }
+    };
 
     match run_result {
         Ok(result) if result.success => (
@@ -1064,6 +1100,31 @@ mod tests {
         let (success, output) = execute_job_with_retry(&config, &security, &job).await;
         assert!(!success);
         assert!(output.contains("always_missing_for_retry_test"));
+    }
+
+    #[test]
+    fn agent_job_timeout_resolves_default_and_override() {
+        let mut job = test_job("");
+        job.job_type = JobType::Agent;
+        assert_eq!(
+            agent_job_timeout(&job),
+            Duration::from_secs(AGENT_JOB_TIMEOUT_SECS)
+        );
+        job.timeout_secs = Some(60);
+        assert_eq!(agent_job_timeout(&job), Duration::from_secs(60));
+    }
+
+    #[tokio::test]
+    async fn agent_job_timeout_elapses_on_hung_run() {
+        // A wedged agent/pipeline run is bounded: the timeout the run_*_job
+        // paths wrap around agent::run / run_pipeline_from_config actually fires
+        // (here with a per-job 1s override against a never-completing future).
+        let mut job = test_job("");
+        job.job_type = JobType::Agent;
+        job.timeout_secs = Some(1);
+        let elapsed =
+            tokio::time::timeout(agent_job_timeout(&job), std::future::pending::<()>()).await;
+        assert!(elapsed.is_err(), "1s timeout should elapse");
     }
 
     #[tokio::test]
