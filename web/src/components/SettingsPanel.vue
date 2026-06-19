@@ -260,13 +260,25 @@ const activeComponent = computed(() => componentMap[activeTab.value])
   padding-bottom: 4px;
 }
 
+/* === Form/config views lay out as header / main / footer ===
+   Views with a save bar fill the panel height and become a flex column, so the
+   footer pins to the BOTTOM (with the slack space landing in the main area)
+   instead of floating directly under short content. `:has()` scopes this to the
+   3 form views only — manager/dashboard views (no .sticky-actions) are
+   untouched and keep flowing in the scroll container. */
+.settings-content :deep(> div:has(.sticky-actions)) {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
 /* === Sticky save/action bars at bottom === */
 .settings-content :deep(.sticky-actions) {
   position: sticky;
   bottom: -20px;           /* counteract parent padding */
   z-index: 10;
   background: var(--bg-overlay);
-  margin: 0 -24px -20px;
+  margin: auto -24px -20px; /* margin-top:auto pins the footer to the bottom */
   padding: 12px 24px 20px;
   border-top: 1px solid var(--border-subtle);
 }
@@ -306,7 +318,7 @@ const activeComponent = computed(() => componentMap[activeTab.value])
     padding: 16px 16px 10px;
   }
   .settings-content :deep(.sticky-actions) {
-    margin: 0 -16px -16px;
+    margin: auto -16px -16px;
     padding: 10px 16px 16px;
   }
 }
