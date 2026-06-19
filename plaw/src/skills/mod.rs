@@ -427,6 +427,38 @@ fn ensure_open_skills_repo(
     Some(repo_dir)
 }
 
+/// Hard wall-clock cap for the open-skills `git clone`/`pull`. The sync runs on
+/// the per-message / per-turn skill-load path, so it must not block forever.
+const OPEN_SKILLS_GIT_TIMEOUT_SECS: u64 = 30;
+
+/// Run a `git` subprocess with a hard wall-clock timeout.
+///
+/// A hung or network-blocked `git clone`/`pull` (common on restricted networks)
+/// must NOT pin the caller indefinitely — the skill load runs on the request
+/// hot path. The child runs on a detached OS thread and the caller waits at
+/// most `timeout`; on timeout it proceeds with the local copy (the orphaned
+/// git exits on its own or via git's own network timeout).
+fn run_git_bounded(mut cmd: Command, timeout: Duration) -> Option<std::process::Output> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(cmd.output());
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(output)) => Some(output),
+        Ok(Err(err)) => {
+            tracing::warn!("failed to run git for open-skills: {err}");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(
+                "git for open-skills timed out after {}s; using local copy",
+                timeout.as_secs()
+            );
+            None
+        }
+    }
+}
+
 fn clone_open_skills_repo(repo_dir: &Path) -> bool {
     if let Some(parent) = repo_dir.parent() {
         if let Err(err) = std::fs::create_dir_all(parent) {
@@ -438,25 +470,22 @@ fn clone_open_skills_repo(repo_dir: &Path) -> bool {
         }
     }
 
-    let output = Command::new("git")
-        .args(["clone", "--depth", "1", OPEN_SKILLS_REPO_URL])
-        .arg(repo_dir)
-        .output();
+    let mut cmd = Command::new("git");
+    cmd.args(["clone", "--depth", "1", OPEN_SKILLS_REPO_URL])
+        .arg(repo_dir);
 
-    match output {
-        Ok(result) if result.status.success() => {
+    match run_git_bounded(cmd, Duration::from_secs(OPEN_SKILLS_GIT_TIMEOUT_SECS)) {
+        Some(result) if result.status.success() => {
             tracing::info!("initialized open-skills at {}", repo_dir.display());
             true
         }
-        Ok(result) => {
+        Some(result) => {
             let stderr = String::from_utf8_lossy(&result.stderr);
             tracing::warn!("failed to clone open-skills: {stderr}");
             false
         }
-        Err(err) => {
-            tracing::warn!("failed to run git clone for open-skills: {err}");
-            false
-        }
+        // Timeout / spawn failure already logged by run_git_bounded.
+        None => false,
     }
 }
 
@@ -466,23 +495,18 @@ fn pull_open_skills_repo(repo_dir: &Path) -> bool {
         return true;
     }
 
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo_dir)
-        .args(["pull", "--ff-only"])
-        .output();
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(repo_dir).args(["pull", "--ff-only"]);
 
-    match output {
-        Ok(result) if result.status.success() => true,
-        Ok(result) => {
+    match run_git_bounded(cmd, Duration::from_secs(OPEN_SKILLS_GIT_TIMEOUT_SECS)) {
+        Some(result) if result.status.success() => true,
+        Some(result) => {
             let stderr = String::from_utf8_lossy(&result.stderr);
             tracing::warn!("failed to pull open-skills updates: {stderr}");
             false
         }
-        Err(err) => {
-            tracing::warn!("failed to run git pull for open-skills: {err}");
-            false
-        }
+        // Timeout / spawn failure already logged by run_git_bounded.
+        None => false,
     }
 }
 
@@ -1748,6 +1772,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let skills = load_skills(dir.path());
         assert!(skills.is_empty());
+    }
+
+    #[test]
+    fn run_git_bounded_runs_fast_command() {
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("--version");
+        let result = run_git_bounded(cmd, std::time::Duration::from_secs(30));
+        assert!(result.is_some(), "git --version should complete within 30s");
+        assert!(result.unwrap().status.success());
+    }
+
+    #[test]
+    fn run_git_bounded_none_for_missing_binary() {
+        // A spawn failure (missing binary) is handled like a timeout: None,
+        // so the caller falls back to the local skills copy instead of erroring.
+        let cmd = std::process::Command::new("plaw-no-such-binary-xyz");
+        let result = run_git_bounded(cmd, std::time::Duration::from_secs(5));
+        assert!(result.is_none(), "missing binary yields None");
     }
 
     #[test]
