@@ -11,7 +11,7 @@ use crate::security::SecurityPolicy;
 use anyhow::Context as _;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use futures_util::{stream, StreamExt};
+use futures_util::{stream, FutureExt, StreamExt};
 use std::process::Stdio;
 use std::sync::Arc;
 use tokio::process::Command;
@@ -139,18 +139,23 @@ async fn process_due_jobs(
         .iter()
         .map(|j| (j.id.clone(), j.plaw_session.clone()))
         .collect();
-    let mut in_flight =
-        stream::iter(
-            jobs.into_iter().map(|job| {
-                let config = config.clone();
-                let security = Arc::clone(security);
-                let component = component.to_owned();
-                async move {
-                    execute_and_persist_job(&config, security.as_ref(), &job, &component).await
-                }
-            }),
-        )
-        .buffer_unordered(max_concurrent);
+    let mut in_flight = stream::iter(jobs.into_iter().map(|job| {
+        let config = config.clone();
+        let security = Arc::clone(security);
+        let component = component.to_owned();
+        let job_id = job.id.clone();
+        async move {
+            // Contain a panic in any single job so it can't unwind the
+            // scheduler loop — a wedged/unwrapping tool deep in one job
+            // must not silently stop ALL cron until the next restart.
+            run_job_contained(
+                job_id,
+                execute_and_persist_job(&config, security.as_ref(), &job, &component),
+            )
+            .await
+        }
+    }))
+    .buffer_unordered(max_concurrent);
 
     while let Some((job_id, success, output)) = in_flight.next().await {
         if !success {
@@ -169,6 +174,25 @@ async fn process_due_jobs(
                 "output": output,
                 "finished_at": Utc::now().to_rfc3339(),
             }));
+        }
+    }
+}
+
+/// Run a job future, containing any panic so it cannot tear down the scheduler
+/// loop. `buffer_unordered` polls these futures on the scheduler's own task, so
+/// an un-caught panic in one job would propagate up and stop the whole loop —
+/// silently halting ALL cron. A contained panic is logged and reported as an
+/// ordinary job failure (the caller already warns on `!success`).
+async fn run_job_contained<F>(job_id: String, fut: F) -> (String, bool, String)
+where
+    F: std::future::Future<Output = (String, bool, String)>,
+{
+    match std::panic::AssertUnwindSafe(fut).catch_unwind().await {
+        Ok(outcome) => outcome,
+        Err(_panic) => {
+            tracing::error!("cron job '{job_id}' panicked; scheduler continues");
+            let msg = format!("cron job '{job_id}' panicked");
+            (job_id, false, msg)
         }
     }
 }
@@ -773,6 +797,32 @@ mod tests {
     use chrono::{Duration as ChronoDuration, Utc};
     use std::sync::OnceLock;
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn run_job_contained_reports_panic_as_failure() {
+        // A job whose future panics must not unwind past the containment
+        // boundary; it is reported as a failure so the scheduler loop survives.
+        let outcome = run_job_contained("job-x".to_string(), async {
+            panic!("simulated tool panic deep in a job");
+        })
+        .await;
+        assert_eq!(outcome.0, "job-x");
+        assert!(!outcome.1, "a panicked job must be reported as failure");
+        assert!(
+            outcome.2.contains("panicked"),
+            "output should explain the panic: {}",
+            outcome.2
+        );
+    }
+
+    #[tokio::test]
+    async fn run_job_contained_passes_through_normal_outcome() {
+        let outcome = run_job_contained("job-y".to_string(), async {
+            ("job-y".to_string(), true, "ok".to_string())
+        })
+        .await;
+        assert_eq!(outcome, ("job-y".to_string(), true, "ok".to_string()));
+    }
 
     async fn env_lock() -> tokio::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
