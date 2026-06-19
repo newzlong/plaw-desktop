@@ -100,6 +100,7 @@ mod tests {
             completed_at: None,
             result: None,
             handle: None,
+            cancel_token: None,
         }
     }
 

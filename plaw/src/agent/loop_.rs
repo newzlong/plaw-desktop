@@ -73,10 +73,11 @@ use tool_io::{
     truncate_tool_args_for_progress, wrap_as_untrusted_data,
 };
 use tool_taxonomy::{ANTI_LOOP_EXEMPT_TOOLS, MAX_SAME_TOOL_PER_TURN, TIGHT_LOOP_TOOLS};
-pub use wrappers::{current_turn_intent, with_turn_intent};
 pub(crate) use wrappers::{
-    run_tool_call_loop_with_non_cli_approval_context, with_resume_lineage, ResumeLineage,
+    current_parent_cancel_token, run_tool_call_loop_with_non_cli_approval_context,
+    with_resume_lineage, ResumeLineage,
 };
+pub use wrappers::{current_turn_intent, with_turn_intent};
 
 /// Execute a single turn of the agent loop: send messages, parse tool calls,
 /// execute tools, and loop until the LLM produces a final text response.
@@ -878,25 +879,34 @@ pub(crate) async fn run_tool_call_loop(
             });
         }
 
-        let executed_outcomes = if allow_parallel_execution && executable_calls.len() > 1 {
-            execute_tools_parallel(
-                &executable_calls,
-                tools_registry,
-                observer,
-                cancellation_token.as_ref(),
-                on_delta.as_ref(),
-            )
-            .await?
-        } else {
-            execute_tools_sequential(
-                &executable_calls,
-                tools_registry,
-                observer,
-                cancellation_token.as_ref(),
-                on_delta.as_ref(),
-            )
-            .await?
-        };
+        // Surface this turn's cancellation token to the tool-execution scope so
+        // background-spawning tools (`subagent_spawn`) can derive a child token
+        // the user's Stop also cancels. Task-locals are not inherited by detached
+        // `tokio::spawn` tasks, so the tool reads it here — inside the parent
+        // task — before it spawns.
+        let executed_outcomes =
+            wrappers::with_parent_cancel_token(cancellation_token.clone(), async {
+                if allow_parallel_execution && executable_calls.len() > 1 {
+                    execute_tools_parallel(
+                        &executable_calls,
+                        tools_registry,
+                        observer,
+                        cancellation_token.as_ref(),
+                        on_delta.as_ref(),
+                    )
+                    .await
+                } else {
+                    execute_tools_sequential(
+                        &executable_calls,
+                        tools_registry,
+                        observer,
+                        cancellation_token.as_ref(),
+                        on_delta.as_ref(),
+                    )
+                    .await
+                }
+            })
+            .await?;
 
         for ((idx, call), outcome) in executable_indices
             .iter()

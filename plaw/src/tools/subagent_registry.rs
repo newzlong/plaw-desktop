@@ -9,6 +9,7 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 /// Maximum age (in seconds) for completed/failed/killed sessions before cleanup.
 const SESSION_MAX_AGE_SECS: i64 = 3600;
@@ -52,6 +53,10 @@ pub struct SubAgentSession {
     pub result: Option<ToolResult>,
     /// Handle to the spawned tokio task, used for cancellation via `abort()`.
     pub handle: Option<JoinHandle<()>>,
+    /// Cooperative cancellation token for the background run. A child of the
+    /// spawning turn's token (when one exists), so the user's Stop cancels it
+    /// too; `kill` cancels it for graceful in-loop unwind before `abort()`.
+    pub cancel_token: Option<CancellationToken>,
 }
 
 /// Thread-safe registry for tracking background sub-agent sessions.
@@ -100,22 +105,37 @@ impl SubAgentRegistry {
     }
 
     /// Mark a session as completed with a result.
+    ///
+    /// No-op if the session has already left `Running` (e.g. a concurrent
+    /// `kill`): a late completion from a cancelled task must not flip a
+    /// terminal `Killed`/`Failed` status back.
     /// pub fn complete.
     pub fn complete(&self, session_id: &str, result: ToolResult) {
         let mut sessions = self.sessions.write();
         if let Some(session) = sessions.get_mut(session_id) {
+            if session.status != SubAgentStatus::Running {
+                return;
+            }
             session.status = SubAgentStatus::Completed;
             session.completed_at = Some(Utc::now());
             session.result = Some(result);
             session.handle = None;
+            session.cancel_token = None;
         }
     }
 
     /// Mark a session as failed with an error result.
+    ///
+    /// No-op if the session has already left `Running` — see [`Self::complete`].
+    /// When `kill` cancels a session's token the background task often unwinds
+    /// and reports failure; that late report must not overwrite `Killed`.
     /// pub fn fail.
     pub fn fail(&self, session_id: &str, error: String) {
         let mut sessions = self.sessions.write();
         if let Some(session) = sessions.get_mut(session_id) {
+            if session.status != SubAgentStatus::Running {
+                return;
+            }
             session.status = SubAgentStatus::Failed;
             session.completed_at = Some(Utc::now());
             session.result = Some(ToolResult {
@@ -124,6 +144,7 @@ impl SubAgentRegistry {
                 error: Some(error),
             });
             session.handle = None;
+            session.cancel_token = None;
         }
     }
 
@@ -135,6 +156,12 @@ impl SubAgentRegistry {
         if let Some(session) = sessions.get_mut(session_id) {
             if session.status != SubAgentStatus::Running {
                 return false;
+            }
+            // Cancel cooperatively first so the agentic loop unwinds at its next
+            // iteration / tool-await boundary (no mid-write tear), then abort the
+            // task as a hard backstop for any step that ignores the token.
+            if let Some(token) = session.cancel_token.take() {
+                token.cancel();
             }
             if let Some(handle) = session.handle.take() {
                 handle.abort();
@@ -289,6 +316,7 @@ mod tests {
             completed_at: None,
             result: None,
             handle: None,
+            cancel_token: None,
         }
     }
 
@@ -350,6 +378,61 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("killed"));
+    }
+
+    #[tokio::test]
+    async fn registry_kill_cancels_token_before_abort() {
+        let registry = SubAgentRegistry::new();
+        let token = CancellationToken::new();
+        // A task that completes only when its (child) token is cancelled —
+        // proves `kill` reached the cooperative token, not just `abort`.
+        let child = token.child_token();
+        let observed = child.clone();
+        let handle = tokio::spawn(async move { child.cancelled().await });
+
+        let mut session = make_session("s1", "researcher", "find info");
+        session.cancel_token = Some(token.clone());
+        session.handle = Some(handle);
+        registry.insert(session);
+
+        assert!(registry.kill("s1"));
+        assert!(token.is_cancelled(), "kill must cancel the session token");
+        assert!(
+            observed.is_cancelled(),
+            "cancellation must propagate to the child token the sub-agent holds"
+        );
+        let snap = registry.get_status("s1").unwrap();
+        assert_eq!(snap.status, SubAgentStatus::Killed);
+    }
+
+    #[test]
+    fn registry_killed_status_survives_late_completion() {
+        // After `kill`, a cancelled background task may still report failure
+        // (its loop unwound). That late report must not flip Killed -> Failed.
+        let registry = SubAgentRegistry::new();
+        registry.insert(make_session("s1", "researcher", "find info"));
+        assert!(registry.kill("s1"));
+
+        registry.fail("s1", "tool loop cancelled".to_string());
+        assert_eq!(
+            registry.get_status("s1").unwrap().status,
+            SubAgentStatus::Killed,
+            "fail() after kill() must not overwrite Killed"
+        );
+
+        registry.complete(
+            "s1",
+            ToolResult {
+                success: true,
+                output: "ignored".to_string(),
+                error: None,
+            },
+        );
+        assert_eq!(
+            registry.get_status("s1").unwrap().status,
+            SubAgentStatus::Killed,
+            "complete() after kill() must not overwrite Killed"
+        );
     }
 
     #[test]
