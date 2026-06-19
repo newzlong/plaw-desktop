@@ -17,6 +17,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 /// Default timeout for background sub-agent provider calls.
 const SPAWN_TIMEOUT_SECS: u64 = 300;
@@ -226,6 +227,17 @@ impl Tool for SubAgentSpawnTool {
         let parent_tools = self.parent_tools.clone();
         let multimodal_config = self.multimodal_config.clone();
 
+        // Capture the spawning turn's cancellation token BEFORE the detached
+        // `tokio::spawn` below: task-locals are not inherited by spawned tasks,
+        // so it must be read here in the parent task. Derive a child token so
+        // the user's Stop (which cancels the parent) also stops this sub-agent;
+        // fall back to a fresh root token outside any turn (CLI / tests), which
+        // `subagent_manage` kill still cancels.
+        let cancel_token = match crate::agent::loop_::current_parent_cancel_token() {
+            Some(parent) => parent.child_token(),
+            None => CancellationToken::new(),
+        };
+
         // Atomically check concurrent limit and register session to prevent race conditions.
         let session = SubAgentSession {
             id: session_id.clone(),
@@ -236,6 +248,7 @@ impl Tool for SubAgentSpawnTool {
             completed_at: None,
             result: None,
             handle: None,
+            cancel_token: Some(cancel_token.clone()),
         };
         if let Err(_running) = self.registry.try_insert(session, MAX_CONCURRENT_SUBAGENTS) {
             return Ok(ToolResult {
@@ -265,11 +278,18 @@ impl Tool for SubAgentSpawnTool {
                     &full_prompt,
                     &parent_tools,
                     &multimodal_config,
+                    &cancel_token,
                 )
                 .await
             } else {
-                run_simple_background(&agent_name_owned, &agent_config, &*provider, &full_prompt)
-                    .await
+                run_simple_background(
+                    &agent_name_owned,
+                    &agent_config,
+                    &*provider,
+                    &full_prompt,
+                    &cancel_token,
+                )
+                .await
             };
 
             match result {
@@ -313,19 +333,31 @@ async fn run_simple_background(
     agent_config: &DelegateAgentConfig,
     provider: &dyn Provider,
     full_prompt: &str,
+    cancel: &CancellationToken,
 ) -> anyhow::Result<ToolResult> {
     let temperature = agent_config.temperature.unwrap_or(0.7);
 
-    let result = tokio::time::timeout(
-        Duration::from_secs(SPAWN_TIMEOUT_SECS),
-        provider.chat_with_system(
-            agent_config.system_prompt.as_deref(),
-            full_prompt,
-            &agent_config.model,
-            temperature,
-        ),
-    )
-    .await;
+    // The single-shot provider call has no inner loop to poll the token, so
+    // race it against cancellation directly: a user Stop (or `kill`) ends the
+    // detached task promptly instead of waiting out the provider request.
+    let result = tokio::select! {
+        () = cancel.cancelled() => {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!("Agent '{agent_name}' cancelled")),
+            });
+        }
+        result = tokio::time::timeout(
+            Duration::from_secs(SPAWN_TIMEOUT_SECS),
+            provider.chat_with_system(
+                agent_config.system_prompt.as_deref(),
+                full_prompt,
+                &agent_config.model,
+                temperature,
+            ),
+        ) => result,
+    };
 
     let result = match result {
         Ok(inner) => inner,
@@ -415,6 +447,7 @@ async fn run_agentic_background(
     full_prompt: &str,
     parent_tools: &[Arc<dyn Tool>],
     multimodal_config: &crate::config::MultimodalConfig,
+    cancel: &CancellationToken,
 ) -> anyhow::Result<ToolResult> {
     if agent_config.allowed_tools.is_empty() {
         return Ok(ToolResult {
@@ -479,7 +512,7 @@ async fn run_agentic_background(
             "subagent_spawn",
             multimodal_config,
             agent_config.max_iterations,
-            None,
+            Some(cancel.clone()),
             None,
             None,
             &[],
@@ -719,6 +752,7 @@ mod tests {
                 completed_at: None,
                 result: None,
                 handle: None,
+                cancel_token: None,
             });
         }
 

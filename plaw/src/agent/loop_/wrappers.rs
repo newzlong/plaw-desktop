@@ -89,6 +89,16 @@ tokio::task_local! {
     static TOOL_LOOP_TURN_INTENT: Option<crate::agent::intent::Intent>;
 }
 
+tokio::task_local! {
+    /// This turn's cancellation token, surfaced to the tool-execution scope
+    /// so background-spawning tools (`subagent_spawn`) can derive a child
+    /// token that the user's Stop also cancels. Task-locals are NOT inherited
+    /// by detached `tokio::spawn` tasks, so such tools must read this in the
+    /// parent task (before they spawn) via [`current_parent_cancel_token`].
+    /// `None` when the caller passed no token (CLI / direct invocations).
+    static TOOL_LOOP_PARENT_CANCEL_TOKEN: Option<CancellationToken>;
+}
+
 /// Cross-turn lineage captured at `plaw resume` entry and threaded
 /// to the agent loop's first snapshot write.
 #[derive(Debug, Clone)]
@@ -170,6 +180,30 @@ where
     F: std::future::Future<Output = T>,
 {
     TOOL_LOOP_TURN_INTENT.scope(intent, fut).await
+}
+
+/// Read the current turn's cancellation token if a scope has been set.
+/// `None` outside any scope (CLI / direct invocations / tests). Consumed
+/// by `subagent_spawn` to derive a child token for the background sub-agent
+/// so the user's Stop (which cancels this token) also stops the detached
+/// task. Captured in the parent task before spawning — task-locals do not
+/// propagate into `tokio::spawn`ed tasks.
+pub(crate) fn current_parent_cancel_token() -> Option<CancellationToken> {
+    TOOL_LOOP_PARENT_CANCEL_TOKEN
+        .try_with(Clone::clone)
+        .ok()
+        .flatten()
+}
+
+/// Run `fut` with [`TOOL_LOOP_PARENT_CANCEL_TOKEN`] set to `token`. The agent
+/// loop wraps its tool-dispatch step in this scope so tools executing within
+/// the turn can observe the turn's cancellation token. `None` mirrors the
+/// "no scope" semantics (tools derive a fresh root token instead).
+pub(super) async fn with_parent_cancel_token<F, T>(token: Option<CancellationToken>, fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    TOOL_LOOP_PARENT_CANCEL_TOKEN.scope(token, fut).await
 }
 
 /// Run the tool loop with optional non-CLI approval context and
@@ -304,6 +338,45 @@ mod tests {
             })
             .await;
         assert!(result, "scoped writer should be visible inside the future");
+    }
+
+    #[tokio::test]
+    async fn parent_cancel_token_returns_none_outside_scope() {
+        // The tool dispatch path must tolerate the absence of a cancel token —
+        // CLI invocations and unit tests never set one, and `subagent_spawn`
+        // falls back to a fresh root token when this returns None.
+        assert!(current_parent_cancel_token().is_none());
+    }
+
+    #[tokio::test]
+    async fn parent_cancel_token_visible_inside_scope_and_child_propagates() {
+        let parent = CancellationToken::new();
+        // Mirror what `subagent_spawn` does: read the token inside the scope
+        // (i.e. in the parent task, before it would spawn) and derive a child.
+        let child = with_parent_cancel_token(Some(parent.clone()), async {
+            current_parent_cancel_token()
+                .expect("token must be visible inside the scope")
+                .child_token()
+        })
+        .await;
+
+        // The derived child is the link that lets a detached sub-agent observe
+        // the user's Stop: cancelling the parent cancels the child too.
+        assert!(!child.is_cancelled());
+        parent.cancel();
+        assert!(child.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn parent_cancel_token_scope_does_not_leak() {
+        with_parent_cancel_token(Some(CancellationToken::new()), async {
+            assert!(current_parent_cancel_token().is_some());
+        })
+        .await;
+        assert!(
+            current_parent_cancel_token().is_none(),
+            "scope must not leak after the inner future completes"
+        );
     }
 
     #[tokio::test]
