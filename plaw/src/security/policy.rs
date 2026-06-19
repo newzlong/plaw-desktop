@@ -1,7 +1,9 @@
 use parking_lot::Mutex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 /// How much autonomy the agent has
@@ -92,6 +94,26 @@ impl Clone for ActionTracker {
     }
 }
 
+/// Process-shared action trackers, keyed by workspace directory.
+static GLOBAL_TRACKERS: OnceLock<Mutex<HashMap<PathBuf, Arc<ActionTracker>>>> = OnceLock::new();
+
+/// Return the process-shared [`ActionTracker`] for a workspace.
+///
+/// Every `SecurityPolicy::from_config` built for the same workspace shares one
+/// sliding window, so `max_actions_per_hour` is a real per-hour budget across
+/// every agent run / cron fire / pipeline in the long-lived process — instead
+/// of resetting on each `from_config` (which made the headline autonomy cap
+/// effectively per-run, i.e. unbounded actions/hour). Keying by workspace keeps
+/// distinct workspaces — and each test's unique temp dir — fully isolated.
+fn shared_tracker(workspace_dir: &Path) -> Arc<ActionTracker> {
+    let map = GLOBAL_TRACKERS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock();
+    guard
+        .entry(workspace_dir.to_path_buf())
+        .or_insert_with(|| Arc::new(ActionTracker::new()))
+        .clone()
+}
+
 /// Security policy enforced on all tool executions
 #[derive(Debug, Clone)]
 pub struct SecurityPolicy {
@@ -106,7 +128,10 @@ pub struct SecurityPolicy {
     pub require_approval_for_medium_risk: bool,
     pub block_high_risk_commands: bool,
     pub shell_env_passthrough: Vec<String>,
-    pub tracker: ActionTracker,
+    /// Sliding-window rate-limit state. `from_config` shares this per workspace
+    /// (so the budget is process-global per workspace); cloning a policy shares
+    /// the same `Arc`, so the count is never silently reset by a clone.
+    pub tracker: Arc<ActionTracker>,
 }
 
 impl Default for SecurityPolicy {
@@ -158,7 +183,10 @@ impl Default for SecurityPolicy {
             require_approval_for_medium_risk: true,
             block_high_risk_commands: true,
             shell_env_passthrough: vec![],
-            tracker: ActionTracker::new(),
+            // Default policies get a FRESH, unshared tracker (keeps Default-
+            // based unit tests isolated). Only `from_config` shares per
+            // workspace.
+            tracker: Arc::new(ActionTracker::new()),
         }
     }
 }
@@ -1104,7 +1132,9 @@ impl SecurityPolicy {
             require_approval_for_medium_risk: autonomy_config.require_approval_for_medium_risk,
             block_high_risk_commands: autonomy_config.block_high_risk_commands,
             shell_env_passthrough: autonomy_config.shell_env_passthrough.clone(),
-            tracker: ActionTracker::new(),
+            // Share the per-workspace window so max_actions_per_hour is a real
+            // hourly budget across every run in the process, not reset per call.
+            tracker: shared_tracker(workspace_dir),
         }
     }
 }
@@ -2099,6 +2129,38 @@ mod tests {
         let policy = SecurityPolicy::from_config(&autonomy_config, &workspace);
         assert_eq!(policy.tracker.count(), 0);
         assert!(!policy.is_rate_limited());
+    }
+
+    fn rate_cfg(max_per_hour: u32) -> crate::config::AutonomyConfig {
+        crate::config::AutonomyConfig {
+            level: AutonomyLevel::Full,
+            max_actions_per_hour: max_per_hour,
+            ..crate::config::AutonomyConfig::default()
+        }
+    }
+
+    #[test]
+    fn from_config_shares_tracker_per_workspace() {
+        // Two policies for the SAME workspace share the budget — so the
+        // hourly cap is real across every run, not reset per from_config.
+        let cfg = rate_cfg(2);
+        let ws = PathBuf::from("/tmp/plaw-rate-share-test");
+        let a = SecurityPolicy::from_config(&cfg, &ws);
+        let b = SecurityPolicy::from_config(&cfg, &ws);
+        assert!(a.record_action()); // shared count = 1
+        assert!(b.record_action()); // shared count = 2
+        assert!(!a.record_action(), "shared budget exhausted");
+        assert!(b.is_rate_limited(), "b sees a's actions");
+    }
+
+    #[test]
+    fn from_config_isolates_tracker_across_workspaces() {
+        let cfg = rate_cfg(1);
+        let a = SecurityPolicy::from_config(&cfg, &PathBuf::from("/tmp/plaw-rate-iso-a"));
+        let b = SecurityPolicy::from_config(&cfg, &PathBuf::from("/tmp/plaw-rate-iso-b"));
+        assert!(a.record_action());
+        assert!(!a.record_action(), "a is over its own budget");
+        assert!(b.record_action(), "b's budget is independent of a");
     }
 
     // ══════════════════════════════════════════════════════════
