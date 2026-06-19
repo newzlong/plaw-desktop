@@ -465,6 +465,14 @@ pub(crate) async fn deliver_announcement(
     target: &str,
     output: &str,
 ) -> Result<()> {
+    // Redact secrets before sending to a channel, matching the interactive
+    // chat delivery path (channels/mod.rs / ws.rs scrub_outbound). The
+    // unattended cron path previously sent raw job output, so a shell job that
+    // echoed a key (or an agent job whose output quoted one) would exfiltrate
+    // it to the target channel. Shadow `output` so every channel branch below
+    // sends the scrubbed value. Also covers the daemon heartbeat caller.
+    let output = &crate::security::scrub_outbound(output);
+
     match channel.to_ascii_lowercase().as_str() {
         "telegram" => {
             let tg = config
