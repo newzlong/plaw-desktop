@@ -324,6 +324,10 @@ impl Tool for ParallelDelegateTool {
 
                 crate::observability::trace_context::CURRENT_TRACE
                     .scope(Some(child_ctx), async move {
+                // Bound concurrent agentic loops process-wide (shared with
+                // subagent_spawn) so per-call fan-out caps can't compose into a
+                // provider-request storm. Held until this sub-task returns.
+                let _permit = crate::tools::agentic_semaphore().acquire_owned().await.ok();
                 let mut history = Vec::new();
                 if let Some(sys) = &system_prompt {
                     history.push(ChatMessage::system(sys.clone()));
