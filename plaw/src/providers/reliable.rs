@@ -861,6 +861,149 @@ impl Provider for ReliableProvider {
         )
     }
 
+    /// Streaming variant of [`Self::chat`]: the same model -> provider -> retry
+    /// fallback matrix, but delegates to each inner provider's `chat_streaming`
+    /// so a provider that overrides it (Anthropic, OpenAI-compatible, ...)
+    /// forwards text deltas to `on_token` as they arrive.
+    ///
+    /// Without this override the wrapper inherited the trait default
+    /// (`self.chat`), which silently disabled token streaming for EVERY gateway
+    /// turn — the agent loop always runs through this wrapper
+    /// (`create_resilient_provider_*`). Streamed tokens are best-effort progress
+    /// hints per the trait contract; the returned [`ChatResponse`] is
+    /// authoritative, so a rare mid-stream failover may interleave a few tokens
+    /// before the surviving provider's response.
+    ///
+    /// Mirrors [`Self::chat`] line-for-line apart from the inner call; if you
+    /// change the fallback/retry logic in one, change it in the other.
+    async fn chat_streaming(
+        &self,
+        request: ChatRequest<'_>,
+        model: &str,
+        temperature: f64,
+        on_token: Option<&tokio::sync::mpsc::Sender<String>>,
+    ) -> anyhow::Result<ChatResponse> {
+        let models = self.model_chain(model);
+        let mut failures = Vec::new();
+
+        for current_model in &models {
+            for (provider_index, (provider_name, provider)) in self.providers.iter().enumerate() {
+                let sent_models =
+                    self.provider_model_chain(current_model, provider_name, provider_index == 0);
+                for sent_model in sent_models {
+                    let mut backoff_ms = self.base_backoff_ms;
+
+                    for attempt in 0..=self.max_retries {
+                        let req = ChatRequest {
+                            messages: request.messages,
+                            tools: request.tools,
+                        };
+                        match provider
+                            .chat_streaming(req, sent_model, temperature, on_token)
+                            .await
+                        {
+                            Ok(resp) => {
+                                if attempt > 0 || sent_model != model {
+                                    tracing::info!(
+                                        provider = provider_name,
+                                        model = sent_model,
+                                        attempt,
+                                        original_model = model,
+                                        "Provider recovered (failover/retry)"
+                                    );
+                                }
+                                return Ok(resp);
+                            }
+                            Err(e) => {
+                                let non_retryable_rate_limit = is_non_retryable_rate_limit(&e);
+                                let non_retryable =
+                                    is_non_retryable(&e) || non_retryable_rate_limit;
+                                let rate_limited = is_rate_limited(&e);
+                                let failure_reason = failure_reason(rate_limited, non_retryable);
+                                let error_detail = compact_error_detail(&e);
+
+                                push_failure(
+                                    &mut failures,
+                                    provider_name,
+                                    sent_model,
+                                    attempt + 1,
+                                    self.max_retries + 1,
+                                    failure_reason,
+                                    &error_detail,
+                                );
+
+                                if rate_limited && !non_retryable_rate_limit {
+                                    if let Some(new_key) = self.rotate_key() {
+                                        tracing::warn!(
+                                            provider = provider_name,
+                                            error = %error_detail,
+                                            "Rate limited; key rotation selected key ending ...{} \
+                                             but cannot apply (Provider trait has no set_api_key). \
+                                             Retrying with original key.",
+                                            &new_key[new_key.len().saturating_sub(4)..]
+                                        );
+                                    }
+                                }
+
+                                if non_retryable {
+                                    tracing::warn!(
+                                        provider = provider_name,
+                                        model = sent_model,
+                                        error = %error_detail,
+                                        "Non-retryable error, moving on"
+                                    );
+
+                                    if is_context_window_exceeded(&e) {
+                                        anyhow::bail!(
+                                            "Request exceeds model context window; retries and fallbacks were skipped. Attempts:\n{}",
+                                            failures.join("\n")
+                                        );
+                                    }
+
+                                    break;
+                                }
+
+                                if attempt < self.max_retries {
+                                    let wait = self.compute_backoff(backoff_ms, &e);
+                                    tracing::warn!(
+                                        provider = provider_name,
+                                        model = sent_model,
+                                        attempt = attempt + 1,
+                                        backoff_ms = wait,
+                                        reason = failure_reason,
+                                        error = %error_detail,
+                                        "Provider call failed, retrying"
+                                    );
+                                    tokio::time::sleep(Duration::from_millis(wait)).await;
+                                    backoff_ms = (backoff_ms.saturating_mul(2)).min(10_000);
+                                }
+                            }
+                        }
+                    }
+
+                    tracing::warn!(
+                        provider = provider_name,
+                        model = sent_model,
+                        "Exhausted retries, trying next provider/model"
+                    );
+                }
+            }
+
+            if *current_model != model {
+                tracing::warn!(
+                    original_model = model,
+                    fallback_model = *current_model,
+                    "Model fallback exhausted all providers, trying next fallback model"
+                );
+            }
+        }
+
+        anyhow::bail!(
+            "All providers/models failed. Attempts:\n{}",
+            failures.join("\n")
+        )
+    }
+
     fn supports_streaming(&self) -> bool {
         self.providers.iter().any(|(_, p)| p.supports_streaming())
     }
@@ -1768,6 +1911,144 @@ mod tests {
     }
 
     /// Mock provider that implements `chat()` with native tool support.
+    /// Mock that overrides `chat_streaming` to forward a token to `on_token`,
+    /// so we can assert the wrapper delegates streaming (and forwards deltas)
+    /// instead of inheriting the blocking default.
+    struct StreamingMock {
+        calls: Arc<AtomicUsize>,
+        fail_until_attempt: usize,
+        token: &'static str,
+        error: &'static str,
+    }
+
+    #[async_trait]
+    impl Provider for StreamingMock {
+        async fn chat_with_system(
+            &self,
+            _system_prompt: Option<&str>,
+            _message: &str,
+            _model: &str,
+            _temperature: f64,
+        ) -> anyhow::Result<String> {
+            // Blocking path — must NOT be reached when streaming is delegated.
+            Ok("BLOCKING".to_string())
+        }
+
+        async fn chat_streaming(
+            &self,
+            _request: ChatRequest<'_>,
+            _model: &str,
+            _temperature: f64,
+            on_token: Option<&tokio::sync::mpsc::Sender<String>>,
+        ) -> anyhow::Result<ChatResponse> {
+            let attempt = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if attempt <= self.fail_until_attempt {
+                anyhow::bail!(self.error);
+            }
+            if let Some(tx) = on_token {
+                let _ = tx.try_send(self.token.to_string());
+            }
+            Ok(ChatResponse {
+                text: Some(self.token.to_string()),
+                tool_calls: vec![],
+                usage: None,
+                reasoning_content: None,
+            })
+        }
+
+        fn supports_streaming(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_streaming_delegates_and_forwards_tokens() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = ReliableProvider::new(
+            vec![(
+                "primary".into(),
+                Box::new(StreamingMock {
+                    calls: Arc::clone(&calls),
+                    fail_until_attempt: 0,
+                    token: "streamed",
+                    error: "boom",
+                }) as Box<dyn Provider>,
+            )],
+            2,
+            1,
+        );
+
+        let messages = vec![ChatMessage::user("hi")];
+        let request = ChatRequest {
+            messages: &messages,
+            tools: None,
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
+
+        let resp = provider
+            .chat_streaming(request, "m", 0.0, Some(&tx))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.text.as_deref(), Some("streamed"));
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            "streamed",
+            "wrapper must forward inner provider token deltas to on_token"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn chat_streaming_falls_back_to_next_streaming_provider() {
+        let primary = Arc::new(AtomicUsize::new(0));
+        let secondary = Arc::new(AtomicUsize::new(0));
+        let provider = ReliableProvider::new(
+            vec![
+                (
+                    "primary".into(),
+                    Box::new(StreamingMock {
+                        calls: Arc::clone(&primary),
+                        fail_until_attempt: usize::MAX, // always fails
+                        token: "primary-tok",
+                        error: "primary down",
+                    }) as Box<dyn Provider>,
+                ),
+                (
+                    "secondary".into(),
+                    Box::new(StreamingMock {
+                        calls: Arc::clone(&secondary),
+                        fail_until_attempt: 0,
+                        token: "secondary-tok",
+                        error: "boom",
+                    }) as Box<dyn Provider>,
+                ),
+            ],
+            1,
+            1,
+        );
+
+        let messages = vec![ChatMessage::user("hi")];
+        let request = ChatRequest {
+            messages: &messages,
+            tools: None,
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel::<String>(8);
+
+        let resp = provider
+            .chat_streaming(request, "m", 0.0, Some(&tx))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.text.as_deref(),
+            Some("secondary-tok"),
+            "must fail over to the streaming secondary provider"
+        );
+        assert!(primary.load(Ordering::SeqCst) >= 1);
+        assert_eq!(secondary.load(Ordering::SeqCst), 1);
+    }
+
     struct NativeToolMock {
         calls: Arc<AtomicUsize>,
         fail_until_attempt: usize,
