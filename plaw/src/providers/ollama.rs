@@ -3,6 +3,7 @@ use crate::providers::traits::{
     ChatMessage, ChatResponse, Provider, ProviderCapabilities, TokenUsage, ToolCall,
 };
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -91,6 +92,77 @@ struct OllamaFunction {
     name: String,
     #[serde(default)]
     arguments: serde_json::Value,
+}
+
+/// Folds Ollama's `/api/chat` streaming body into one [`ApiChatResponse`].
+///
+/// Unlike OpenAI SSE, Ollama streams newline-delimited JSON: each line is a
+/// complete `{"message":{...},"done":bool,...}` object (no `data:` prefix, no
+/// `[DONE]` sentinel). Each line parses as an [`ApiChatResponse`] whose
+/// `message.content` is the delta; tool calls arrive whole (not fragmented),
+/// and the terminal chunk carries `prompt_eval_count`/`eval_count`. The
+/// accumulated result is mapped by [`OllamaProvider::map_api_response`].
+#[derive(Default)]
+struct StreamAccumulator {
+    buffer: String,
+    content: String,
+    thinking: String,
+    tool_calls: Vec<OllamaToolCall>,
+    prompt_eval_count: Option<u64>,
+    eval_count: Option<u64>,
+}
+
+impl StreamAccumulator {
+    fn process_chunk(&mut self, text: &str, on_token: Option<&tokio::sync::mpsc::Sender<String>>) {
+        self.buffer.push_str(text);
+        while let Some(pos) = self.buffer.find('\n') {
+            let line = self.buffer[..pos].to_string();
+            self.buffer = self.buffer[pos + 1..].to_string();
+            self.process_line(&line, on_token);
+        }
+    }
+
+    fn process_line(&mut self, raw: &str, on_token: Option<&tokio::sync::mpsc::Sender<String>>) {
+        let line = raw.trim();
+        if line.is_empty() {
+            return;
+        }
+        let Ok(chunk) = serde_json::from_str::<ApiChatResponse>(line) else {
+            return; // tolerate keep-alive / non-JSON lines
+        };
+        if !chunk.message.content.is_empty() {
+            self.content.push_str(&chunk.message.content);
+            if let Some(tx) = on_token {
+                let _ = tx.try_send(chunk.message.content.clone());
+            }
+        }
+        if let Some(thinking) = &chunk.message.thinking {
+            self.thinking.push_str(thinking);
+        }
+        self.tool_calls.extend(chunk.message.tool_calls);
+        if chunk.prompt_eval_count.is_some() {
+            self.prompt_eval_count = chunk.prompt_eval_count;
+        }
+        if chunk.eval_count.is_some() {
+            self.eval_count = chunk.eval_count;
+        }
+    }
+
+    fn into_response(self) -> ApiChatResponse {
+        ApiChatResponse {
+            message: ResponseMessage {
+                content: self.content,
+                tool_calls: self.tool_calls,
+                thinking: if self.thinking.is_empty() {
+                    None
+                } else {
+                    Some(self.thinking)
+                },
+            },
+            prompt_eval_count: self.prompt_eval_count,
+            eval_count: self.eval_count,
+        }
+    }
 }
 
 // ─── Implementation ───────────────────────────────────────────────────────────
@@ -341,6 +413,68 @@ impl OllamaProvider {
                 }
             })
             .collect()
+    }
+
+    /// Map a parsed `/api/chat` response into a [`ChatResponse`]. Shared by the
+    /// blocking (`chat_with_tools`) and streaming (`chat_streaming`) paths so
+    /// both inherit identical usage extraction, native-tool-call mapping (with
+    /// the quirky-name unwrapping in `extract_tool_name_and_args`), and
+    /// empty-content fallback. For streaming, `response` is the accumulation of
+    /// all NDJSON chunks.
+    fn map_api_response(&self, response: ApiChatResponse, normalized_model: &str) -> ChatResponse {
+        let usage = if response.prompt_eval_count.is_some() || response.eval_count.is_some() {
+            Some(TokenUsage {
+                input_tokens: response.prompt_eval_count,
+                output_tokens: response.eval_count,
+                ..Default::default()
+            })
+        } else {
+            None
+        };
+
+        // Native tool calls returned by the model.
+        if !response.message.tool_calls.is_empty() {
+            let tool_calls: Vec<ToolCall> = response
+                .message
+                .tool_calls
+                .iter()
+                .map(|tc| {
+                    let (name, args) = self.extract_tool_name_and_args(tc);
+                    ToolCall {
+                        id: tc
+                            .id
+                            .clone()
+                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                        name,
+                        arguments: serde_json::to_string(&args)
+                            .unwrap_or_else(|_| "{}".to_string()),
+                    }
+                })
+                .collect();
+            let text = Self::normalize_response_text(response.message.content);
+            return ChatResponse {
+                text,
+                tool_calls,
+                usage,
+                reasoning_content: None,
+            };
+        }
+
+        // Plain text response.
+        let text = if let Some(content) = Self::normalize_response_text(response.message.content) {
+            content
+        } else {
+            Self::fallback_text_for_empty_content(
+                normalized_model,
+                response.message.thinking.as_deref(),
+            )
+        };
+        ChatResponse {
+            text: Some(text),
+            tool_calls: vec![],
+            usage,
+            reasoning_content: None,
+        }
     }
 
     /// Send a request to Ollama and get the parsed response.
@@ -616,60 +750,7 @@ impl Provider for OllamaProvider {
             )
             .await?;
 
-        let usage = if response.prompt_eval_count.is_some() || response.eval_count.is_some() {
-            Some(TokenUsage {
-                input_tokens: response.prompt_eval_count,
-                output_tokens: response.eval_count,
-                ..Default::default()
-            })
-        } else {
-            None
-        };
-
-        // Native tool calls returned by the model.
-        if !response.message.tool_calls.is_empty() {
-            let tool_calls: Vec<ToolCall> = response
-                .message
-                .tool_calls
-                .iter()
-                .map(|tc| {
-                    let (name, args) = self.extract_tool_name_and_args(tc);
-                    ToolCall {
-                        id: tc
-                            .id
-                            .clone()
-                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-                        name,
-                        arguments: serde_json::to_string(&args)
-                            .unwrap_or_else(|_| "{}".to_string()),
-                    }
-                })
-                .collect();
-            let text = Self::normalize_response_text(response.message.content);
-            return Ok(ChatResponse {
-                text,
-                tool_calls,
-                usage,
-                reasoning_content: None,
-            });
-        }
-
-        // Plain text response.
-        let content = response.message.content;
-        let text = if let Some(content) = Self::normalize_response_text(content) {
-            content
-        } else {
-            Self::fallback_text_for_empty_content(
-                &normalized_model,
-                response.message.thinking.as_deref(),
-            )
-        };
-        Ok(ChatResponse {
-            text: Some(text),
-            tool_calls: vec![],
-            usage,
-            reasoning_content: None,
-        })
+        Ok(self.map_api_response(response, &normalized_model))
     }
 
     fn supports_native_tools(&self) -> bool {
@@ -718,6 +799,89 @@ impl Provider for OllamaProvider {
             reasoning_content: None,
         })
     }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    /// Streaming variant of [`Self::chat`]: builds the same `/api/chat`
+    /// request with `stream: true`, reads the newline-delimited JSON body, and
+    /// forwards `message.content` deltas to `on_token` as they arrive. Tool
+    /// calls, reasoning, and usage are accumulated and the final result is
+    /// mapped by the shared [`Self::map_api_response`].
+    async fn chat_streaming(
+        &self,
+        request: crate::providers::traits::ChatRequest<'_>,
+        model: &str,
+        temperature: f64,
+        on_token: Option<&tokio::sync::mpsc::Sender<String>>,
+    ) -> anyhow::Result<ChatResponse> {
+        let (normalized_model, should_auth) = self.resolve_request_details(model)?;
+        let api_messages = self.convert_messages(request.messages);
+
+        // The agent loop hands tools as ToolSpec; Ollama wants the OpenAI
+        // function-calling envelope (the same shape `chat()` builds before
+        // delegating to chat_with_tools).
+        let tools: Option<Vec<serde_json::Value>> = request.tools.and_then(|specs| {
+            if specs.is_empty() {
+                None
+            } else {
+                Some(
+                    specs
+                        .iter()
+                        .map(|s| {
+                            serde_json::json!({
+                                "type": "function",
+                                "function": {
+                                    "name": s.name,
+                                    "description": s.description,
+                                    "parameters": s.parameters
+                                }
+                            })
+                        })
+                        .collect(),
+                )
+            }
+        });
+
+        let mut req = self.build_chat_request(
+            api_messages,
+            &normalized_model,
+            temperature,
+            tools.as_deref(),
+        );
+        req.stream = true;
+
+        let url = format!("{}/api/chat", self.base_url);
+        let mut builder = self.http_client().post(&url).json(&req);
+        if should_auth {
+            if let Some(key) = self.api_key.as_ref() {
+                builder = builder.bearer_auth(key);
+            }
+        }
+
+        let response = builder.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let raw = response.text().await.unwrap_or_default();
+            let sanitized = super::sanitize_api_error(&raw);
+            anyhow::bail!("Ollama API error ({status}): {sanitized}");
+        }
+
+        let mut acc = StreamAccumulator::default();
+        let mut bytes_stream = response.bytes_stream();
+        while let Some(item) = bytes_stream.next().await {
+            let bytes = item?;
+            acc.process_chunk(&String::from_utf8_lossy(&bytes), on_token);
+        }
+        // Flush a trailing line lacking a terminating newline.
+        if !acc.buffer.trim().is_empty() {
+            let line = std::mem::take(&mut acc.buffer);
+            acc.process_line(&line, on_token);
+        }
+
+        Ok(self.map_api_response(acc.into_response(), &normalized_model))
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -725,6 +889,54 @@ impl Provider for OllamaProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_accumulator_folds_ndjson_and_forwards_tokens() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
+        let mut acc = StreamAccumulator::default();
+        acc.process_chunk(
+            "{\"message\":{\"role\":\"assistant\",\"content\":\"Hel\"},\"done\":false}\n",
+            Some(&tx),
+        );
+        acc.process_chunk(
+            "{\"message\":{\"role\":\"assistant\",\"content\":\"lo\"},\"done\":true,\"prompt_eval_count\":7,\"eval_count\":3}\n",
+            Some(&tx),
+        );
+        let resp = acc.into_response();
+        assert_eq!(resp.message.content, "Hello");
+        assert_eq!(resp.prompt_eval_count, Some(7));
+        assert_eq!(resp.eval_count, Some(3));
+        assert_eq!(rx.try_recv().unwrap(), "Hel");
+        assert_eq!(rx.try_recv().unwrap(), "lo");
+    }
+
+    #[test]
+    fn stream_accumulator_collects_tool_calls_mapped_to_response() {
+        let p = OllamaProvider::new(None, None);
+        let mut acc = StreamAccumulator::default();
+        acc.process_chunk(
+            "{\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"function\":{\"name\":\"shell\",\"arguments\":{\"command\":\"date\"}}}]},\"done\":true,\"eval_count\":5}\n",
+            None,
+        );
+        let resp = p.map_api_response(acc.into_response(), "qwen2.5");
+        assert_eq!(resp.tool_calls.len(), 1);
+        assert_eq!(resp.tool_calls[0].name, "shell");
+        assert!(
+            resp.tool_calls[0].arguments.contains("date"),
+            "args: {}",
+            resp.tool_calls[0].arguments
+        );
+        assert_eq!(resp.usage.unwrap().output_tokens, Some(5));
+    }
+
+    #[test]
+    fn stream_accumulator_buffers_partial_ndjson_lines() {
+        // One JSON object split across two TCP chunks must parse once whole.
+        let mut acc = StreamAccumulator::default();
+        acc.process_chunk("{\"message\":{\"content\":\"par", None);
+        acc.process_chunk("tial\"},\"done\":true}\n", None);
+        assert_eq!(acc.into_response().message.content, "partial");
+    }
 
     #[test]
     fn default_url() {
