@@ -1,6 +1,6 @@
 use crate::providers::traits::{
     ChatMessage, ChatRequest as ProviderChatRequest, ChatResponse as ProviderChatResponse,
-    Provider, TokenUsage, ToolCall as ProviderToolCall,
+    Provider, ProviderCapabilities, TokenUsage, ToolCall as ProviderToolCall,
 };
 use crate::tools::ToolSpec;
 use async_trait::async_trait;
@@ -74,11 +74,33 @@ struct NativeChatRequest {
     stream: Option<bool>,
 }
 
+/// OpenAI message content: either a plain string or an array of typed parts
+/// (text + image_url) for multimodal user turns. `untagged` so a `Text` value
+/// serializes as a bare string (byte-identical to the text-only wire form).
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum MessageContent {
+    Text(String),
+    Parts(Vec<MessagePart>),
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum MessagePart {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrlPart },
+}
+
+#[derive(Debug, Serialize)]
+struct ImageUrlPart {
+    url: String,
+}
+
 #[derive(Debug, Serialize)]
 struct NativeMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<MessageContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -213,6 +235,34 @@ impl OpenAiProvider {
         })
     }
 
+    /// Build the wire content for a message. Only user turns are scanned for
+    /// `[IMAGE:...]` markers; if any are present they become `image_url` parts
+    /// (with the surrounding text preserved as a text part). Everything else —
+    /// and any user turn without markers — stays a plain text string, so the
+    /// non-multimodal wire form is unchanged.
+    fn to_message_content(role: &str, content: &str) -> MessageContent {
+        if role != "user" {
+            return MessageContent::Text(content.to_string());
+        }
+        let (cleaned_text, image_refs) = crate::multimodal::parse_image_markers(content);
+        if image_refs.is_empty() {
+            return MessageContent::Text(content.to_string());
+        }
+        let mut parts = Vec::with_capacity(image_refs.len() + 1);
+        let trimmed = cleaned_text.trim();
+        if !trimmed.is_empty() {
+            parts.push(MessagePart::Text {
+                text: trimmed.to_string(),
+            });
+        }
+        for image_ref in image_refs {
+            parts.push(MessagePart::ImageUrl {
+                image_url: ImageUrlPart { url: image_ref },
+            });
+        }
+        MessageContent::Parts(parts)
+    }
+
     fn convert_messages(messages: &[ChatMessage]) -> Vec<NativeMessage> {
         messages
             .iter()
@@ -246,7 +296,7 @@ impl OpenAiProvider {
                                     .map(ToString::to_string);
                                 return NativeMessage {
                                     role: "assistant".to_string(),
-                                    content,
+                                    content: content.map(MessageContent::Text),
                                     tool_call_id: None,
                                     tool_calls: Some(tool_calls),
                                     reasoning_content,
@@ -268,7 +318,7 @@ impl OpenAiProvider {
                             .map(ToString::to_string);
                         return NativeMessage {
                             role: "tool".to_string(),
-                            content,
+                            content: content.map(MessageContent::Text),
                             tool_call_id,
                             tool_calls: None,
                             reasoning_content: None,
@@ -278,7 +328,7 @@ impl OpenAiProvider {
 
                 NativeMessage {
                     role: m.role.clone(),
-                    content: Some(m.content.clone()),
+                    content: Some(Self::to_message_content(&m.role, &m.content)),
                     tool_call_id: None,
                     tool_calls: None,
                     reasoning_content: None,
@@ -601,6 +651,18 @@ impl Provider for OpenAiProvider {
         true
     }
 
+    fn capabilities(&self) -> ProviderCapabilities {
+        // Modern OpenAI models (gpt-4o, gpt-4.1, o-series) are vision-capable.
+        // Reporting vision lets the agent loop's image guard pass image markers
+        // through to `convert_messages` instead of rejecting the turn. A legacy
+        // text-only model (e.g. gpt-3.5) given an image degrades to a clear
+        // OpenAI API error — same blanket stance as the Anthropic provider.
+        ProviderCapabilities {
+            native_tool_calling: true,
+            vision: true,
+        }
+    }
+
     fn supports_streaming(&self) -> bool {
         true
     }
@@ -843,6 +905,55 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("API key not set"), "{err}");
+    }
+
+    #[test]
+    fn capabilities_reports_vision_and_native_tools() {
+        let caps = OpenAiProvider::new(Some("k")).capabilities();
+        assert!(
+            caps.vision,
+            "OpenAI must report vision so image turns aren't rejected"
+        );
+        assert!(caps.native_tool_calling);
+    }
+
+    #[test]
+    fn convert_messages_parses_user_image_markers_to_parts() {
+        let messages = vec![ChatMessage::user(
+            "Describe this [IMAGE:data:image/png;base64,abcd]",
+        )];
+        let native = OpenAiProvider::convert_messages(&messages);
+        let json = serde_json::to_value(&native[0].content).unwrap();
+        let parts = json
+            .as_array()
+            .unwrap_or_else(|| panic!("multimodal content must serialize as an array: {json}"));
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "Describe this");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,abcd");
+    }
+
+    #[test]
+    fn convert_messages_keeps_plain_user_text_as_bare_string() {
+        // No markers -> bare string wire form, byte-identical to before.
+        let messages = vec![ChatMessage::user("just text")];
+        let native = OpenAiProvider::convert_messages(&messages);
+        let json = serde_json::to_value(&native[0].content).unwrap();
+        assert_eq!(json, serde_json::json!("just text"));
+    }
+
+    #[test]
+    fn convert_messages_does_not_parse_images_in_non_user_roles() {
+        // Marker-like text in a non-user role must stay a plain string.
+        let messages = vec![ChatMessage::system(
+            "context [IMAGE:data:image/png;base64,abcd]",
+        )];
+        let native = OpenAiProvider::convert_messages(&messages);
+        let json = serde_json::to_value(&native[0].content).unwrap();
+        assert!(
+            json.is_string(),
+            "non-user content must stay a string: {json}"
+        );
     }
 
     #[test]
@@ -1176,7 +1287,7 @@ mod tests {
     fn native_message_omits_reasoning_content_when_none() {
         let msg = NativeMessage {
             role: "assistant".to_string(),
-            content: Some("hi".to_string()),
+            content: Some(MessageContent::Text("hi".to_string())),
             tool_call_id: None,
             tool_calls: None,
             reasoning_content: None,
@@ -1189,7 +1300,7 @@ mod tests {
     fn native_message_includes_reasoning_content_when_some() {
         let msg = NativeMessage {
             role: "assistant".to_string(),
-            content: Some("hi".to_string()),
+            content: Some(MessageContent::Text("hi".to_string())),
             tool_call_id: None,
             tool_calls: None,
             reasoning_content: Some("thinking...".to_string()),
