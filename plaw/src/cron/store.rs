@@ -693,11 +693,21 @@ fn with_connection<T>(config: &Config, f: impl FnOnce(&Connection) -> Result<T>)
     let conn = Connection::open(&db_path)
         .with_context(|| format!("Failed to open cron DB: {}", db_path.display()))?;
 
-    // PRAGMA foreign_keys is connection-level (not schema-level) so it stays
-    // outside the versioned migration slice. Must be set on every fresh
-    // connection — which `with_connection` opens fresh per call.
-    conn.execute_batch("PRAGMA foreign_keys = ON;")
-        .context("Failed to enable foreign keys on cron DB")?;
+    // Connection-level PRAGMAs (not schema-level) — set on every fresh
+    // connection, which `with_connection` opens per call. `busy_timeout` is
+    // the load-bearing one: the cron store is hit by overlapping writers (the
+    // poll loop, `cron_run` force-runs, the `plaw cron` CLI), and without it a
+    // concurrent write returns an immediate `SQLITE_BUSY` that the scheduler
+    // swallows (`let _ = record_run`, warn-and-continue reschedule) — leaving
+    // `next_run` un-advanced so the job re-fires forever. WAL + synchronous=
+    // NORMAL match every other SQLite store in plaw (memory/*, agents_ipc).
+    conn.execute_batch(
+        "PRAGMA foreign_keys = ON;
+         PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;
+         PRAGMA busy_timeout = 5000;",
+    )
+    .context("Failed to set cron DB pragmas")?;
 
     crate::db::migrate(&conn, "cron", CRON_MIGRATIONS)
         .context("cron schema migration failed")?;
@@ -738,6 +748,28 @@ mod tests {
         };
         std::fs::create_dir_all(&config.workspace_dir).unwrap();
         config
+    }
+
+    #[test]
+    fn cron_connection_sets_wal_and_busy_timeout() {
+        // Regression: the cron store must open with the same durability PRAGMAs
+        // as every other plaw SQLite store. busy_timeout is load-bearing — it
+        // turns a concurrent-writer SQLITE_BUSY into a bounded wait instead of
+        // an immediate (swallowed) error that strands next_run.
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp);
+        with_connection(&config, |conn| {
+            let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
+            assert_eq!(mode.to_lowercase(), "wal", "journal_mode");
+            let busy: i64 = conn.query_row("PRAGMA busy_timeout", [], |r| r.get(0))?;
+            assert_eq!(busy, 5000, "busy_timeout");
+            let sync: i64 = conn.query_row("PRAGMA synchronous", [], |r| r.get(0))?;
+            assert_eq!(sync, 1, "synchronous=NORMAL"); // NORMAL == 1
+            let fk: i64 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
+            assert_eq!(fk, 1, "foreign_keys still on");
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[test]

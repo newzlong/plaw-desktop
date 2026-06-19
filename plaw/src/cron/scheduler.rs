@@ -354,7 +354,7 @@ async fn persist_job_result(
         }
     }
 
-    let _ = record_run(
+    if let Err(e) = record_run(
         config,
         &job.id,
         started_at,
@@ -362,7 +362,16 @@ async fn persist_job_result(
         if success { "ok" } else { "error" },
         Some(output),
         duration_ms,
-    );
+    ) {
+        // A swallowed run-history write used to be invisible. Surface it on the
+        // scheduler health component so a persistent failure (e.g. disk full)
+        // becomes observable instead of silently losing history.
+        tracing::warn!("Failed to record cron run history: {e}");
+        crate::health::mark_component_error(
+            SCHEDULER_COMPONENT,
+            format!("cron run-history write failed: {e}"),
+        );
+    }
 
     if is_one_shot_auto_delete(job) {
         if success {
@@ -386,7 +395,14 @@ async fn persist_job_result(
     }
 
     if let Err(e) = reschedule_after_run(config, job, success, output) {
+        // Critical: if reschedule fails, next_run is NOT advanced, so the job
+        // stays due and re-fires on the next tick (a silent retry storm). Mark
+        // the scheduler unhealthy so the stuck state is visible.
         tracing::warn!("Failed to persist scheduler run result: {e}");
+        crate::health::mark_component_error(
+            SCHEDULER_COMPONENT,
+            format!("cron reschedule write failed (job will re-fire): {e}"),
+        );
     }
 
     success
