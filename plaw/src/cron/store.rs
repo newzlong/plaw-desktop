@@ -534,6 +534,18 @@ fn sql_conversion_error(err: anyhow::Error) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(err.into())
 }
 
+/// Decode one `cron_jobs` row into a [`CronJob`].
+///
+/// INVARIANT: this reads columns by POSITION (`row.get(0)`..`row.get(20)`), so
+/// the column order here must match — exactly and in the same order — every
+/// `SELECT ... FROM cron_jobs` that feeds it. There are three such statements
+/// in this file (the `FROM cron_jobs` queries: list-all, get-by-id, and the
+/// due-jobs poll). Adding or reordering a column means updating ALL THREE
+/// SELECT lists AND the indices below together, plus a round-trip test (see
+/// e.g. `shell_job_persists_timeout_override`, `pipeline_job_persists_*`) that
+/// would catch a mismatch. Columns are stored/read in `INSERT`/`UPDATE` order;
+/// new columns are appended (via `add_column_if_missing`), never inserted
+/// mid-list, to keep these positions stable.
 fn map_cron_job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CronJob> {
     let expression: String = row.get(1)?;
     let schedule_raw: Option<String> = row.get(3)?;
