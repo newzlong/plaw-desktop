@@ -26,7 +26,22 @@ pub async fn handle_command(command: crate::MemoryCommands, config: &Config) -> 
         crate::MemoryCommands::Consolidate { apply, limit } => {
             handle_consolidate(config, apply, limit).await
         }
+        crate::MemoryCommands::Reindex => handle_reindex(config).await,
     }
+}
+
+async fn handle_reindex(config: &Config) -> Result<()> {
+    // Full backend (with the configured embedder) so the back-fill uses the
+    // user's embedding provider.
+    let memory = super::create_memory(
+        &config.memory,
+        &config.workspace_dir,
+        config.api_key.as_deref(),
+    )?;
+    println!("Reindexing memory (rebuild FTS + back-fill missing embeddings)…");
+    let count = memory.reindex().await?;
+    println!("Reindex complete: {count} row(s) (re)embedded.");
+    Ok(())
 }
 
 async fn handle_consolidate(config: &Config, apply: bool, limit: usize) -> Result<()> {

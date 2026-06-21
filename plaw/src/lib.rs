@@ -389,6 +389,12 @@ pub enum MemoryCommands {
         #[arg(long, default_value = "100")]
         limit: usize,
     },
+    /// Rebuild the search index and back-fill missing embeddings.
+    ///
+    /// Useful after enabling embeddings on an existing keyword-only store, or
+    /// to repair a drifted FTS index. No-op on backends without a rebuildable
+    /// index.
+    Reindex,
 }
 
 /// Integration subcommands

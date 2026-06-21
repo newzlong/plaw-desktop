@@ -179,6 +179,16 @@ pub trait Memory: Send + Sync {
         let _ = as_of;
         self.recall(query, limit, session_id).await
     }
+
+    /// Rebuild backend indexes and back-fill any missing embeddings, returning
+    /// the number of rows (re)embedded. Useful after enabling embeddings on an
+    /// existing keyword-only store, or to repair a drifted search index.
+    ///
+    /// Default impl is a no-op (`Ok(0)`) for backends without a rebuildable
+    /// index; the sqlite backend overrides it.
+    async fn reindex(&self) -> anyhow::Result<usize> {
+        Ok(0)
+    }
 }
 
 #[cfg(test)]
@@ -384,6 +394,19 @@ mod tests {
                 .load(std::sync::atomic::Ordering::SeqCst),
             1,
             "default recall_as_of must delegate to recall on non-bi-temporal backends"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_reindex_is_noop() {
+        let backend = NoopBackend {
+            store_calls: std::sync::atomic::AtomicUsize::new(0),
+            recall_calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        assert_eq!(
+            backend.reindex().await.unwrap(),
+            0,
+            "default reindex is a no-op returning 0 on backends without a rebuildable index"
         );
     }
 }
