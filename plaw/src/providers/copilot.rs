@@ -11,12 +11,14 @@
 //! GitHub could change or revoke this at any time, which would break all
 //! third-party integrations simultaneously.
 
+use super::openai_sse::SseAccumulator;
 use crate::providers::traits::{
     ChatMessage, ChatRequest as ProviderChatRequest, ChatResponse as ProviderChatResponse,
     Provider, TokenUsage, ToolCall as ProviderToolCall,
 };
 use crate::tools::ToolSpec;
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -89,6 +91,10 @@ struct ApiChatRequest<'a> {
     tools: Option<Vec<NativeToolSpec<'a>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
+    /// Set only on the streaming path; omitted otherwise so the non-streaming
+    /// request body is byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -331,6 +337,7 @@ impl CopilotProvider {
             temperature,
             tool_choice: native_tools.as_ref().map(|_| "auto".to_string()),
             tools: native_tools,
+            stream: None,
         };
 
         let mut req = self
@@ -381,6 +388,57 @@ impl CopilotProvider {
             usage,
             reasoning_content: None,
         })
+    }
+
+    /// Streaming variant of [`Self::send_chat_request`]: same auth, headers, and
+    /// request plus `stream: true`, folded through the shared [`SseAccumulator`]
+    /// with text deltas forwarded to `on_token`.
+    async fn send_chat_request_streaming(
+        &self,
+        messages: Vec<ApiMessage>,
+        tools: Option<&[ToolSpec]>,
+        model: &str,
+        temperature: f64,
+        on_token: Option<&tokio::sync::mpsc::Sender<String>>,
+    ) -> anyhow::Result<ProviderChatResponse> {
+        let (token, endpoint) = self.get_api_key().await?;
+        let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
+
+        let native_tools = Self::convert_tools(tools);
+        let request = ApiChatRequest {
+            model: model.to_string(),
+            messages,
+            temperature,
+            tool_choice: native_tools.as_ref().map(|_| "auto".to_string()),
+            tools: native_tools,
+            stream: Some(true),
+        };
+
+        let mut req = self
+            .http_client()
+            .post(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Accept", "text/event-stream")
+            .json(&request);
+
+        for (header, value) in &Self::COPILOT_HEADERS {
+            req = req.header(*header, *value);
+        }
+
+        let response = req.send().await?;
+
+        if !response.status().is_success() {
+            return Err(super::api_error("GitHub Copilot", response).await);
+        }
+
+        let mut acc = SseAccumulator::new();
+        let mut bytes_stream = response.bytes_stream();
+        while let Some(item) = bytes_stream.next().await {
+            let bytes = item?;
+            acc.process_chunk(&String::from_utf8_lossy(&bytes), on_token);
+        }
+        acc.finish(on_token);
+        Ok(acc.finalize())
     }
 
     /// Get a valid Copilot API key, refreshing or re-authenticating as needed.
@@ -655,6 +713,30 @@ impl Provider for CopilotProvider {
         .await
     }
 
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    /// Streaming variant of [`Self::chat`]: converts the history and delegates
+    /// to [`Self::send_chat_request_streaming`], which folds Copilot's
+    /// OpenAI-compatible SSE response and forwards text deltas to `on_token`.
+    async fn chat_streaming(
+        &self,
+        request: ProviderChatRequest<'_>,
+        model: &str,
+        temperature: f64,
+        on_token: Option<&tokio::sync::mpsc::Sender<String>>,
+    ) -> anyhow::Result<ProviderChatResponse> {
+        self.send_chat_request_streaming(
+            Self::convert_messages(request.messages),
+            request.tools,
+            model,
+            temperature,
+            on_token,
+        )
+        .await
+    }
+
     fn supports_native_tools(&self) -> bool {
         true
     }
@@ -668,6 +750,22 @@ impl Provider for CopilotProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn api_chat_request_serializes_stream_flag() {
+        let mk = |stream| ApiChatRequest {
+            model: "gpt-4o".into(),
+            messages: vec![],
+            temperature: 0.0,
+            tools: None,
+            tool_choice: None,
+            stream,
+        };
+        assert!(!serde_json::to_string(&mk(None)).unwrap().contains("stream"));
+        assert!(serde_json::to_string(&mk(Some(true)))
+            .unwrap()
+            .contains("\"stream\":true"));
+    }
 
     #[test]
     fn new_without_token() {
