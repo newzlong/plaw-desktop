@@ -262,7 +262,12 @@ pub fn create_memory_with_storage_and_routes(
             config.keyword_weight as f32,
             config.embedding_cache_size,
             config.sqlite_open_timeout_secs,
-        )?;
+        )?
+        .with_ranking(
+            config.ranking.enabled,
+            config.ranking.importance_weight as f32,
+            config.ranking.recency_half_life_days as f32,
+        );
         Ok(mem)
     }
 

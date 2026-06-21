@@ -671,6 +671,31 @@ Notes:
 
 - Memory context injection ignores legacy `assistant_resp*` auto-save keys to prevent old model-authored summaries from being treated as facts.
 
+### `[memory.ranking]`
+
+Optional importance + recency re-ranking for the `sqlite` backend. **Default-off**:
+when `enabled = false` recall ordering is pure hybrid relevance (vector + BM25),
+byte-identical to leaving this section out. When enabled, recall re-scores
+candidates by `relevance × importance_factor × recency_factor` (the
+Generative-Agents retrieval blend). Each knob disables independently to a no-op.
+Only the `sqlite` backend honours this section.
+
+| Key | Default | Purpose |
+|---|---|---|
+| `enabled` | `false` | master switch; `false` keeps pure-relevance ordering |
+| `importance_weight` | `0.5` | how strongly a memory's stored importance (0.0–1.0) biases rank; `0.0` ignores importance |
+| `recency_half_life_days` | `30.0` | exponential recency half-life in days; `0.0` disables recency decay |
+
+A memory's importance is seeded on write from its category (`core` 0.7, `daily`
+0.4, `conversation` 0.3, custom 0.5).
+
+```toml
+[memory.ranking]
+enabled = true
+importance_weight = 0.5
+recency_half_life_days = 30.0
+```
+
 ## `[[model_routes]]` and `[[embedding_routes]]`
 
 Use route hints so integrations can keep stable names while model IDs evolve.

@@ -2078,6 +2078,48 @@ impl Default for QdrantConfig {
     }
 }
 
+/// Relevance ranking tuning for the sqlite backend (`[memory.ranking]`).
+///
+/// When `enabled = false` (the default) recall ranking is byte-identical to
+/// pre-ranking behaviour: pure hybrid relevance (vector + BM25). When enabled,
+/// recall re-scores candidates by `relevance × importance_factor × recency`,
+/// the classic Generative-Agents retrieval blend. Each knob disables to a
+/// no-op independently (`importance_weight = 0` ignores importance;
+/// `recency_half_life_days = 0` ignores recency), so the feature is fully
+/// opt-in and tunable. Only the sqlite backend honours this section.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct MemoryRankingConfig {
+    /// Master switch. `false` keeps recall ordering identical to pre-#A2.
+    #[serde(default)]
+    pub enabled: bool,
+    /// How strongly a memory's stored importance (0.0–1.0) biases its rank.
+    /// `0.0` = importance ignored; `1.0` = relevance fully scaled by importance.
+    #[serde(default = "default_importance_weight")]
+    pub importance_weight: f64,
+    /// Exponential recency half-life in days: a memory `h` days old keeps half
+    /// its recency factor. `0.0` disables recency decay entirely.
+    #[serde(default = "default_recency_half_life_days")]
+    pub recency_half_life_days: f64,
+}
+
+fn default_importance_weight() -> f64 {
+    0.5
+}
+
+fn default_recency_half_life_days() -> f64 {
+    30.0
+}
+
+impl Default for MemoryRankingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            importance_weight: default_importance_weight(),
+            recency_half_life_days: default_recency_half_life_days(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct MemoryConfig {
@@ -2162,6 +2204,12 @@ pub struct MemoryConfig {
     /// Only used when `backend = "qdrant"`.
     #[serde(default)]
     pub qdrant: QdrantConfig,
+
+    // ── Relevance ranking (sqlite backend) ─────────────────────
+    /// Importance + recency ranking for recall. Default-off; see
+    /// [`MemoryRankingConfig`]. Only the sqlite backend honours it.
+    #[serde(default)]
+    pub ranking: MemoryRankingConfig,
 }
 
 fn default_memory_backend() -> String {
@@ -2235,6 +2283,7 @@ impl Default for MemoryConfig {
             auto_hydrate: true,
             sqlite_open_timeout_secs: None,
             qdrant: QdrantConfig::default(),
+            ranking: MemoryRankingConfig::default(),
         }
     }
 }
