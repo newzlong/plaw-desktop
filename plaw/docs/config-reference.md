@@ -661,6 +661,7 @@ allowed_roots = ["~/Desktop/projects", "/opt/shared-repo"]
 |---|---|---|
 | `backend` | `sqlite` | `sqlite`, `lucid`, `markdown`, `none` |
 | `auto_save` | `true` | persist user-stated inputs only (assistant outputs are excluded) |
+| `consolidation_enabled` | `false` | install the nightly memory-consolidation cron job (requires `[cron].enabled = true`) |
 | `embedding_provider` | `none` | `none`, `openai`, or custom endpoint |
 | `embedding_model` | `text-embedding-3-small` | embedding model ID, or `hint:<name>` route |
 | `embedding_dimensions` | `1536` | expected vector size for selected embedding model |

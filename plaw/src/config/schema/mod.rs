@@ -2144,6 +2144,12 @@ pub struct MemoryConfig {
     /// For sqlite backend: prune conversation rows older than this many days
     #[serde(default = "default_conversation_retention_days")]
     pub conversation_retention_days: u32,
+    /// Install the nightly memory-consolidation cron job (distils the past 24h
+    /// into a dated `core` summary + `MEMORY.md` section). Requires
+    /// `[cron].enabled = true` to actually run. Reconciled at gateway start:
+    /// setting it installs the job, clearing it removes the job.
+    #[serde(default)]
+    pub consolidation_enabled: bool,
     /// Embedding provider: "none" | "openai" | "custom:URL"
     #[serde(default = "default_embedding_provider")]
     pub embedding_provider: String,
@@ -2267,6 +2273,7 @@ impl Default for MemoryConfig {
             archive_after_days: default_archive_after_days(),
             purge_after_days: default_purge_after_days(),
             conversation_retention_days: default_conversation_retention_days(),
+            consolidation_enabled: false,
             embedding_provider: default_embedding_provider(),
             embedding_model: default_embedding_model(),
             embedding_dimensions: default_embedding_dims(),

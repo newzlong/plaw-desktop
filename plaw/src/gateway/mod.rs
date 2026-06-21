@@ -1052,6 +1052,17 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     // run_gateway returns OR its future is dropped on a supervisor restart, the
     // scheduler is torn down rather than leaked as a detached loop that would
     // double-fire after the next restart.
+    // Reconcile the opt-in nightly memory-consolidation job before the
+    // scheduler starts: install it when `[memory].consolidation_enabled` is
+    // set, remove it when cleared. Cron-gated (a job that cannot fire is
+    // pointless to install) and fail-soft (a sync error must not down the
+    // gateway).
+    if config.cron.enabled {
+        if let Err(e) = crate::cron::consolidation::sync_consolidation_job(&config) {
+            tracing::warn!("memory-consolidation job sync failed: {e}");
+        }
+    }
+
     let _scheduler_guard = config.cron.enabled.then(|| {
         let scheduler_config = config.clone();
         let handle = tokio::spawn(async move {
