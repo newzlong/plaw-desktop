@@ -1,3 +1,4 @@
+use super::openai_sse::SseAccumulator;
 use crate::multimodal;
 use crate::providers::traits::{
     ChatMessage, ChatRequest as ProviderChatRequest, ChatResponse as ProviderChatResponse,
@@ -5,6 +6,7 @@ use crate::providers::traits::{
 };
 use crate::tools::ToolSpec;
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
@@ -73,6 +75,10 @@ struct NativeChatRequest {
     tools: Option<Vec<NativeToolSpec>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
+    /// Set only on the streaming path; omitted otherwise so the non-streaming
+    /// request body is byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -462,6 +468,7 @@ impl Provider for OpenRouterProvider {
             max_tokens: self.max_tokens_override,
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
             tools,
+            stream: None,
         };
 
         let response = self
@@ -493,6 +500,63 @@ impl Provider for OpenRouterProvider {
         let mut result = Self::parse_native_response(message);
         result.usage = usage;
         Ok(result)
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    /// Streaming variant of [`Self::chat`]: same request plus `stream: true`,
+    /// folded through the shared [`SseAccumulator`] (OpenRouter speaks the
+    /// OpenAI Chat Completions SSE wire format). Text deltas forward to
+    /// `on_token` as they arrive.
+    async fn chat_streaming(
+        &self,
+        request: ProviderChatRequest<'_>,
+        model: &str,
+        temperature: f64,
+        on_token: Option<&tokio::sync::mpsc::Sender<String>>,
+    ) -> anyhow::Result<ProviderChatResponse> {
+        let credential = self.credential.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "OpenRouter API key not set. Run `plaw onboard` or set OPENROUTER_API_KEY env var."
+            )
+        })?;
+
+        let tools = Self::convert_tools(request.tools);
+        let native_request = NativeChatRequest {
+            model: model.to_string(),
+            messages: Self::convert_messages(request.messages),
+            temperature,
+            max_tokens: self.max_tokens_override,
+            tool_choice: tools.as_ref().map(|_| "auto".to_string()),
+            tools,
+            stream: Some(true),
+        };
+
+        let response = self
+            .http_client()
+            .post("https://openrouter.ai/api/v1/chat/completions")
+            .header("Authorization", format!("Bearer {credential}"))
+            .header("HTTP-Referer", "https://github.com/theonlyhennygod/plaw")
+            .header("X-Title", "Plaw")
+            .header("Accept", "text/event-stream")
+            .json(&native_request)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(super::api_error("OpenRouter", response).await);
+        }
+
+        let mut acc = SseAccumulator::new();
+        let mut bytes_stream = response.bytes_stream();
+        while let Some(item) = bytes_stream.next().await {
+            let bytes = item?;
+            acc.process_chunk(&String::from_utf8_lossy(&bytes), on_token);
+        }
+        acc.finish(on_token);
+        Ok(acc.finalize())
     }
 
     fn supports_native_tools(&self) -> bool {
@@ -555,6 +619,7 @@ impl Provider for OpenRouterProvider {
             max_tokens: self.max_tokens_override,
             tool_choice: native_tools.as_ref().map(|_| "auto".to_string()),
             tools: native_tools,
+            stream: None,
         };
 
         let response = self
@@ -593,6 +658,35 @@ impl Provider for OpenRouterProvider {
 mod tests {
     use super::*;
     use crate::providers::traits::{ChatMessage, Provider};
+
+    #[test]
+    fn native_chat_request_serializes_stream_flag() {
+        let mk = |stream| NativeChatRequest {
+            model: "x".into(),
+            messages: vec![],
+            temperature: 0.0,
+            max_tokens: None,
+            tool_choice: None,
+            tools: None,
+            stream,
+        };
+        assert!(!serde_json::to_string(&mk(None)).unwrap().contains("stream"));
+        assert!(serde_json::to_string(&mk(Some(true)))
+            .unwrap()
+            .contains("\"stream\":true"));
+    }
+
+    #[tokio::test]
+    async fn chat_streaming_requires_credential() {
+        let p = OpenRouterProvider::new(None);
+        let messages = vec![ChatMessage::user("hi")];
+        let request = ProviderChatRequest {
+            messages: &messages,
+            tools: None,
+        };
+        let err = p.chat_streaming(request, "x", 0.0, None).await.unwrap_err();
+        assert!(err.to_string().contains("API key not set"), "{err}");
+    }
 
     #[test]
     fn capabilities_report_vision_support() {
