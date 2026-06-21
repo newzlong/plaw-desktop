@@ -320,10 +320,18 @@ impl PromptSection for DateTimeSection {
     }
 
     fn build(&self, _ctx: &PromptContext<'_>) -> Result<String> {
+        // Date only — NO wall-clock time. This section is part of the cached
+        // system prompt (Anthropic/Bedrock wrap the whole system text in one
+        // `cache_control: ephemeral` block when it exceeds ~1024 tokens). A
+        // per-second `%H:%M:%S` timestamp changed the cached text every turn,
+        // invalidating the prefix cache: plaw paid the 1.25x cache-WRITE
+        // premium each turn and never earned a single 0.1x cache READ — worse
+        // than not caching. The date changes once a day, so the prefix now
+        // stays stable. Agents that need the exact time can run a shell `date`.
         let now = Local::now();
         Ok(format!(
             "## Current Date & Time\n\n{} ({})",
-            now.format("%Y-%m-%d %H:%M:%S"),
+            now.format("%Y-%m-%d"),
             now.format("%Z")
         ))
     }
