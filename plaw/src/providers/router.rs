@@ -164,6 +164,24 @@ impl Provider for RouterProvider {
             .await
     }
 
+    /// Route the streaming call to the resolved inner provider and thread the
+    /// `on_token` sender through, so a routed provider that implements real
+    /// streaming (Anthropic, OpenAI-compatible, ...) keeps forwarding deltas.
+    /// Without this override the router inherited the blocking default.
+    async fn chat_streaming(
+        &self,
+        request: ChatRequest<'_>,
+        model: &str,
+        temperature: f64,
+        on_token: Option<&tokio::sync::mpsc::Sender<String>>,
+    ) -> anyhow::Result<ChatResponse> {
+        let (provider_idx, resolved_model) = self.resolve(model);
+        let (_, provider) = &self.providers[provider_idx];
+        provider
+            .chat_streaming(request, &resolved_model, temperature, on_token)
+            .await
+    }
+
     fn supports_native_tools(&self) -> bool {
         self.providers
             .get(self.default_index)
@@ -287,6 +305,29 @@ mod tests {
                 .chat_with_system(system_prompt, message, model, temperature)
                 .await
         }
+    }
+
+    #[tokio::test]
+    async fn chat_streaming_routes_to_hinted_provider() {
+        let (router, mocks) = make_router(
+            vec![("fast", "fast-response"), ("smart", "smart-response")],
+            vec![("reasoning", "smart", "claude-opus")],
+        );
+        let messages = vec![ChatMessage::user("hello")];
+        let request = ChatRequest {
+            messages: &messages,
+            tools: None,
+        };
+        let _ = router
+            .chat_streaming(request, "hint:reasoning", 0.5, None)
+            .await;
+        assert_eq!(
+            mocks[1].call_count(),
+            1,
+            "streaming must route to the hinted provider"
+        );
+        assert_eq!(mocks[1].last_model(), "claude-opus");
+        assert_eq!(mocks[0].call_count(), 0);
     }
 
     #[tokio::test]
