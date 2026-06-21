@@ -169,6 +169,15 @@ pub(super) const MEMORIES_MIGRATIONS: &[crate::db::Migration] = &[
         INSERT INTO memories_fts(memories_fts) VALUES('rebuild');
         ",
     },
+    crate::db::Migration {
+        version: 3,
+        description: "add importance column for relevance×importance×recency ranking",
+        // Plain additive column — no table rebuild needed. Existing rows get
+        // the neutral 0.5 default; `store` backfills a category heuristic for
+        // new rows. Ranking is opt-in (`[memory.ranking].enabled`), so this
+        // column is inert until the user turns ranking on.
+        sql: "ALTER TABLE memories ADD COLUMN importance REAL NOT NULL DEFAULT 0.5;",
+    },
 ];
 
 /// Legacy ad-hoc column add for `memories.session_id`. Kept OUTSIDE the
@@ -229,6 +238,57 @@ pub(super) fn init_brain_db_schema(conn: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Recall ranking parameters (mirror of `config::MemoryRankingConfig`,
+/// kept as a small `Copy` value so the hot recall path reads it without a
+/// borrow). `enabled = false` is the default and makes recall ordering
+/// byte-identical to pre-ranking behaviour.
+#[derive(Debug, Clone, Copy)]
+struct RankingParams {
+    enabled: bool,
+    importance_weight: f32,
+    recency_half_life_days: f32,
+}
+
+impl Default for RankingParams {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            importance_weight: 0.5,
+            recency_half_life_days: 30.0,
+        }
+    }
+}
+
+/// Heuristic seed importance (0.0–1.0) for a freshly stored memory, derived
+/// from its category. Long-term `Core` facts outrank transient
+/// `Conversation` context. A later reflective pass (consolidation hook) can
+/// overwrite this with a model-scored value; until then it is a cheap,
+/// dependency-free prior that only takes effect when ranking is enabled.
+fn seed_importance(cat: &MemoryCategory) -> f32 {
+    match cat {
+        MemoryCategory::Core => 0.7,
+        MemoryCategory::Daily => 0.4,
+        MemoryCategory::Conversation => 0.3,
+        MemoryCategory::Custom(_) => 0.5,
+    }
+}
+
+/// Exponential recency factor in `(0.0, 1.0]`: a memory `half_life_days` old
+/// keeps half its weight. `half_life_days <= 0.0` disables decay (returns
+/// 1.0), as does an unparseable timestamp (never penalise on a parse miss).
+fn recency_factor(timestamp_rfc3339: &str, now_secs: i64, half_life_days: f32) -> f64 {
+    if half_life_days <= 0.0 {
+        return 1.0;
+    }
+    let Ok(created) = chrono::DateTime::parse_from_rfc3339(timestamp_rfc3339) else {
+        return 1.0;
+    };
+    let age_secs = (now_secs - created.timestamp()).max(0);
+    #[allow(clippy::cast_precision_loss)]
+    let age_days = age_secs as f64 / 86_400.0;
+    0.5_f64.powf(age_days / f64::from(half_life_days))
+}
+
 /// SQLite-backed persistent memory — the brain
 ///
 /// Full-stack search engine:
@@ -247,6 +307,7 @@ pub struct SqliteMemory {
     vector_weight: f32,
     keyword_weight: f32,
     cache_max: usize,
+    ranking: RankingParams,
 }
 
 impl SqliteMemory {
@@ -305,7 +366,29 @@ impl SqliteMemory {
             vector_weight,
             keyword_weight,
             cache_max,
+            ranking: RankingParams::default(),
         })
+    }
+
+    /// Enable importance + recency recall ranking (builder; default is off).
+    ///
+    /// Kept as a post-construction builder so the many existing
+    /// `with_embedder` / `new` call sites stay unchanged — only the factory
+    /// that reads `[memory.ranking]` opts in. `importance_weight` and
+    /// `recency_half_life_days` each disable to a no-op at `0.0`.
+    #[must_use]
+    pub fn with_ranking(
+        mut self,
+        enabled: bool,
+        importance_weight: f32,
+        recency_half_life_days: f32,
+    ) -> Self {
+        self.ranking = RankingParams {
+            enabled,
+            importance_weight: importance_weight.clamp(0.0, 1.0),
+            recency_half_life_days: recency_half_life_days.max(0.0),
+        };
+        self
     }
 
     /// Open SQLite connection, optionally with a timeout (for locked/slow storage).
@@ -649,11 +732,21 @@ impl Memory for SqliteMemory {
                 "INSERT INTO memories
                     (id, key, content, category, embedding,
                      created_at, updated_at, session_id,
-                     valid_from, valid_to, supersedes_id, ingested_at)
+                     valid_from, valid_to, supersedes_id, ingested_at, importance)
                  VALUES (?1, ?2, ?3, ?4, ?5,
                          ?6, ?6, ?7,
-                         ?6, NULL, ?8, ?6)",
-                params![new_id, key, content, cat, embedding_bytes, now, sid, old_id],
+                         ?6, NULL, ?8, ?6, ?9)",
+                params![
+                    new_id,
+                    key,
+                    content,
+                    cat,
+                    embedding_bytes,
+                    now,
+                    sid,
+                    old_id,
+                    f64::from(seed_importance(&category))
+                ],
             )?;
 
             tx.commit()?;
@@ -680,17 +773,30 @@ impl Memory for SqliteMemory {
         let sid = session_id.map(String::from);
         let vector_weight = self.vector_weight;
         let keyword_weight = self.keyword_weight;
+        let ranking = self.ranking;
 
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<MemoryEntry>> {
             let conn = conn.lock();
             let session_ref = sid.as_deref();
 
+            // With ranking ON, over-fetch a wider candidate pool so the
+            // importance/recency re-score can promote items that pure
+            // relevance would have truncated away. With ranking OFF,
+            // `pool == limit`, so candidate counts, merge limit, and final
+            // ordering are byte-identical to pre-ranking behaviour.
+            let pool = if ranking.enabled {
+                limit.saturating_mul(4).max(8)
+            } else {
+                limit
+            };
+            let cand_limit = pool.saturating_mul(2);
+
             // FTS5 BM25 keyword search
-            let keyword_results = Self::fts5_search(&conn, &query, limit * 2).unwrap_or_default();
+            let keyword_results = Self::fts5_search(&conn, &query, cand_limit).unwrap_or_default();
 
             // Vector similarity search (if embeddings available)
             let vector_results = if let Some(ref qe) = query_embedding {
-                Self::vector_search(&conn, qe, limit * 2, None, session_ref).unwrap_or_default()
+                Self::vector_search(&conn, qe, cand_limit, None, session_ref).unwrap_or_default()
             } else {
                 Vec::new()
             };
@@ -712,7 +818,7 @@ impl Memory for SqliteMemory {
                     &keyword_results,
                     vector_weight,
                     keyword_weight,
-                    limit,
+                    pool,
                 )
             };
 
@@ -730,7 +836,7 @@ impl Memory for SqliteMemory {
                 // list is small (≤ 2*limit ids).
                 let sql = format!(
                     "SELECT id, key, content, category, created_at, session_id, \
-                            valid_from, valid_to, supersedes_id \
+                            valid_from, valid_to, supersedes_id, importance \
                      FROM memories \
                      WHERE id IN ({placeholders}) AND valid_to IS NULL"
                 );
@@ -752,17 +858,24 @@ impl Memory for SqliteMemory {
                         row.get::<_, Option<String>>(6)?,
                         row.get::<_, Option<String>>(7)?,
                         row.get::<_, Option<String>>(8)?,
+                        row.get::<_, f64>(9)?,
                     ))
                 })?;
 
                 let mut entry_map = std::collections::HashMap::new();
                 for row in rows {
-                    let (id, key, content, cat, ts, sid, vf, vt, supersedes) = row?;
-                    entry_map.insert(id, (key, content, cat, ts, sid, vf, vt, supersedes));
+                    let (id, key, content, cat, ts, sid, vf, vt, supersedes, importance) = row?;
+                    entry_map.insert(
+                        id,
+                        (key, content, cat, ts, sid, vf, vt, supersedes, importance),
+                    );
                 }
 
+                // Build entries in merge order, carrying each row's stored
+                // importance for the optional re-score below.
+                let mut scored_entries: Vec<(MemoryEntry, f64)> = Vec::new();
                 for scored in &merged {
-                    if let Some((key, content, cat, ts, sid, vf, vt, supersedes)) =
+                    if let Some((key, content, cat, ts, sid, vf, vt, supersedes, importance)) =
                         entry_map.remove(&scored.id)
                     {
                         let entry = MemoryEntry {
@@ -782,9 +895,37 @@ impl Memory for SqliteMemory {
                                 continue;
                             }
                         }
-                        results.push(entry);
+                        scored_entries.push((entry, importance));
                     }
                 }
+
+                if ranking.enabled {
+                    // final = relevance × importance_factor × recency_factor
+                    // (the Generative-Agents retrieval blend). Each factor is
+                    // 1.0 when its knob is off, so the score only moves along
+                    // the dimensions the operator opted into. All-f64 math —
+                    // importance and the weights widen losslessly.
+                    let now_secs = Local::now().timestamp();
+                    let imp_w = f64::from(ranking.importance_weight);
+                    for (entry, importance) in &mut scored_entries {
+                        let relevance = entry.score.unwrap_or(0.0);
+                        let imp_factor = (1.0 - imp_w) + imp_w * *importance;
+                        let rec_factor = recency_factor(
+                            &entry.timestamp,
+                            now_secs,
+                            ranking.recency_half_life_days,
+                        );
+                        entry.score = Some(relevance * imp_factor * rec_factor);
+                    }
+                    scored_entries.sort_by(|a, b| {
+                        b.0.score
+                            .partial_cmp(&a.0.score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    scored_entries.truncate(limit);
+                }
+
+                results = scored_entries.into_iter().map(|(entry, _)| entry).collect();
             }
 
             // If hybrid returned nothing, fall back to LIKE search.
@@ -1193,11 +1334,21 @@ impl Memory for SqliteMemory {
                 "INSERT INTO memories
                     (id, key, content, category, embedding,
                      created_at, updated_at, session_id,
-                     valid_from, valid_to, supersedes_id, ingested_at)
+                     valid_from, valid_to, supersedes_id, ingested_at, importance)
                  VALUES (?1, ?2, ?3, ?4, ?5,
                          ?6, ?6, ?7,
-                         ?6, NULL, ?8, ?6)",
-                params![new_id, key, new_content, cat, embedding_bytes, now, sid, old],
+                         ?6, NULL, ?8, ?6, ?9)",
+                params![
+                    new_id,
+                    key,
+                    new_content,
+                    cat,
+                    embedding_bytes,
+                    now,
+                    sid,
+                    old,
+                    f64::from(seed_importance(&category))
+                ],
             )?;
 
             tx.commit()?;
@@ -1228,7 +1379,7 @@ mod tests {
     // ── db::migrate framework wire-up tests (PR #11 reference pattern) ──
 
     #[tokio::test]
-    async fn new_on_fresh_dir_creates_schema_and_sets_user_version_to_two() {
+    async fn new_on_fresh_dir_creates_schema_and_sets_user_version_to_three() {
         let (_tmp, mem) = temp_sqlite();
 
         // Schema usable end-to-end (store + retrieve).
@@ -1238,12 +1389,13 @@ mod tests {
         let got = mem.get("smoke_test").await.unwrap();
         assert!(got.is_some(), "stored entry must be retrievable");
 
-        // PRAGMA user_version flipped from 0 to 2 (v1 baseline + v2 bi-temporal).
+        // PRAGMA user_version flipped from 0 to 3
+        // (v1 baseline + v2 bi-temporal + v3 importance column).
         let conn = mem.conn.lock();
         let v: i64 = conn
             .query_row("PRAGMA user_version;", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 2, "fresh brain.db must end at user_version = 2");
+        assert_eq!(v, 3, "fresh brain.db must end at user_version = 3");
 
         // session_id column was added by ensure_session_id_column between
         // v1 and v2 (so v2's table-rebuild could project it).
@@ -1291,7 +1443,7 @@ mod tests {
                 .unwrap();
         }
 
-        // Reopen the same workspace — db::migrate sees user_version = 2,
+        // Reopen the same workspace — db::migrate sees user_version = 3,
         // ensure_session_id_column sees the column already there, both
         // no-op. The previously stored entry survives.
         let mem = SqliteMemory::new(tmp.path()).unwrap();
@@ -1306,7 +1458,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version;", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 2, "reopen must leave user_version unchanged");
+        assert_eq!(v, 3, "reopen must leave user_version unchanged");
     }
 
     #[tokio::test]
@@ -1355,15 +1507,15 @@ mod tests {
             assert_eq!(cnt, 3);
         }
 
-        // Re-open via SqliteMemory::new — this applies v2.
+        // Re-open via SqliteMemory::new — this applies v2 then v3.
         let mem = SqliteMemory::new(tmp.path()).unwrap();
         let conn = mem.conn.lock();
 
-        // user_version = 2.
+        // user_version = 3 (v2 bi-temporal + v3 importance).
         let v: i64 = conn
             .query_row("PRAGMA user_version;", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 2);
+        assert_eq!(v, 3);
 
         // All 3 rows survive.
         let cnt: i64 = conn
@@ -2713,5 +2865,150 @@ mod tests {
         mem.reindex().await.unwrap();
 
         assert_eq!(mem.count().await.unwrap(), 1);
+    }
+
+    // ── §A2 Importance + recency ranking ─────────────────────────────
+
+    #[tokio::test]
+    async fn v3_migration_adds_importance_column() {
+        let (_tmp, mem) = temp_sqlite();
+        mem.store("k", "hello world", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+        // Column exists and is non-null (NOT NULL DEFAULT 0.5 backfills).
+        let imp: f64 = mem
+            .conn
+            .lock()
+            .query_row(
+                "SELECT importance FROM memories WHERE key = 'k' AND valid_to IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            (imp - 0.7).abs() < 1e-6,
+            "Core seeds importance 0.7, got {imp}"
+        );
+    }
+
+    #[tokio::test]
+    async fn store_seeds_importance_by_category() {
+        let (_tmp, mem) = temp_sqlite();
+        mem.store("c", "core fact", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+        mem.store("v", "chatter", MemoryCategory::Conversation, None)
+            .await
+            .unwrap();
+        let read = |key: &str| -> f64 {
+            mem.conn
+                .lock()
+                .query_row(
+                    &format!(
+                        "SELECT importance FROM memories WHERE key = '{key}' AND valid_to IS NULL"
+                    ),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert!((read("c") - 0.7).abs() < 1e-6, "Core → 0.7");
+        assert!((read("v") - 0.3).abs() < 1e-6, "Conversation → 0.3");
+    }
+
+    #[tokio::test]
+    async fn ranking_disabled_keeps_pure_relevance_order() {
+        // Default (ranking off): a strong keyword match outranks a high-
+        // importance but weakly-matching memory.
+        let (_tmp, mem) = temp_sqlite();
+        mem.store(
+            "high_rel",
+            "sky sky sky",
+            MemoryCategory::Conversation,
+            None,
+        )
+        .await
+        .unwrap();
+        mem.store("low_rel", "the sky once", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+        let results = mem.recall("sky", 5, None).await.unwrap();
+        assert_eq!(
+            results[0].key, "high_rel",
+            "relevance wins when ranking off"
+        );
+    }
+
+    #[tokio::test]
+    async fn ranking_importance_promotes_on_relevance_tie() {
+        // Identical content → identical relevance; importance breaks the tie.
+        let tmp = TempDir::new().unwrap();
+        let mem = SqliteMemory::new(tmp.path())
+            .unwrap()
+            .with_ranking(true, 1.0, 0.0); // importance-only, recency off
+        mem.store(
+            "fact_conv",
+            "the sky is blue and clear",
+            MemoryCategory::Conversation,
+            None,
+        )
+        .await
+        .unwrap();
+        mem.store(
+            "fact_core",
+            "the sky is blue and clear",
+            MemoryCategory::Core,
+            None,
+        )
+        .await
+        .unwrap();
+        let results = mem.recall("sky", 5, None).await.unwrap();
+        assert_eq!(
+            results[0].key, "fact_core",
+            "higher-importance Core memory ranks first on a relevance tie"
+        );
+    }
+
+    #[tokio::test]
+    async fn ranking_recency_promotes_newer() {
+        // Identical content + category → equal relevance & importance;
+        // recency decay breaks the tie toward the newer memory.
+        let tmp = TempDir::new().unwrap();
+        let mem = SqliteMemory::new(tmp.path())
+            .unwrap()
+            .with_ranking(true, 0.0, 30.0); // recency-only, importance off
+        mem.store("old", "alpha beta gamma", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+        mem.store("new", "alpha beta gamma", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+        // Backdate the "old" row's created_at by 90 days (= 3 half-lives).
+        let old_ts = (chrono::Local::now() - chrono::Duration::days(90)).to_rfc3339();
+        mem.conn
+            .lock()
+            .execute(
+                &format!("UPDATE memories SET created_at = '{old_ts}' WHERE key = 'old'"),
+                [],
+            )
+            .unwrap();
+        let results = mem.recall("alpha", 5, None).await.unwrap();
+        assert_eq!(
+            results[0].key, "new",
+            "newer memory ranks first with recency on"
+        );
+    }
+
+    #[tokio::test]
+    async fn ranking_recency_half_life_zero_is_noop() {
+        // recency_half_life_days = 0 disables decay even with ranking on.
+        let (_tmp, mem) = temp_sqlite();
+        assert!((recency_factor("not-a-timestamp", 0, 0.0) - 1.0).abs() < 1e-9);
+        // Far-past timestamp with decay enabled drops below 1.0.
+        let now = chrono::Local::now().timestamp();
+        let past = (chrono::Local::now() - chrono::Duration::days(30)).to_rfc3339();
+        let f = recency_factor(&past, now, 30.0);
+        assert!(f < 0.6 && f > 0.4, "one half-life ≈ 0.5, got {f}");
+        let _ = mem;
     }
 }
