@@ -23,7 +23,83 @@ pub async fn handle_command(command: crate::MemoryCommands, config: &Config) -> 
         crate::MemoryCommands::Clear { key, category, yes } => {
             handle_clear(config, key, category, yes).await
         }
+        crate::MemoryCommands::Consolidate { apply, limit } => {
+            handle_consolidate(config, apply, limit).await
+        }
     }
+}
+
+async fn handle_consolidate(config: &Config, apply: bool, limit: usize) -> Result<()> {
+    use crate::memory::consolidation::{run_consolidation, ConsolidationOptions, LlmDecider};
+    use crate::providers::{create_resilient_provider_with_options, ProviderRuntimeOptions};
+
+    // Full backend (with embeddings) so neighbour recall uses hybrid search.
+    let memory = super::create_memory(
+        &config.memory,
+        &config.workspace_dir,
+        config.api_key.as_deref(),
+    )?;
+
+    // Build the default provider exactly as the gateway does (correct auth /
+    // reasoning / custom-API-mode handling for whatever provider is configured).
+    let provider = create_resilient_provider_with_options(
+        config.default_provider.as_deref().unwrap_or("openrouter"),
+        config.api_key.as_deref(),
+        config.api_url.as_deref(),
+        &config.reliability,
+        &ProviderRuntimeOptions {
+            auth_profile_override: None,
+            provider_api_url: config.api_url.clone(),
+            plaw_dir: config.config_path.parent().map(std::path::PathBuf::from),
+            secrets_encrypt: config.secrets.encrypt,
+            reasoning_enabled: config.runtime.reasoning_enabled,
+            reasoning_level: config.effective_provider_reasoning_level(),
+            custom_provider_api_mode: config.provider_api.map(|mode| mode.as_compatible_mode()),
+            max_tokens_override: None,
+            model_support_vision: config.model_support_vision,
+        },
+    )?;
+    let model = config
+        .default_model
+        .clone()
+        .unwrap_or_else(|| "anthropic/claude-sonnet-4".into());
+
+    // Low temperature: consolidation decisions should be stable.
+    let decider = LlmDecider::new(provider.as_ref(), model, 0.2);
+    let opts = ConsolidationOptions {
+        apply,
+        limit,
+        ..Default::default()
+    };
+
+    if apply {
+        println!("Consolidating memory (applying merges)…");
+    } else {
+        println!("Consolidating memory (dry-run — pass --apply to mutate)…");
+    }
+
+    let report = run_consolidation(memory.as_ref(), &decider, &opts).await?;
+
+    println!("\nExamined:        {}", report.examined);
+    println!("Merges planned:  {}", report.merges_planned);
+    println!("Merges applied:  {}", report.merges_applied);
+    println!("Rows superseded: {}", report.rows_superseded);
+    if report.errors > 0 {
+        println!(
+            "Decider errors:  {} (check your provider / API key configuration)",
+            report.errors
+        );
+    }
+    if !report.details.is_empty() {
+        println!("\nPlanned merges:");
+        for line in &report.details {
+            println!("  - {line}");
+        }
+    }
+    if !apply && report.merges_planned > 0 {
+        println!("\nRe-run with --apply to perform these merges.");
+    }
+    Ok(())
 }
 
 /// Create a lightweight memory backend for CLI management operations.

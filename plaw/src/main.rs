@@ -869,6 +869,18 @@ enum MemoryCommands {
         #[arg(long)]
         yes: bool,
     },
+    /// Consolidate duplicate / restated memories into canonical entries (LLM-driven).
+    ///
+    /// Reversible: merges only supersede rows (bi-temporal history is kept),
+    /// never hard-delete. Defaults to a dry-run — pass `--apply` to mutate.
+    Consolidate {
+        /// Apply merges. Without this, only reports what would change.
+        #[arg(long)]
+        apply: bool,
+        /// Max candidate (most-recent live) memories to examine.
+        #[arg(long, default_value = "100")]
+        limit: usize,
+    },
 }
 
 #[tokio::main]
