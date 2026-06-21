@@ -8775,6 +8775,19 @@ BTC is currently around $65,000 based on latest tool output."#
             prompt.contains("## Current Date & Time"),
             "missing Date/Time"
         );
+        // Regression lock for #147 (mirror of the agent-path
+        // `datetime_section_stays_day_stable_for_prompt_cache` test): the
+        // channels datetime is part of the cached system prompt, so it must
+        // stay day-stable — a date but NO wall-clock `HH:MM:SS`.
+        let dt_body = prompt
+            .split("## Current Date & Time\n\n")
+            .nth(1)
+            .and_then(|s| s.lines().next())
+            .unwrap_or("");
+        assert!(
+            !regex::Regex::new(r"\d{1,2}:\d{2}:\d{2}").unwrap().is_match(dt_body),
+            "channels datetime must stay day-stable for the prompt cache (no HH:MM:SS); got: {dt_body}"
+        );
         assert!(prompt.contains("## Runtime"), "missing Runtime section");
     }
 

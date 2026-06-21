@@ -608,6 +608,48 @@ mod tests {
         assert!(payload.ends_with(')'));
     }
 
+    /// Regression lock for PR #147. `DateTimeSection` is rendered INSIDE the
+    /// cached Anthropic/Bedrock system block (`should_cache_system`), so any
+    /// sub-day component would invalidate the prompt prefix cache every turn
+    /// (pay the 1.25x cache-write premium, earn zero 0.1x cache reads). The
+    /// body must carry a date but NO wall-clock `HH:MM:SS`, so it can only
+    /// change once per day and the cached prefix stays byte-stable.
+    ///
+    /// Precise wall-clock time still reaches the model — it is prepended to the
+    /// *user* message every turn (see `agent.rs` / `loop_.rs`), a cache-safe
+    /// variable-suffix position after the cached blocks.
+    #[test]
+    fn datetime_section_stays_day_stable_for_prompt_cache() {
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let ctx = PromptContext {
+            workspace_dir: Path::new("/tmp"),
+            model_name: "test-model",
+            tools: &tools,
+            skills: &[],
+            skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
+            identity_config: None,
+            dispatcher_instructions: "instr",
+        };
+        let rendered = DateTimeSection.build(&ctx).unwrap();
+
+        // Carries a date.
+        let date = regex::Regex::new(r"\d{4}-\d{2}-\d{2}").unwrap();
+        assert!(
+            date.is_match(&rendered),
+            "expected a YYYY-MM-DD date, got: {rendered}"
+        );
+
+        // Carries NO wall-clock `HH:MM:SS` — the exact `%H:%M:%S` form #147
+        // removed. (A timezone offset like `+05:30` has only two groups and is
+        // intentionally not matched.)
+        let clock = regex::Regex::new(r"\d{1,2}:\d{2}:\d{2}").unwrap();
+        assert!(
+            !clock.is_match(&rendered),
+            "DateTimeSection must stay day-stable for the prompt cache \
+             (no HH:MM:SS clock time); found one in: {rendered}"
+        );
+    }
+
     #[test]
     fn prompt_builder_inlines_and_escapes_skills() {
         let tools: Vec<Box<dyn Tool>> = vec![];
