@@ -13,8 +13,12 @@
 //! default_model = "openai/gpt-4o"
 //! ```
 
-use crate::providers::traits::{ChatMessage, Provider};
+use super::openai_sse::SseAccumulator;
+use crate::providers::traits::{
+    ChatMessage, ChatRequest as ProviderChatRequest, ChatResponse as ProviderChatResponse, Provider,
+};
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use reqwest::Client;
 use serde::Deserialize;
 
@@ -141,6 +145,10 @@ struct ChatRequest {
     model: String,
     messages: Vec<Message>,
     temperature: f64,
+    /// Set only on the streaming path; omitted otherwise so the non-streaming
+    /// request body is byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -198,6 +206,7 @@ impl Provider for TelnyxProvider {
             model: model.to_string(),
             messages,
             temperature,
+            stream: None,
         };
 
         let response = self
@@ -250,6 +259,7 @@ impl Provider for TelnyxProvider {
             model: model.to_string(),
             messages: api_messages,
             temperature,
+            stream: None,
         };
 
         let response = self
@@ -276,6 +286,70 @@ impl Provider for TelnyxProvider {
             .next()
             .map(|c| c.message.content)
             .ok_or_else(|| anyhow::anyhow!("No response from Telnyx"))
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    /// Streaming chat over Telnyx's OpenAI-compatible SSE endpoint: the same
+    /// request as `chat_with_history` plus `stream: true`, folded through the
+    /// shared [`SseAccumulator`] with text deltas forwarded to `on_token`.
+    /// (Telnyx is a text provider; tool calls come back empty.)
+    async fn chat_streaming(
+        &self,
+        request: ProviderChatRequest<'_>,
+        model: &str,
+        temperature: f64,
+        on_token: Option<&tokio::sync::mpsc::Sender<String>>,
+    ) -> anyhow::Result<ProviderChatResponse> {
+        let api_key = self.api_key.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Telnyx API key not set. Set TELNYX_API_KEY environment variable or run `plaw onboard`."
+            )
+        })?;
+
+        let api_messages: Vec<Message> = request
+            .messages
+            .iter()
+            .map(|m| Message {
+                role: m.role.clone(),
+                content: m.content.clone(),
+            })
+            .collect();
+
+        let chat_request = ChatRequest {
+            model: model.to_string(),
+            messages: api_messages,
+            temperature,
+            stream: Some(true),
+        };
+
+        let response = self
+            .client
+            .post(self.chat_url())
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .json(&chat_request)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error = response.text().await?;
+            let sanitized = super::sanitize_api_error(&error);
+            anyhow::bail!("Telnyx API error ({}): {}", status, sanitized);
+        }
+
+        let mut acc = SseAccumulator::new();
+        let mut bytes_stream = response.bytes_stream();
+        while let Some(item) = bytes_stream.next().await {
+            let bytes = item?;
+            acc.process_chunk(&String::from_utf8_lossy(&bytes), on_token);
+        }
+        acc.finish(on_token);
+        Ok(acc.finalize())
     }
 
     async fn warmup(&self) -> anyhow::Result<()> {
@@ -312,6 +386,32 @@ pub mod models {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_request_serializes_stream_flag() {
+        let mk = |stream| ChatRequest {
+            model: "x".into(),
+            messages: vec![],
+            temperature: 0.0,
+            stream,
+        };
+        assert!(!serde_json::to_string(&mk(None)).unwrap().contains("stream"));
+        assert!(serde_json::to_string(&mk(Some(true)))
+            .unwrap()
+            .contains("\"stream\":true"));
+    }
+
+    #[tokio::test]
+    async fn chat_streaming_requires_credential() {
+        let p = TelnyxProvider::new(None);
+        let messages = vec![ChatMessage::user("hi")];
+        let request = ProviderChatRequest {
+            messages: &messages,
+            tools: None,
+        };
+        let err = p.chat_streaming(request, "x", 0.0, None).await.unwrap_err();
+        assert!(err.to_string().contains("API key not set"), "{err}");
+    }
 
     #[test]
     fn creates_provider_with_key() {
@@ -374,6 +474,7 @@ mod tests {
                 },
             ],
             temperature: 0.7,
+            stream: None,
         };
 
         let json = serde_json::to_string(&req).unwrap();
