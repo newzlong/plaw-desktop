@@ -23,7 +23,10 @@ impl Tool for MemoryRecallTool {
     }
 
     fn description(&self) -> &str {
-        "Search long-term memory for relevant facts, preferences, or context. Returns scored results ranked by relevance."
+        "Recall durable facts, user preferences, and prior decisions from long-term memory (including earlier conversations). \
+         Use this for conceptual or fuzzy recall — \"what do we know about X\", \"what did the user say they prefer\", long-horizon context. \
+         Do NOT use it to find code, symbols, or exact strings in the workspace — use content_search / glob_search for that. \
+         Returns scored results ranked by relevance."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

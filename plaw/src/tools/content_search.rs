@@ -37,7 +37,9 @@ impl Tool for ContentSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search file contents by regex pattern within the workspace. \
+        "Search file contents by regex pattern within the workspace — the primary way to locate code, \
+         symbols, definitions, and exact strings in files. Prefer this and glob_search over memory_recall \
+         for anything in the codebase (agentic search is more reliable than semantic recall for code). \
          Supports ripgrep (rg) with grep fallback. \
          Output modes: 'content' (matching lines with context), \
          'files_with_matches' (file paths only), 'count' (match counts per file). \
