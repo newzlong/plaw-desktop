@@ -1061,6 +1061,9 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         if let Err(e) = crate::cron::consolidation::sync_consolidation_job(&config) {
             tracing::warn!("memory-consolidation job sync failed: {e}");
         }
+        if let Err(e) = crate::cron::consolidation::sync_consolidation_dedup_job(&config) {
+            tracing::warn!("memory-consolidation (dedup) job sync failed: {e}");
+        }
     }
 
     let _scheduler_guard = config.cron.enabled.then(|| {

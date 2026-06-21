@@ -134,7 +134,10 @@ impl Tool for CronAddTool {
                     // so "25 23 * * *" means 23:25 local time, not UTC.
                     if let Schedule::Cron { ref mut tz, .. } = schedule {
                         if tz.is_none() {
-                            *tz = Some(iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string()));
+                            *tz = Some(
+                                iana_time_zone::get_timezone()
+                                    .unwrap_or_else(|_| "UTC".to_string()),
+                            );
                         }
                     }
                     schedule
@@ -193,6 +196,17 @@ impl Tool for CronAddTool {
             .unwrap_or(false);
 
         let result = match job_type {
+            JobType::Consolidation => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(
+                        "Consolidation jobs are managed via [memory].consolidation_dedup_enabled, \
+                         not cron_add."
+                            .to_string(),
+                    ),
+                });
+            }
             JobType::Shell => {
                 let command = match args.get("command").and_then(serde_json::Value::as_str) {
                     Some(command) if !command.trim().is_empty() => command,
@@ -312,7 +326,10 @@ impl Tool for CronAddTool {
                         return Ok(ToolResult {
                             success: false,
                             output: String::new(),
-                            error: Some("Missing 'prompt' for notification job (the text to show the user)".to_string()),
+                            error: Some(
+                                "Missing 'prompt' for notification job (the text to show the user)"
+                                    .to_string(),
+                            ),
                         });
                     }
                 };

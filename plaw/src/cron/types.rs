@@ -9,6 +9,9 @@ pub enum JobType {
     Agent,
     Notification,
     Pipeline,
+    /// Native LLM-driven memory consolidation pass (no prompt/command — the
+    /// scheduler runs `memory::consolidation::run_consolidation_pass`).
+    Consolidation,
 }
 
 impl From<JobType> for &'static str {
@@ -18,6 +21,7 @@ impl From<JobType> for &'static str {
             JobType::Agent => "agent",
             JobType::Notification => "notification",
             JobType::Pipeline => "pipeline",
+            JobType::Consolidation => "consolidation",
         }
     }
 }
@@ -31,8 +35,9 @@ impl TryFrom<&str> for JobType {
             "agent" => Ok(JobType::Agent),
             "notification" => Ok(JobType::Notification),
             "pipeline" => Ok(JobType::Pipeline),
+            "consolidation" => Ok(JobType::Consolidation),
             _ => Err(format!(
-                "Invalid job type '{}'. Expected one of: 'shell', 'agent', 'notification', 'pipeline'",
+                "Invalid job type '{}'. Expected one of: 'shell', 'agent', 'notification', 'pipeline', 'consolidation'",
                 value
             )),
         }
@@ -186,10 +191,26 @@ mod tests {
         assert_eq!(JobType::try_from("SHELL").unwrap(), JobType::Shell);
         assert_eq!(JobType::try_from("agent").unwrap(), JobType::Agent);
         assert_eq!(JobType::try_from("AgEnT").unwrap(), JobType::Agent);
-        assert_eq!(JobType::try_from("notification").unwrap(), JobType::Notification);
-        assert_eq!(JobType::try_from("NOTIFICATION").unwrap(), JobType::Notification);
+        assert_eq!(
+            JobType::try_from("notification").unwrap(),
+            JobType::Notification
+        );
+        assert_eq!(
+            JobType::try_from("NOTIFICATION").unwrap(),
+            JobType::Notification
+        );
         assert_eq!(JobType::try_from("pipeline").unwrap(), JobType::Pipeline);
         assert_eq!(JobType::try_from("PipeLine").unwrap(), JobType::Pipeline);
+        assert_eq!(
+            JobType::try_from("consolidation").unwrap(),
+            JobType::Consolidation
+        );
+        assert_eq!(
+            JobType::try_from("CONSOLIDATION").unwrap(),
+            JobType::Consolidation
+        );
+        let s: &str = JobType::Consolidation.into();
+        assert_eq!(s, "consolidation");
     }
 
     #[test]
