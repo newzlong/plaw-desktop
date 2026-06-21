@@ -3672,11 +3672,15 @@ pub fn build_system_prompt_with_mode(
     }
 
     // ── 6. Date & Time ──────────────────────────────────────────
+    // Date only — NO wall-clock time, to keep the cached system prompt stable
+    // (see DateTimeSection in agent/prompt.rs: a per-second timestamp inside
+    // the Anthropic/Bedrock `cache_control` block invalidates the prefix cache
+    // every turn). The date changes daily; agents needing the time run `date`.
     let now = chrono::Local::now();
     let _ = writeln!(
         prompt,
         "## Current Date & Time\n\n{} ({})\n",
-        now.format("%Y-%m-%d %H:%M:%S"),
+        now.format("%Y-%m-%d"),
         now.format("%Z")
     );
 
