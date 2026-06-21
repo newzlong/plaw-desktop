@@ -622,9 +622,9 @@ impl SqliteMemory {
         Ok(scored)
     }
 
-    /// Safe reindex: rebuild FTS5 + embeddings with rollback on failure
-    #[allow(dead_code)]
-    pub async fn reindex(&self) -> anyhow::Result<usize> {
+    /// Safe reindex: rebuild the FTS5 index and back-fill embeddings for rows
+    /// that lack them. Wrapped by the [`Memory::reindex`] trait method.
+    async fn reindex_inner(&self) -> anyhow::Result<usize> {
         // Step 1: Rebuild FTS5
         {
             let conn = self.conn.clone();
@@ -680,6 +680,10 @@ impl SqliteMemory {
 impl Memory for SqliteMemory {
     fn name(&self) -> &str {
         "sqlite"
+    }
+
+    async fn reindex(&self) -> anyhow::Result<usize> {
+        self.reindex_inner().await
     }
 
     async fn store(
