@@ -401,6 +401,7 @@ fn memory_config_defaults_for_backend(backend: &str) -> MemoryConfig {
         purge_after_days: if profile.uses_sqlite_hygiene { 30 } else { 0 },
         conversation_retention_days: 30,
         consolidation_enabled: false,
+        consolidation_dedup_enabled: false,
         embedding_provider: "none".to_string(),
         embedding_model: "text-embedding-3-small".to_string(),
         embedding_dimensions: 1536,
@@ -892,7 +893,8 @@ fn curated_models_for_provider(provider_name: &str) -> Vec<(String, String)> {
         "deepseek" => vec![
             (
                 "deepseek-v4-pro".to_string(),
-                "DeepSeek V4 Pro (latest flagship, thinking on by default — recommended)".to_string(),
+                "DeepSeek V4 Pro (latest flagship, thinking on by default — recommended)"
+                    .to_string(),
             ),
             (
                 "deepseek-v4-flash".to_string(),
@@ -904,7 +906,8 @@ fn curated_models_for_provider(provider_name: &str) -> Vec<(String, String)> {
             ),
             (
                 "deepseek-reasoner".to_string(),
-                "DeepSeek Reasoner (legacy V3.2 thinking alias — deprecated 2026-07-24)".to_string(),
+                "DeepSeek Reasoner (legacy V3.2 thinking alias — deprecated 2026-07-24)"
+                    .to_string(),
             ),
         ],
         "hunyuan" => vec![
@@ -5218,8 +5221,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 config.lark = Some(LarkConfig {
                     app_id,
                     app_secret: crate::security::Secret::from_wire(app_secret),
-                    verification_token: verification_token
-                        .map(crate::security::Secret::from_wire),
+                    verification_token: verification_token.map(crate::security::Secret::from_wire),
                     encrypt_key: None,
                     allowed_users,
                     mention_only: false,
@@ -5948,10 +5950,8 @@ fn print_summary(config: &Config) {
             );
             println!(
                 "       {}",
-                style(
-                    "or: plaw auth paste-token --provider anthropic --auth-kind authorization"
-                )
-                .yellow()
+                style("or: plaw auth paste-token --provider anthropic --auth-kind authorization")
+                    .yellow()
             );
         } else {
             let env_var = provider_env_var(provider);
@@ -6254,10 +6254,8 @@ mod tests {
         let workspace_dir = workspace_root.join("workspace");
         let expected_config_path = workspace_root.join(".plaw").join("config.toml");
 
-        let _workspace_env = EnvVarGuard::set(
-            "PLAW_WORKSPACE",
-            workspace_dir.to_string_lossy().as_ref(),
-        );
+        let _workspace_env =
+            EnvVarGuard::set("PLAW_WORKSPACE", workspace_dir.to_string_lossy().as_ref());
         let _config_env = EnvVarGuard::unset("PLAW_CONFIG_DIR");
 
         let config = run_quick_setup_with_home(

@@ -7,7 +7,9 @@
 //! and removes it when the flag is cleared.
 
 use crate::config::Config;
-use crate::cron::{add_agent_job, list_jobs, remove_job, CronJob, Schedule, SessionTarget};
+use crate::cron::{
+    add_agent_job, add_consolidation_job, list_jobs, remove_job, CronJob, Schedule, SessionTarget,
+};
 use anyhow::Result;
 
 /// Default cron expression: 3:00 AM daily.
@@ -115,6 +117,53 @@ pub fn sync_consolidation_job(config: &Config) -> Result<()> {
             tracing::info!("Removed nightly memory-consolidation cron job (disabled in config)");
         }
         // Already in the desired state — nothing to do.
+        (true, Some(_)) | (false, None) => {}
+    }
+    Ok(())
+}
+
+// ── Native dedup-consolidation job (JobType::Consolidation) ─────────────────
+
+/// Default schedule for the native dedup pass: 3:30 AM daily — offset from the
+/// summary job's 3:00 AM so the two nightly jobs do not contend on `brain.db`.
+const DEDUP_SCHEDULE_EXPR: &str = "30 3 * * *";
+
+/// Reserved job name for the native memory-consolidation (dedup) job.
+pub const CONSOLIDATION_DEDUP_JOB_NAME: &str = "__consolidate_dedup_nightly";
+
+/// Create the native memory-consolidation (dedup) cron job. Unlike the
+/// prompt-driven summary job above, this is a `JobType::Consolidation` job the
+/// scheduler runs in-process via `memory::consolidation::run_consolidation_pass`.
+pub fn create_consolidation_dedup_job(config: &Config) -> Result<CronJob> {
+    let schedule = Schedule::Cron {
+        expr: DEDUP_SCHEDULE_EXPR.into(),
+        tz: None,
+    };
+    add_consolidation_job(config, Some(CONSOLIDATION_DEDUP_JOB_NAME.into()), schedule)
+}
+
+/// Reconcile the native consolidation (dedup) job with config — identical
+/// install/remove semantics to [`sync_consolidation_job`], gated on
+/// `[memory].consolidation_dedup_enabled` and matched by the reserved
+/// [`CONSOLIDATION_DEDUP_JOB_NAME`].
+pub fn sync_consolidation_dedup_job(config: &Config) -> Result<()> {
+    let existing = list_jobs(config)?
+        .into_iter()
+        .find(|j| j.name.as_deref() == Some(CONSOLIDATION_DEDUP_JOB_NAME));
+
+    match (config.memory.consolidation_dedup_enabled, existing) {
+        (true, None) => {
+            create_consolidation_dedup_job(config)?;
+            tracing::info!(
+                "Installed nightly memory-consolidation (dedup) cron job (schedule: {DEDUP_SCHEDULE_EXPR})"
+            );
+        }
+        (false, Some(job)) => {
+            remove_job(config, &job.id)?;
+            tracing::info!(
+                "Removed nightly memory-consolidation (dedup) cron job (disabled in config)"
+            );
+        }
         (true, Some(_)) | (false, None) => {}
     }
     Ok(())
@@ -255,7 +304,11 @@ mod tests {
 
         config.memory.consolidation_enabled = false;
         sync_consolidation_job(&config).unwrap();
-        assert_eq!(consolidation_count(&config), 0, "clearing the flag removes it");
+        assert_eq!(
+            consolidation_count(&config),
+            0,
+            "clearing the flag removes it"
+        );
     }
 
     #[test]
@@ -284,5 +337,50 @@ mod tests {
             jobs.iter().any(|j| j.command == "echo hi"),
             "the user's own cron job must survive — sync matches by reserved name only"
         );
+    }
+
+    // ── sync_consolidation_dedup_job (native JobType::Consolidation) ─────
+
+    fn dedup_count(config: &Config) -> usize {
+        list_jobs(config)
+            .unwrap()
+            .iter()
+            .filter(|j| j.name.as_deref() == Some(CONSOLIDATION_DEDUP_JOB_NAME))
+            .count()
+    }
+
+    #[test]
+    fn dedup_sync_installs_a_consolidation_job_then_is_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = test_config(&tmp);
+        config.memory.consolidation_dedup_enabled = true;
+
+        sync_consolidation_dedup_job(&config).unwrap();
+        assert_eq!(dedup_count(&config), 1, "first sync installs");
+
+        // End-to-end: the row persisted with job_type 'consolidation' and read
+        // back as JobType::Consolidation (store INSERT + FromSql roundtrip).
+        let job = list_jobs(&config)
+            .unwrap()
+            .into_iter()
+            .find(|j| j.name.as_deref() == Some(CONSOLIDATION_DEDUP_JOB_NAME))
+            .unwrap();
+        assert_eq!(job.job_type, crate::cron::JobType::Consolidation);
+
+        sync_consolidation_dedup_job(&config).unwrap();
+        assert_eq!(dedup_count(&config), 1, "second sync is idempotent");
+    }
+
+    #[test]
+    fn dedup_sync_removes_job_when_disabled() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = test_config(&tmp);
+        config.memory.consolidation_dedup_enabled = true;
+        sync_consolidation_dedup_job(&config).unwrap();
+        assert_eq!(dedup_count(&config), 1);
+
+        config.memory.consolidation_dedup_enabled = false;
+        sync_consolidation_dedup_job(&config).unwrap();
+        assert_eq!(dedup_count(&config), 0, "clearing the flag removes it");
     }
 }

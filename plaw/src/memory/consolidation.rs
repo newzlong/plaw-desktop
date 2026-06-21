@@ -204,6 +204,54 @@ pub async fn run_consolidation(
     Ok(report)
 }
 
+/// Low temperature: consolidation decisions should be stable / reproducible.
+const CONSOLIDATION_TEMPERATURE: f64 = 0.2;
+
+/// One-shot consolidation pass driven by config: build the configured
+/// embedding-enabled memory backend and the default LLM provider, then run
+/// [`run_consolidation`] with an [`LlmDecider`]. Shared by the
+/// `plaw memory consolidate` CLI and the `Consolidation` cron job so the
+/// provider/memory wiring lives in exactly one place.
+pub async fn run_consolidation_pass(
+    config: &crate::config::Config,
+    apply: bool,
+    limit: usize,
+) -> Result<ConsolidationReport> {
+    let memory = crate::memory::create_memory(
+        &config.memory,
+        &config.workspace_dir,
+        config.api_key.as_deref(),
+    )?;
+    let provider = crate::providers::create_resilient_provider_with_options(
+        config.default_provider.as_deref().unwrap_or("openrouter"),
+        config.api_key.as_deref(),
+        config.api_url.as_deref(),
+        &config.reliability,
+        &crate::providers::ProviderRuntimeOptions {
+            auth_profile_override: None,
+            provider_api_url: config.api_url.clone(),
+            plaw_dir: config.config_path.parent().map(std::path::PathBuf::from),
+            secrets_encrypt: config.secrets.encrypt,
+            reasoning_enabled: config.runtime.reasoning_enabled,
+            reasoning_level: config.effective_provider_reasoning_level(),
+            custom_provider_api_mode: config.provider_api.map(|mode| mode.as_compatible_mode()),
+            max_tokens_override: None,
+            model_support_vision: config.model_support_vision,
+        },
+    )?;
+    let model = config
+        .default_model
+        .clone()
+        .unwrap_or_else(|| "anthropic/claude-sonnet-4".into());
+    let decider = LlmDecider::new(provider.as_ref(), model, CONSOLIDATION_TEMPERATURE);
+    let opts = ConsolidationOptions {
+        apply,
+        limit,
+        ..Default::default()
+    };
+    run_consolidation(memory.as_ref(), &decider, &opts).await
+}
+
 // ── LLM decider ─────────────────────────────────────────────────────────────
 
 const DECIDER_SYSTEM: &str = "\

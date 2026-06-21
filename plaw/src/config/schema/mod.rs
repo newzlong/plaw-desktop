@@ -2150,6 +2150,14 @@ pub struct MemoryConfig {
     /// setting it installs the job, clearing it removes the job.
     #[serde(default)]
     pub consolidation_enabled: bool,
+    /// Install the nightly native memory-consolidation (dedup) cron job — an
+    /// in-process LLM pass that merges duplicate / restated facts into a single
+    /// canonical entry (reversible: supersede-only, bi-temporal history kept).
+    /// Requires `[cron].enabled = true`. Reconciled at gateway start like
+    /// `consolidation_enabled`. Equivalent to running `plaw memory consolidate
+    /// --apply` nightly.
+    #[serde(default)]
+    pub consolidation_dedup_enabled: bool,
     /// Embedding provider: "none" | "openai" | "custom:URL"
     #[serde(default = "default_embedding_provider")]
     pub embedding_provider: String,
@@ -2274,6 +2282,7 @@ impl Default for MemoryConfig {
             purge_after_days: default_purge_after_days(),
             conversation_retention_days: default_conversation_retention_days(),
             consolidation_enabled: false,
+            consolidation_dedup_enabled: false,
             embedding_provider: default_embedding_provider(),
             embedding_model: default_embedding_model(),
             embedding_dimensions: default_embedding_dims(),

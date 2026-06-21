@@ -98,6 +98,7 @@ async fn execute_job_with_retry(
             JobType::Agent => run_agent_job(config, security, job).await,
             JobType::Notification => run_notification_job(job),
             JobType::Pipeline => run_pipeline_job(config, security, job).await,
+            JobType::Consolidation => run_consolidation_job(config, security, job).await,
         };
         last_output = output;
 
@@ -318,6 +319,59 @@ fn run_notification_job(job: &CronJob) -> (bool, String) {
     }
 }
 
+/// Max candidate memories examined per scheduled consolidation pass.
+const CONSOLIDATION_JOB_LIMIT: usize = 100;
+
+/// Run a native `JobType::Consolidation` job: an in-process memory dedup pass.
+/// Gated by the security policy like agent jobs (it makes LLM calls and writes
+/// to memory). `apply = true` — scheduled passes always commit; the merges are
+/// reversible (supersede-only, bi-temporal history preserved).
+async fn run_consolidation_job(
+    config: &Config,
+    security: &SecurityPolicy,
+    job: &CronJob,
+) -> (bool, String) {
+    let _ = job;
+    if !security.can_act() {
+        return (
+            false,
+            "blocked by security policy: autonomy is read-only".to_string(),
+        );
+    }
+    if security.is_rate_limited() {
+        return (
+            false,
+            "blocked by security policy: rate limit exceeded".to_string(),
+        );
+    }
+    if !security.record_action() {
+        return (
+            false,
+            "blocked by security policy: action budget exhausted".to_string(),
+        );
+    }
+
+    match crate::memory::consolidation::run_consolidation_pass(
+        config,
+        true,
+        CONSOLIDATION_JOB_LIMIT,
+    )
+    .await
+    {
+        Ok(report) => {
+            let mut msg = format!(
+                "consolidation: examined {}, applied {} merge(s), superseded {} row(s)",
+                report.examined, report.merges_applied, report.rows_superseded
+            );
+            if report.errors > 0 {
+                msg.push_str(&format!(", {} decider error(s)", report.errors));
+            }
+            (true, msg)
+        }
+        Err(e) => (false, format!("consolidation failed: {e}")),
+    }
+}
+
 async fn run_pipeline_job(
     config: &Config,
     security: &SecurityPolicy,
@@ -473,9 +527,12 @@ fn is_one_shot_auto_delete(job: &CronJob) -> bool {
 }
 
 fn warn_if_high_frequency_agent_job(job: &CronJob) {
-    // Agent and pipeline jobs both invoke the model / fan out to sub-agents,
-    // so both are expensive to fire at high frequency.
-    if !matches!(job.job_type, JobType::Agent | JobType::Pipeline) {
+    // Agent, pipeline, and consolidation jobs all invoke the model, so all are
+    // expensive to fire at high frequency.
+    if !matches!(
+        job.job_type,
+        JobType::Agent | JobType::Pipeline | JobType::Consolidation
+    ) {
         return;
     }
     let too_frequent = match &job.schedule {

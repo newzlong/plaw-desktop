@@ -122,6 +122,44 @@ pub fn add_agent_job(
     get_job(config, &id)
 }
 
+/// Insert a native memory-consolidation cron job. It carries no prompt or
+/// command — the scheduler dispatches `JobType::Consolidation` to the
+/// in-process `memory::consolidation::run_consolidation_pass`.
+pub fn add_consolidation_job(
+    config: &Config,
+    name: Option<String>,
+    schedule: Schedule,
+) -> Result<CronJob> {
+    let now = Utc::now();
+    validate_schedule(&schedule, now)?;
+    let next_run = next_run_for_schedule(&schedule, now)?;
+    let id = Uuid::new_v4().to_string();
+    let expression = schedule_cron_expression(&schedule).unwrap_or_default();
+    let schedule_json = serde_json::to_string(&schedule)?;
+
+    with_connection(config, |conn| {
+        conn.execute(
+            "INSERT INTO cron_jobs (
+                id, expression, command, schedule, job_type, prompt, name, session_target, model,
+                enabled, delivery, delete_after_run, created_at, next_run
+             ) VALUES (?1, ?2, '', ?3, 'consolidation', NULL, ?4, 'isolated', NULL, 1, ?5, 0, ?6, ?7)",
+            params![
+                id,
+                expression,
+                schedule_json,
+                name,
+                serde_json::to_string(&DeliveryConfig::default())?,
+                now.to_rfc3339(),
+                next_run.to_rfc3339(),
+            ],
+        )
+        .context("Failed to insert cron consolidation job")?;
+        Ok(())
+    })?;
+
+    get_job(config, &id)
+}
+
 pub fn add_notification_job(
     config: &Config,
     name: Option<String>,
@@ -725,8 +763,7 @@ fn with_connection<T>(config: &Config, f: impl FnOnce(&Connection) -> Result<T>)
     )
     .context("Failed to set cron DB pragmas")?;
 
-    crate::db::migrate(&conn, "cron", CRON_MIGRATIONS)
-        .context("cron schema migration failed")?;
+    crate::db::migrate(&conn, "cron", CRON_MIGRATIONS).context("cron schema migration failed")?;
 
     // Legacy ad-hoc column adds for databases created before some columns
     // existed in v1 baseline. Each is idempotent (checks pragma_table_info
