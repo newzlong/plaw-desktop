@@ -24,6 +24,7 @@ pub mod gemini;
 pub mod ollama;
 pub mod openai;
 pub mod openai_codex;
+mod openai_sse;
 pub mod openrouter;
 pub mod reliable;
 pub mod router;

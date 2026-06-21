@@ -1,3 +1,4 @@
+use super::openai_sse::SseAccumulator;
 use crate::providers::traits::{
     ChatMessage, ChatRequest as ProviderChatRequest, ChatResponse as ProviderChatResponse,
     Provider, ProviderCapabilities, TokenUsage, ToolCall as ProviderToolCall,
@@ -364,183 +365,6 @@ impl OpenAiProvider {
     }
 }
 
-// ── Streaming (OpenAI Chat Completions SSE) ──────────────────────────────
-//
-// Self-contained accumulator for `chat_streaming`. The OpenAI-compatible
-// provider has an equivalent one; these are kept separate because the two
-// providers share no request/response types (rule-of-three not yet met).
-
-#[derive(Debug, Deserialize)]
-struct StreamChunk {
-    #[serde(default)]
-    choices: Vec<StreamChoice>,
-    #[serde(default)]
-    usage: Option<UsageInfo>,
-}
-
-#[derive(Debug, Deserialize)]
-struct StreamChoice {
-    delta: StreamDelta,
-}
-
-#[derive(Debug, Deserialize)]
-struct StreamDelta {
-    #[serde(default)]
-    content: Option<String>,
-    #[serde(default)]
-    reasoning_content: Option<String>,
-    /// Tool calls stream as incremental fragments keyed by `index`; each may
-    /// carry the id (once), the function name (once), and a partial `arguments`
-    /// string. Consumers accumulate across fragments.
-    #[serde(default)]
-    tool_calls: Option<Vec<StreamToolCallDelta>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct StreamToolCallDelta {
-    #[serde(default)]
-    index: u32,
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    function: Option<StreamFunctionDelta>,
-}
-
-#[derive(Debug, Deserialize)]
-struct StreamFunctionDelta {
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    arguments: Option<String>,
-}
-
-#[derive(Debug, Default, Clone)]
-struct ToolCallBuilder {
-    id: String,
-    name: String,
-    arguments: String,
-}
-
-/// Folds an OpenAI Chat Completions SSE byte stream into one
-/// [`ProviderChatResponse`]. `data: {...}` lines are parsed incrementally as
-/// bytes arrive; text deltas are forwarded to `on_token` (`try_send`,
-/// drop-on-full per the `Provider::chat_streaming` contract); tool-call
-/// fragments are reassembled by `index`. `[DONE]` ends the logical stream.
-#[derive(Default)]
-struct StreamAccumulator {
-    buffer: String,
-    text: String,
-    reasoning: String,
-    tool_calls: std::collections::BTreeMap<u32, ToolCallBuilder>,
-    usage: Option<TokenUsage>,
-    done: bool,
-}
-
-impl StreamAccumulator {
-    fn process_chunk(&mut self, text: &str, on_token: Option<&tokio::sync::mpsc::Sender<String>>) {
-        self.buffer.push_str(text);
-        while let Some(pos) = self.buffer.find('\n') {
-            let line = self.buffer[..=pos].to_string();
-            self.buffer = self.buffer[pos + 1..].to_string();
-            self.process_line(&line, on_token);
-        }
-    }
-
-    fn process_line(&mut self, raw: &str, on_token: Option<&tokio::sync::mpsc::Sender<String>>) {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with(':') {
-            return;
-        }
-        let Some(data) = line.strip_prefix("data:") else {
-            return;
-        };
-        let data = data.trim();
-        if data == "[DONE]" {
-            self.done = true;
-            return;
-        }
-        if self.done {
-            return;
-        }
-        let chunk: StreamChunk = match serde_json::from_str(data) {
-            Ok(c) => c,
-            Err(_) => return, // ignore keep-alive / heartbeat lines
-        };
-        if let Some(u) = chunk.usage {
-            self.usage = Some(TokenUsage {
-                input_tokens: u.prompt_tokens,
-                output_tokens: u.completion_tokens,
-                ..Default::default()
-            });
-        }
-        for choice in &chunk.choices {
-            let delta = &choice.delta;
-            if let Some(content) = delta.content.as_deref() {
-                if !content.is_empty() {
-                    self.text.push_str(content);
-                    if let Some(tx) = on_token {
-                        let _ = tx.try_send(content.to_string());
-                    }
-                }
-            }
-            if let Some(reasoning) = delta.reasoning_content.as_deref() {
-                if !reasoning.is_empty() {
-                    self.reasoning.push_str(reasoning);
-                }
-            }
-            if let Some(tcds) = &delta.tool_calls {
-                for tcd in tcds {
-                    let builder = self.tool_calls.entry(tcd.index).or_default();
-                    if let Some(id) = &tcd.id {
-                        if !id.is_empty() {
-                            builder.id = id.clone();
-                        }
-                    }
-                    if let Some(f) = &tcd.function {
-                        if let Some(name) = &f.name {
-                            if !name.is_empty() {
-                                builder.name = name.clone();
-                            }
-                        }
-                        if let Some(args) = &f.arguments {
-                            builder.arguments.push_str(args);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn finalize(self) -> ProviderChatResponse {
-        let text = if self.text.is_empty() {
-            None
-        } else {
-            Some(self.text)
-        };
-        let reasoning_content = if self.reasoning.is_empty() {
-            None
-        } else {
-            Some(self.reasoning)
-        };
-        let tool_calls = self
-            .tool_calls
-            .into_values()
-            .filter(|b| !b.name.is_empty())
-            .map(|b| ProviderToolCall {
-                id: b.id,
-                name: b.name,
-                arguments: b.arguments,
-            })
-            .collect();
-        ProviderChatResponse {
-            text,
-            tool_calls,
-            usage: self.usage,
-            reasoning_content,
-        }
-    }
-}
-
 #[async_trait]
 impl Provider for OpenAiProvider {
     async fn chat_with_system(
@@ -668,10 +492,10 @@ impl Provider for OpenAiProvider {
     }
 
     /// Streaming variant of [`Self::chat`]: identical request, plus
-    /// `stream: true` and an SSE response folded by [`StreamAccumulator`].
-    /// Text deltas are forwarded to `on_token` as they arrive; the returned
-    /// [`ProviderChatResponse`] carries the full text, reasoning, tool calls,
-    /// and usage.
+    /// `stream: true` and an SSE response folded by the shared
+    /// [`SseAccumulator`]. Text deltas are forwarded to `on_token` as they
+    /// arrive; the returned [`ProviderChatResponse`] carries the full text,
+    /// reasoning, tool calls, and usage.
     async fn chat_streaming(
         &self,
         request: ProviderChatRequest<'_>,
@@ -707,7 +531,7 @@ impl Provider for OpenAiProvider {
             return Err(super::api_error("OpenAI", response).await);
         }
 
-        let mut acc = StreamAccumulator::default();
+        let mut acc = SseAccumulator::new();
         let mut bytes_stream = response.bytes_stream();
         while let Some(item) = bytes_stream.next().await {
             let bytes = item?;
@@ -716,12 +540,7 @@ impl Provider for OpenAiProvider {
             let text = String::from_utf8_lossy(&bytes);
             acc.process_chunk(&text, on_token);
         }
-        // Flush a trailing line that lacks a terminating newline (some servers
-        // omit `\n` after the final `data: [DONE]`).
-        if !acc.buffer.trim().is_empty() {
-            let line = std::mem::take(&mut acc.buffer);
-            acc.process_line(&line, on_token);
-        }
+        acc.finish(on_token);
         Ok(acc.finalize())
     }
 
@@ -804,10 +623,6 @@ impl Provider for OpenAiProvider {
 mod tests {
     use super::*;
 
-    fn sse(value: serde_json::Value) -> String {
-        format!("data: {value}\n")
-    }
-
     #[test]
     fn native_chat_request_stream_flag_serialization() {
         let mk = |stream| NativeChatRequest {
@@ -829,67 +644,6 @@ mod tests {
             on.contains("\"stream\":true"),
             "streaming body must set stream: {on}"
         );
-    }
-
-    #[test]
-    fn stream_accumulator_folds_content_and_forwards_tokens() {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
-        let mut acc = StreamAccumulator::default();
-        acc.process_chunk(
-            &sse(serde_json::json!({"choices":[{"delta":{"content":"Hel"}}]})),
-            Some(&tx),
-        );
-        acc.process_chunk(
-            &sse(serde_json::json!({"choices":[{"delta":{"content":"lo"}}]})),
-            Some(&tx),
-        );
-        // Lines after [DONE] are ignored.
-        acc.process_chunk("data: [DONE]\n", Some(&tx));
-        acc.process_chunk(
-            &sse(serde_json::json!({"choices":[{"delta":{"content":"!"}}]})),
-            Some(&tx),
-        );
-
-        let resp = acc.finalize();
-        assert_eq!(resp.text.as_deref(), Some("Hello"));
-        assert_eq!(rx.try_recv().unwrap(), "Hel");
-        assert_eq!(rx.try_recv().unwrap(), "lo");
-        assert!(rx.try_recv().is_err(), "no token forwarded after [DONE]");
-    }
-
-    #[test]
-    fn stream_accumulator_reassembles_tool_call_fragments() {
-        let mut acc = StreamAccumulator::default();
-        acc.process_chunk(
-            &sse(serde_json::json!({"choices":[{"delta":{"tool_calls":[
-                {"index":0,"id":"call_1","function":{"name":"shell"}}]}}]})),
-            None,
-        );
-        acc.process_chunk(
-            &sse(serde_json::json!({"choices":[{"delta":{"tool_calls":[
-                {"index":0,"function":{"arguments":"{\"cmd\":"}}]}}]})),
-            None,
-        );
-        acc.process_chunk(
-            &sse(serde_json::json!({"choices":[{"delta":{"tool_calls":[
-                {"index":0,"function":{"arguments":"\"date\"}"}}]}}]})),
-            None,
-        );
-
-        let resp = acc.finalize();
-        assert_eq!(resp.tool_calls.len(), 1);
-        assert_eq!(resp.tool_calls[0].id, "call_1");
-        assert_eq!(resp.tool_calls[0].name, "shell");
-        assert_eq!(resp.tool_calls[0].arguments, r#"{"cmd":"date"}"#);
-    }
-
-    #[test]
-    fn stream_accumulator_buffers_partial_lines_across_chunks() {
-        // A `data:` line split across two TCP chunks must parse once whole.
-        let mut acc = StreamAccumulator::default();
-        acc.process_chunk("data: {\"choices\":[{\"delta\":{\"content\":\"par", None);
-        acc.process_chunk("tial\"}}]}\n", None);
-        assert_eq!(acc.finalize().text.as_deref(), Some("partial"));
     }
 
     #[tokio::test]
