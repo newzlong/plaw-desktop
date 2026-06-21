@@ -186,7 +186,19 @@ pub fn create_embedding_provider(
             let key = api_key.unwrap_or("");
             Box::new(OpenAiEmbedding::new(base_url, key, model, dims))
         }
-        _ => Box::new(NoopEmbedding),
+        // "none" / "" intentionally disable embeddings (keyword-only memory).
+        "none" | "" => Box::new(NoopEmbedding),
+        // Anything else is almost certainly a misconfiguration (typo or an
+        // unsupported provider name). Silently degrading to keyword-only memory
+        // hides the mistake — warn loudly so the user knows their embedding
+        // config is being ignored.
+        other => {
+            tracing::warn!(
+                "unknown embedding provider '{other}' — falling back to keyword-only memory \
+                 (no embeddings). Supported: none, openai, openrouter, custom:<url>"
+            );
+            Box::new(NoopEmbedding)
+        }
     }
 }
 
