@@ -204,7 +204,18 @@ impl AnthropicProvider {
         }
     }
 
-    /// Cache system prompts larger than ~1024 tokens (3KB of text)
+    /// Attach `cache_control` to the system prompt when it is plausibly worth
+    /// caching. The 3072-byte gate is a cheap heuristic (~768–1024 tokens).
+    ///
+    /// NOTE: the byte length is NOT the real cacheability threshold — the
+    /// minimum cacheable prefix is model-specific (1024 tokens for Sonnet, up
+    /// to 4096 for some Opus/Haiku versions). Below a model's real minimum the
+    /// API simply IGNORES `cache_control` (no caching, normal pricing — there
+    /// is NO wrong charge), so this gate can only ever cost a *missed* cache on
+    /// a borderline-small prompt, never a penalty. Real system prompts (with
+    /// tool docs) sit far above any minimum. To confirm caching is actually
+    /// happening on a given model, check `cache_read_input_tokens > 0` on
+    /// turn 2+ — never trust the byte gate alone.
     fn should_cache_system(text: &str) -> bool {
         text.len() > 3072
     }
