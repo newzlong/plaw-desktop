@@ -400,6 +400,7 @@ fn memory_config_defaults_for_backend(backend: &str) -> MemoryConfig {
         archive_after_days: if profile.uses_sqlite_hygiene { 7 } else { 0 },
         purge_after_days: if profile.uses_sqlite_hygiene { 30 } else { 0 },
         conversation_retention_days: 30,
+        consolidation_enabled: false,
         embedding_provider: "none".to_string(),
         embedding_model: "text-embedding-3-small".to_string(),
         embedding_dimensions: 1536,
